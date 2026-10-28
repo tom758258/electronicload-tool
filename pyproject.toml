@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "electronicload-tool"
+version = "0.1.0"
+description = "Vendor-neutral Python tooling for electronic loads."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+    "pyvisa>=1.14",
+]
+
+[project.optional-dependencies]
+dev = [
+    "build",
+    "pytest>=8",
+    "ruff",
+]
+
+[project.scripts]
+electronicload-tool = "electronicload_tool_cli.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = [
+    "electronicload_tool_core",
+    "electronicload_tool_core.*",
+    "electronicload_tool_cli",
+    "electronicload_tool_cli.*",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--basetemp=.tmp_tests/pytest"
+cache_dir = ".tmp_tests/pytest-cache"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+cache-dir = ".tmp_tests/ruff-cache"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
