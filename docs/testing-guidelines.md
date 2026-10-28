@@ -6,9 +6,11 @@ describe focused verification within those boundaries.
 ## Scope
 
 Protect public behavior, component boundaries, and safety requirements at their
-owning layer. The current permanent tests cover CLI help, version information,
-and rejection of unsupported arguments. Do not add tests for unimplemented
-instrument, Worker, or WebUI behavior.
+owning layer. Permanent tests cover CLI help/version, read-only Core policy,
+identity, query parsing, session cleanup, and CLI output/exit integration.
+Default tests replace VISA with a recording fake; an autouse fixture blocks
+accidental creation of a real resource manager. Do not add tests for
+unimplemented input switching, Worker, or WebUI behavior.
 
 Avoid tests tied to private helpers, source text, exact help prose, or document
 formatting. Packaging and installation are checked with actual build artifacts;
@@ -21,12 +23,26 @@ Run pytest from the repository root, starting with the affected tests:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_foundation.py
-.\.venv\Scripts\python.exe -m ruff check src tests/test_foundation.py
+.\.venv\Scripts\python.exe -m pytest -q tests/test_readonly_core.py tests/test_readonly_cli.py
+.\.venv\Scripts\python.exe -m ruff check src tests
+.\scripts\preflight-cli.ps1
 ```
 
 Default tests require no hardware and must not discover or open physical VISA
 resources. Put intentional verification artifacts under `.tmp_tests/`; it is
 ignored by Git. `Local/` is reserved for private notes, not test output.
+
+Preflight exercises offline CLI modes, JSON, and basic refusal behavior; it does
+not repeat pytest. Check `live-cli-check.ps1 -PlanOnly` and noninteractive refusal
+without hardware. Use only an explicitly fictional USB resource for offline
+script verification, and never reuse it for real validation. Real runs follow
+the authorization, interaction, runtime-review, and deadline requirements in
+the [README](../README.md#controlled-instrument-validation).
+
+Changing the parser warrants the existing help/version tests. Read-only changes
+do not by themselves require wheel/release acceptance or tests in other Tool
+repositories. Fake VISA, simulator, dry-run, and plan reports are not evidence
+of instrument support or permission to execute LIVE.
 
 ## Packaging checks
 
