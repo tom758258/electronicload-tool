@@ -80,11 +80,12 @@ For an authorized identification diagnostic:
 ```
 
 Identification sends only `*IDN?`. It checks the full manufacturer and model
-fields before accepting the identity. The documented manufacturer token
-`ITECH Ltd` and model token `IT8812C` are matched without case sensitivity;
-other spellings and models are rejected. Detected text, canonical model token,
-and stable model ID remain distinct. CLI results omit raw IDN and serial
-numbers. Identification success does not open other LIVE commands.
+fields before accepting the identity. The two supported manufacturer tokens
+`ITECH Ltd` and `ITECH Ltd.` and model token `IT8812C` are matched without
+case sensitivity; other spellings and models are rejected. Detected text,
+canonical model token, and stable model ID remain distinct. CLI results omit
+raw IDN and serial numbers. Identification success does not open other LIVE
+commands.
 
 ### Results and exits
 

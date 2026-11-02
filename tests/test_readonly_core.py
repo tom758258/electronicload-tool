@@ -24,6 +24,7 @@ def test_identity_keeps_detected_and_canonical_fields_separate():
 @pytest.mark.parametrize("reply", [
     "", "ITECH Ltd,IT8812C,S", "ITECH Ltd,IT8812C,,1.0",
     "Other,IT8812C,S,1.0", "ITECH Ltd extra,IT8812C,S,1.0",
+    "ITECH Ltd..,IT8812C,S,1.0", "ITECH Ltd. extra,IT8812C,S,1.0",
     "ITECH Ltd,IT8812C-extra,S,1.0", "ITECH Ltd,IT8812,S,1.0",
 ])
 def test_identity_refusal_stops_queries_and_closes(fake_visa, reply):
@@ -33,6 +34,25 @@ def test_identity_refusal_stops_queries_and_closes(fake_visa, reply):
     assert exc.value.exit_code == 2
     assert [c for c in fake_visa.calls if isinstance(c, str) and c.endswith("?")] == ["*IDN?"]
     assert fake_visa.calls[-2:] == ["session_close", "manager_close"]
+
+
+@pytest.mark.parametrize("command,queries", [
+    ("identify", ["*IDN?"]),
+    ("input-state", ["*IDN?", "INP:STAT?"]),
+    ("measure", ["*IDN?", "MEAS:VOLT?", "MEAS:CURR?", "MEAS:POW?"]),
+])
+def test_observed_itech_manufacturer_spelling_allows_exact_readonly_scope(
+    fake_visa, command, queries
+):
+    # Observed manufacturer punctuation; no real serial or VISA resource is stored.
+    fake_visa.responses["*IDN?"] = "ITECH Ltd., IT8812C, SYNTHETIC, 1.35-1.41"
+    output = execute(command, resource=RESOURCE, validation=command != "identify")
+    assert [c for c in fake_visa.calls if isinstance(c, str) and c.endswith("?")] == queries
+    assert fake_visa.calls[-2:] == ["session_close", "manager_close"]
+    assert "SYNTHETIC" not in str(output)
+    if command == "identify":
+        assert output["manufacturer"] == "ITECH Ltd."
+        assert output["model"] == "IT8812C"
 
 
 @pytest.mark.parametrize("kwargs,code", [
