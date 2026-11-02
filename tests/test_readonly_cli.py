@@ -69,3 +69,26 @@ def test_text_units_and_error_channel(capsys):
     assert main(["measure"]) == 2
     output = capsys.readouterr()
     assert output.out == "" and "missing_resource" in output.err
+
+
+def test_measure_dry_run_lists_fetch_query(capsys):
+    assert main(["measure", "--dry-run", "--json"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["result"]["queries"] == [
+        "*IDN?", "MEAS:VOLT?", "MEAS:CURR?", "FETC:POW?",
+    ]
+
+
+def test_power_query_failure_is_cli_error(fake_visa, capsys):
+    fake_visa.responses["FETC:POW?"] = TimeoutError("PRIVATE-RESOURCE")
+    assert main(["measure", "--resource", RESOURCE,
+                 "--validation-allow-pending-live-support", "--json"]) == 3
+    output = capsys.readouterr()
+    result = json.loads(output.out)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "query_failed"
+    assert "PRIVATE-RESOURCE" not in output.out
+    assert output.err == ""
+    assert fake_visa.calls.count("FETC:POW?") == 1
+    assert "MEAS:POW?" not in fake_visa.calls
+    assert fake_visa.calls[-2:] == ["session_close", "manager_close"]

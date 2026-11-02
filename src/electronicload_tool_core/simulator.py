@@ -8,5 +8,5 @@ class Simulator:
             "INP:STAT?": "1",
             "MEAS:VOLT?": "12.0",
             "MEAS:CURR?": "0.5",
-            "MEAS:POW?": "6.0",
+            "FETC:POW?": "6.0",
         }[command]

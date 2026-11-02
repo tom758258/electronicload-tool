@@ -39,7 +39,7 @@ def test_identity_refusal_stops_queries_and_closes(fake_visa, reply):
 @pytest.mark.parametrize("command,queries", [
     ("identify", ["*IDN?"]),
     ("input-state", ["*IDN?", "INP:STAT?"]),
-    ("measure", ["*IDN?", "MEAS:VOLT?", "MEAS:CURR?", "MEAS:POW?"]),
+    ("measure", ["*IDN?", "MEAS:VOLT?", "MEAS:CURR?", "FETC:POW?"]),
 ])
 def test_observed_itech_manufacturer_spelling_allows_exact_readonly_scope(
     fake_visa, command, queries
@@ -75,7 +75,7 @@ def test_rejected_scope_never_creates_a_manager(kwargs, code):
 @pytest.mark.parametrize("command,queries,result", [
     ("identify", ["*IDN?"], {"model": "IT8812C"}),
     ("input-state", ["*IDN?", "INP:STAT?"], {"input_state": "ON"}),
-    ("measure", ["*IDN?", "MEAS:VOLT?", "MEAS:CURR?", "MEAS:POW?"],
+    ("measure", ["*IDN?", "MEAS:VOLT?", "MEAS:CURR?", "FETC:POW?"],
      {"voltage_v": 12.0, "current_a": 0.5, "power_w": 6.0}),
 ])
 def test_exact_readonly_sequence_and_cleanup(fake_visa, command, queries, result):
@@ -103,14 +103,18 @@ def test_input_state_never_defaults_to_off(fake_visa, reply, state):
     assert fake_visa.calls[-2:] == ["session_close", "manager_close"]
 
 
+@pytest.mark.parametrize("query", ["MEAS:CURR?", "FETC:POW?"])
 @pytest.mark.parametrize("reply", ["", "not-a-number", "NaN", "inf", "1e999", "1_2", TimeoutError()])
-def test_partial_measurement_is_failure_without_retry(fake_visa, reply):
-    fake_visa.responses["MEAS:CURR?"] = reply
+def test_partial_measurement_is_failure_without_retry(fake_visa, query, reply):
+    fake_visa.responses[query] = reply
     with pytest.raises(LoadError) as exc:
         execute("measure", resource=RESOURCE, validation=True)
     assert exc.value.exit_code == 3
-    assert fake_visa.calls.count("MEAS:CURR?") == 1
+    assert fake_visa.calls.count(query) == 1
+    if query == "MEAS:CURR?":
+        assert "FETC:POW?" not in fake_visa.calls
     assert "MEAS:POW?" not in fake_visa.calls
+    assert "MEAS:POW:DC?" not in fake_visa.calls
     assert fake_visa.calls[-2:] == ["session_close", "manager_close"]
 
 

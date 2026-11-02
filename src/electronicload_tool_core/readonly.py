@@ -11,7 +11,8 @@ from .visa import TERMINATION, TIMEOUT_MS, open_session, validate_connection
 QUERIES = {
     "identify": ("*IDN?",),
     "input-state": ("*IDN?", "INP:STAT?"),
-    "measure": ("*IDN?", "MEAS:VOLT?", "MEAS:CURR?", "MEAS:POW?"),
+    # FETCh returns the latest available power result; it may not be a fresh sample.
+    "measure": ("*IDN?", "MEAS:VOLT?", "MEAS:CURR?", "FETC:POW?"),
 }
 COMMANDS = tuple(QUERIES)
 

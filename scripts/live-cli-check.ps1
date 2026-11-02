@@ -124,7 +124,11 @@ try {
     [void][IO.Directory]::CreateDirectory($reportDirectory)
     Write-Host 'Plan: identify, input-state, measure; USB System VISA; 5000 ms I/O timeout; LF.'
     Write-Host 'Queries only. No input changes, reset, error-queue reads, local switch, or retries.'
-    Write-Host 'Closing a session does not turn input OFF. V/I/P are separate measurements.'
+    Write-Host 'Closing a session does not turn input OFF.'
+    Write-Host 'V/I use MEASure; power FETCh reads a latest available value, not guaranteed fresh.'
+    Write-Host 'Nonzero-load updates, accuracy, and V/I/P synchronization are not guaranteed.'
+    $measurementPlan = $report.plans | Where-Object { $_.command -eq 'measure' } | Select-Object -First 1
+    Write-Host "Measurement queries: $($measurementPlan.result.queries -join ', ')"
     if ($PlanOnly) {
         $report.status = 'PLAN ONLY'
         Save-Report

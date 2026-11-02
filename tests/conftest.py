@@ -21,7 +21,7 @@ def fake_visa(monkeypatch, no_hardware):
     responses = {
         "*IDN?": "ITECH Ltd,IT8812C,PRIVATE-SERIAL,1.2",
         "INP:STAT?": "1",
-        "MEAS:VOLT?": "12.0", "MEAS:CURR?": "0.5", "MEAS:POW?": "6.0",
+        "MEAS:VOLT?": "12.0", "MEAS:CURR?": "0.5", "FETC:POW?": "6.0",
     }
 
     def event(name):
