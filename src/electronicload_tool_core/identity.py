@@ -6,6 +6,8 @@ from .errors import LoadError
 
 MODEL_ID = "itech-it8812c"
 MODEL_TOKEN = "IT8812C"
+# Only the manual spelling and verified IT8812C spelling are registered.
+MANUFACTURER_TOKENS = frozenset({"itech ltd", "itech ltd."})
 
 
 @dataclass(frozen=True)
@@ -32,7 +34,10 @@ def parse_identity(raw: str) -> Identity:
     if len(fields) != 4 or not all(fields):
         raise LoadError("invalid_identity", "Identification requires four nonempty fields.")
     manufacturer, model, serial, firmware = fields
-    # Manufacturer spelling comes from the IT8800 Programming Guide IDN example.
-    if manufacturer.casefold() != "itech ltd" or model.upper() != MODEL_TOKEN:
+    # Preserve the exact IT8800 guide and IT8812C device spellings.
+    if (
+        manufacturer.casefold() not in MANUFACTURER_TOKENS
+        or model.upper() != MODEL_TOKEN
+    ):
         raise LoadError("identity_mismatch", "Detected identity does not match the IT8812C profile.")
     return Identity(manufacturer, model, serial, firmware, raw)
