@@ -1,12 +1,13 @@
 """Fixed-CC and deliberate input switching for the single verified IT8812C profile.
 
-No hidden recovery, retry, automatic input OFF or VISA connection selection.
+No hidden write retry, automatic input OFF or VISA connection selection.
 """
 
 from decimal import Decimal, InvalidOperation
 import math
 import re
 from threading import Event
+from time import monotonic, sleep
 
 from .errors import LoadError, communication_error
 from .identity import MODEL_ID, parse_identity
@@ -20,6 +21,8 @@ CONTROL_COMMANDS = ("set-cc", "input-on", "input-off")
 PRODUCT_LIVE_COMMANDS = frozenset()
 RANGE_LIMITS = {"low": 6.0, "high": 60.0}
 RANGE_RESOLUTION = {"low": Decimal("0.0001"), "high": Decimal("0.001")}
+INPUT_STATE_CONFIRM_TIMEOUT_S = 2.0
+INPUT_STATE_POLL_INTERVAL_S = 0.1
 NUMBER = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[Ee][+-]?[0-9]+)?\Z")
 
 
@@ -85,6 +88,23 @@ def _flag(session, query: str) -> str:
 def _input_off(session) -> None:
     if _flag(session, "INP:STAT?") != "OFF":
         raise LoadError("input_not_off", "Input must be confirmed OFF before configuration.")
+
+
+def _confirm_input_state(session, expected: str) -> bool:
+    """Observe a write's state transition without sending the write again.
+
+    Keep the 2-second polling budget separate from the existing VISA timeout
+    for an individual query, which can itself take up to 5 seconds.
+    """
+    deadline = monotonic() + INPUT_STATE_CONFIRM_TIMEOUT_S
+    while True:
+        observed = _flag(session, "INP:STAT?")
+        now = monotonic()
+        if observed == expected:
+            return now <= deadline
+        if now >= deadline:
+            return False
+        sleep(min(INPUT_STATE_POLL_INTERVAL_S, deadline - now))
 
 
 def _range_name(value: float) -> str:
@@ -202,26 +222,26 @@ def _perform(session, command: str, *, current: object | None,
         settings = _check_input_on_conditions(session, limits, stop)
         try:
             _write(session, "INP ON")
-            actual = _flag(session, "INP:STAT?")
+            confirmed_on = _confirm_input_state(session, "ON")
         except LoadError as exc:
             exc.details.update(input_state="UNKNOWN", input_on_attempted=True)
             raise
-        if actual != "ON":
+        if not confirmed_on:
             raise LoadError("input_on_not_confirmed", "Input ON was not confirmed.", 3,
-                            input_state=actual, input_on_attempted=True)
+                            input_state="UNKNOWN", input_on_attempted=True)
         return {"input_state": "ON", **settings}
     # The explicit OFF operation must also enter remote mode to be effective,
     # and never assumes VISA close or remote/local release switches Input OFF.
     try:
         _write(session, "SYST:REM")
         _write(session, "INP OFF")
-        actual = _flag(session, "INP:STAT?")
+        confirmed_off = _confirm_input_state(session, "OFF")
     except LoadError as exc:
         exc.details["input_state"] = "UNKNOWN"
         raise
-    if actual != "OFF":
+    if not confirmed_off:
         raise LoadError("input_off_not_confirmed", "Input OFF was not confirmed.", 3,
-                        input_state=actual)
+                        input_state="UNKNOWN")
     return {"input_state": "OFF"}
 
 

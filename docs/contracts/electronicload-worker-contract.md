@@ -100,9 +100,17 @@ Readback failures stop without rollback, Input OFF or automatic retries.
 LIVE `input-on` checks all physical safety prerequisites **before and after**
 `SYST:REM`, including the Worker stop gate, before `INP ON` is permitted.
 `input-off` is an independent explicitly requested operation; it sends
-`SYST:REM` followed by `INP OFF` and verifies physical OFF. The initial
-read-only commands never switch remote mode. Closing the session never
-means Input OFF or local mode. Neither `SYST:RWL` nor `SYST:LOC` is sent.
+`SYST:REM` followed by `INP OFF` and verifies physical OFF. After exactly
+one `INP ON` or `INP OFF` write, Core polls only `INP:STAT?` for at most
+2 seconds (approximately 100 ms between reads) to confirm the target state;
+there is no repeat write. The existing per-query VISA timeout remains
+unchanged and can make an in-flight query exceed the polling budget.
+A query error, invalid reply or expired confirmation budget fails closed
+with an unconfirmed `input_state: UNKNOWN`, never an assumed ON/OFF. An
+unsuccessful `input-on` does not implicitly send OFF. Worker Stop remains
+separate from instrument I/O. The initial read-only commands never switch
+remote mode. Closing the session never means Input OFF or local mode.
+Neither `SYST:RWL` nor `SYST:LOC` is sent.
 
 As of this implementation, only existing read-only IT8812C USB/System VISA
 commands are Product LIVE-open. New control commands remain LIVE pending

@@ -24,11 +24,19 @@ class Fake:
         self.write_fail = None
         self.remote = False
         self.scpi_error = '0,"No error"'
+        self.input_transition_reads = 0
+        self.pending_input = None
 
     def query(self, command):
         self.calls.append(command)
         if command in self.response_errors:
             raise self.response_errors[command]
+        if command == 'INP:STAT?' and self.pending_input is not None:
+            if self.input_transition_reads:
+                self.input_transition_reads -= 1
+            else:
+                self.input = self.pending_input
+                self.pending_input = None
         result = {'*IDN?': 'ITECH Ltd,IT8812C,SYNTHETIC,1.0',
                   'INP:STAT?': str(int(self.input)), 'FUNC:MODE?': self.mode,
                   'FUNC?': self.function, 'CURR:RANG?': str(self.range),
@@ -64,10 +72,12 @@ class Fake:
                 self.scpi_error = '120,"Parameter overflowed"'
             else:
                 self.current = value
-        if command == 'INP ON':
-            self.input=True
-        if command == 'INP OFF':
-            self.input=False
+        if command in ('INP ON', 'INP OFF'):
+            value = command == 'INP ON'
+            if self.input_transition_reads:
+                self.pending_input = value
+            else:
+                self.input = value
 
 
 def session(fake, monkeypatch):
@@ -200,6 +210,77 @@ def test_input_off_no_safety_and_verified(monkeypatch):
     session(fake,monkeypatch)
     assert live('input-off')['input_state']=='OFF'
     assert fake.calls==['*IDN?','SYST:REM','INP OFF','INP:STAT?']
+
+
+def fake_time(monkeypatch):
+    elapsed = [0.0]
+    sleeps = []
+    monkeypatch.setattr(control, 'monotonic', lambda: elapsed[0])
+
+    def advance(seconds):
+        sleeps.append(seconds)
+        elapsed[0] += seconds
+
+    monkeypatch.setattr(control, 'sleep', advance)
+    return elapsed, sleeps
+
+
+@pytest.mark.parametrize('command,initial,expected', [
+    ('input-on', False, 'ON'), ('input-off', True, 'OFF'),
+])
+def test_delayed_input_confirmation_does_not_repeat_write(monkeypatch, command, initial, expected):
+    fake = Fake()
+    fake.input = initial
+    fake.range = 6
+    fake.current = 0.1
+    fake.input_transition_reads = 3
+    clock, sleeps = fake_time(monkeypatch)
+    session(fake, monkeypatch)
+
+    kw = {'limits': SafetyLimits(0.5), 'confirmed': True} if command == 'input-on' else {}
+    assert live(command, **kw)['input_state'] == expected
+    assert fake.calls.count('INP ON' if command == 'input-on' else 'INP OFF') == 1
+    assert fake.pending_input is None
+    assert len(sleeps) == 3
+    assert clock[0] == pytest.approx(0.3)
+
+
+@pytest.mark.parametrize('command,initial,error_code', [
+    ('input-on', False, 'input_on_not_confirmed'),
+    ('input-off', True, 'input_off_not_confirmed'),
+])
+def test_input_confirmation_timeout_fails_closed(monkeypatch, command, initial, error_code):
+    fake = Fake()
+    fake.input = initial
+    fake.range = 6
+    fake.current = 0.1
+    fake.input_transition_reads = 1000
+    clock, sleeps = fake_time(monkeypatch)
+    session(fake, monkeypatch)
+
+    kw = {'limits': SafetyLimits(0.5), 'confirmed': True} if command == 'input-on' else {}
+    with pytest.raises(LoadError) as err:
+        live(command, **kw)
+    assert err.value.code == error_code
+    assert err.value.details['input_state'] == 'UNKNOWN'
+    if command == 'input-on':
+        assert err.value.details['input_on_attempted'] is True
+    assert fake.calls.count('INP ON' if command == 'input-on' else 'INP OFF') == 1
+    assert fake.calls.count('INP OFF') == (1 if command == 'input-off' else 0)
+    assert clock[0] == pytest.approx(control.INPUT_STATE_CONFIRM_TIMEOUT_S)
+    assert sleeps and max(sleeps) <= control.INPUT_STATE_POLL_INTERVAL_S
+
+
+def test_input_off_query_failure_does_not_assume_off(monkeypatch):
+    fake = Fake()
+    fake.input = True
+    fake.response_errors['INP:STAT?'] = TimeoutError('PRIVATE-RESOURCE')
+    session(fake, monkeypatch)
+    with pytest.raises(LoadError) as err:
+        live('input-off')
+    assert err.value.code == 'query_failed'
+    assert err.value.details['input_state'] == 'UNKNOWN'
+    assert fake.calls.count('INP OFF') == 1
 
 
 def test_input_on_write_timeout_is_unknown(monkeypatch):
