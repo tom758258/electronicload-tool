@@ -23,6 +23,7 @@ class Fake:
         self.response_errors = {}
         self.write_fail = None
         self.remote = False
+        self.scpi_error = '0,"No error"'
 
     def query(self, command):
         self.calls.append(command)
@@ -32,8 +33,12 @@ class Fake:
                   'INP:STAT?': str(int(self.input)), 'FUNC:MODE?': self.mode,
                   'FUNC?': self.function, 'CURR:RANG?': str(self.range),
                   'CURR?': str(self.current), 'TRAN?': str(int(self.transient)),
-                  'INP:SHOR:STAT?': str(int(self.short))}
-        return result[command]
+                  'INP:SHOR:STAT?': str(int(self.short)),
+                  'SYST:ERR?': self.scpi_error}
+        value = result[command]
+        if command == 'SYST:ERR?':
+            self.scpi_error = '0,"No error"'
+        return value
 
     def write(self, command):
         self.calls.append(command)
@@ -48,13 +53,17 @@ class Fake:
             self.mode='FIX'
         if command == 'FUNC CURR':
             self.function='CURR'
-        if command == 'CURR:RANG MIN':
-            self.range=0.0
-            self.current=min(self.current,6)
-        if command == 'CURR:RANG MAX':
-            self.range=60.0
+        if command.startswith('CURR:RANG '):
+            selector = command.split(' ', 1)[1]
+            self.range = (0.0 if selector == 'MIN' else 60.0 if selector == 'MAX'
+                          else float(selector))
+            self.current = min(self.current, self.range)
         if command.startswith('CURR '):
-            self.current=float(command.split(' ')[1])
+            value = float(command.split(' ')[1])
+            if value > self.range:
+                self.scpi_error = '120,"Parameter overflowed"'
+            else:
+                self.current = value
         if command == 'INP ON':
             self.input=True
         if command == 'INP OFF':
@@ -79,7 +88,7 @@ def test_four_off_checks_and_four_readbacks(monkeypatch):
     assert result['range']=='low' and result['current_a']==1.5
     assert fake.calls==['*IDN?','INP:STAT?','SYST:REM',
                         'INP:STAT?','FUNC:MODE FIX',
-                        'INP:STAT?','FUNC CURR','INP:STAT?','CURR:RANG MIN',
+                        'INP:STAT?','FUNC CURR','INP:STAT?','CURR:RANG 1.5',
                         'INP:STAT?','CURR 1.5','FUNC:MODE?','FUNC?','CURR:RANG?','CURR?',
                         'INP:STAT?']
     assert not fake.input
@@ -88,7 +97,7 @@ def test_four_off_checks_and_four_readbacks(monkeypatch):
 def test_setting_failure_does_not_rollback_or_off(monkeypatch):
     fake=Fake()
     session(fake,monkeypatch)
-    fake.write_fail='CURR:RANG MIN'
+    fake.write_fail='CURR:RANG 1.5'
     with pytest.raises(LoadError) as err:
         live('set-cc',limits=SafetyLimits(2),current=1.5,range_name='low')
     assert err.value.code=='write_failed'
@@ -225,7 +234,7 @@ def test_remote_required_for_local_hardware_cc(monkeypatch):
     fake.calls.clear()
     result = live('set-cc', limits=SafetyLimits(0.5), current=0.1, range_name='low')
     assert result['range'] == 'low'
-    assert result['range_readback_a'] == 0.0
+    assert result['range_readback_a'] == 0.1
     assert result['current_a'] == 0.1
     assert fake.calls.count('SYST:REM') == 1
     assert fake.remote is True
@@ -347,3 +356,33 @@ def test_offline_control_never_requires_or_opens_remote_hardware(monkeypatch):
     ] is False
     assert control.execute('set-cc', mode='simulate', current=0.1,
                            range_name='low')['current_a'] == 0.1
+
+
+def test_numeric_low_range_fix_reproduces_real_error_120_and_recovers(monkeypatch):
+    fake = Fake()
+    fake.write('SYST:REM')
+    fake.write('CURR:RANG MIN')
+    fake.write('CURR 0.1')
+    assert fake.current == 0.0
+    assert fake.query('SYST:ERR?') == '120,"Parameter overflowed"'
+
+    # The bounded numeric range selector was separately verified on IT8812C.
+    fake.calls.clear()
+    session(fake, monkeypatch)
+    result = live('set-cc', limits=SafetyLimits(0.5), current=0.1, range_name='low')
+    assert result['input_state'] == 'OFF'
+    assert result['range_readback_a'] == 0.1
+    assert result['current_a'] == 0.1
+    assert 'CURR:RANG 0.1' in fake.calls
+    assert 'CURR:RANG MIN' not in fake.calls
+    assert 'INP ON' not in fake.calls
+
+
+def test_high_range_still_uses_existing_max_command(monkeypatch):
+    fake = Fake()
+    session(fake, monkeypatch)
+    result = live('set-cc', limits=SafetyLimits(2), current=1.5, range_name='high')
+    assert result['range'] == 'high'
+    assert result['range_readback_a'] == 60.0
+    assert result['current_a'] == 1.5
+    assert 'CURR:RANG MAX' in fake.calls

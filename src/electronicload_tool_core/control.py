@@ -158,9 +158,14 @@ def _perform(session, command: str, *, current: object | None,
             raise LoadError("missing_safety_config", "CC requires a safety config.")
         requested = validate_current(current, range_name, limits)
         completed = []
+        # IT8812C hardware rejects nonzero CURR after CURR:RANG MIN
+        # (error 120). A numeric selector equal to the requested low-range
+        # setpoint was verified on physical hardware with Input OFF.
+        # Leave the high-range MAX path unchanged; it is not yet LIVE-tested.
+        range_command = (f"CURR:RANG {requested:f}" if range_name == "low"
+                         else "CURR:RANG MAX")
         sequence = (("FUNC:MODE FIX", "fixed_mode"), ("FUNC CURR", "cc_mode"),
-                    (f"CURR:RANG {'MIN' if range_name == 'low' else 'MAX'}", "range"),
-                    (f"CURR {requested:f}", "current"))
+                    (range_command, "range"), (f"CURR {requested:f}", "current"))
         try:
             # Remote is a control-state change: never send it for a read-only
             # operation or before a fresh physical Input OFF confirmation.

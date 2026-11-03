@@ -83,6 +83,12 @@ OFF confirmation. Four setting readbacks and a final Input OFF query must
 all succeed before reporting success. The instrument is not switched back
 to local automatically (`SYST:LOC` is not sent).
 
+For low-range `set-cc`, Core sends `CURR:RANG <requested current>` before
+`CURR <requested current>`. It does not use `CURR:RANG MIN`: on IT8812C,
+that selector can leave the effective range at zero and cause a nonzero
+current command to be rejected. The high-range path remains `CURR:RANG MAX`.
+Both paths require verified setpoint and range readback and physical Input OFF.
+
 `CURR:RANG?` returns a numeric range-selection value rather than a required
 6/60 ceiling. IT8812C selects its highest-resolution low range for selector
 values 0 through 6 A, and high range for greater than 6 through 60 A.

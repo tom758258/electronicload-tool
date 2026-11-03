@@ -49,10 +49,24 @@ class ControlSimulator:
         elif command == "FUNC CURR":
             self.function = "CURR"
         elif command.startswith("CURR:RANG "):
-            self.range_a = 0.0 if command.endswith("MIN") else 60.0
-            self.current_a = min(self.current_a, 6.0 if command.endswith("MIN") else 60.0)
+            selector = command.split(" ", 1)[1]
+            if selector == "MIN":
+                self.range_a = 0.0
+            elif selector == "MAX":
+                self.range_a = 60.0
+            else:
+                requested = float(selector)
+                if not 0 <= requested <= 60:
+                    raise ValueError("Invalid simulated range selector")
+                self.range_a = requested
+            self.current_a = min(self.current_a, self.range_a)
         elif command.startswith("CURR "):
-            self.current_a = float(command.split(" ", 1)[1])
+            value = float(command.split(" ", 1)[1])
+            if value > self.range_a:
+                # The physical IT8812C returned error 120, rather than
+                # applying CURR 0.1 after CURR:RANG MIN (readback=0).
+                raise ValueError("Parameter overflowed")
+            self.current_a = value
         elif command in {"INP ON", "INP OFF"}:
             self.input_on = command.endswith("ON")
         else:
