@@ -1,4 +1,4 @@
-"""D11 CLI discovery adapter shape and errors; no real VISA access."""
+"""VISA discovery CLI arguments, output, and errors; no real VISA access."""
 
 import json
 

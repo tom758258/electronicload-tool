@@ -1,4 +1,4 @@
-"""D11 discovery scope, errors and cleanup; fake VISA only."""
+"""VISA resource discovery scope, error handling, and cleanup; fake VISA only."""
 
 from contextlib import contextmanager
 from types import SimpleNamespace
