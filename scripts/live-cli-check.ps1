@@ -99,7 +99,7 @@ function Save-Report {
         "Overall: $($public.overall_status)"
         "Preflight: $($public.prechecks.preflight)"
         "Identify: $($public.prechecks.identify)"
-        "VISA runtime: $($public.prechecks.runtime) (not operator-verified)"
+        "VISA runtime: $($public.prechecks.runtime)"
         "[1/2] Input State: $($state.status)"
         "[2/2] Measurement (V/I/P): $($measurement.status)"
         "Cases: $($counts.passed) PASS, $($counts.failed) FAIL, $($counts.skipped) SKIP, $($counts.not_run) NOT RUN"
