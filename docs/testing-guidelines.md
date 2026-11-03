@@ -24,6 +24,7 @@ Run pytest from the repository root, starting with the affected tests:
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_foundation.py
 .\.venv\Scripts\python.exe -m pytest -q tests/test_readonly_core.py tests/test_readonly_cli.py
+.\.venv\Scripts\python.exe -m pytest -q tests/test_discovery.py tests/test_discovery_cli.py
 .\.venv\Scripts\python.exe -m ruff check src tests
 .\scripts\preflight-cli.ps1
 ```
@@ -33,9 +34,10 @@ resources. Put intentional verification artifacts under `.tmp_tests/`; it is
 ignored by Git. `Local/` is reserved for private notes, not test output.
 
 Preflight exercises offline CLI modes, JSON, and basic refusal behavior; it does
-not repeat pytest. Check `live-cli-check.ps1 -PlanOnly` and noninteractive refusal
-without hardware. Use only an explicitly fictional USB resource for offline
-script verification, and never reuse it for real validation. Real runs follow
+not repeat pytest or run VISA discovery. Discovery tests use an injected fake
+VISA manager and must never call real `list-resources`. Check
+`live-cli-check.ps1 -PlanOnly` and noninteractive refusal without hardware.
+Use only an explicitly fictional USB resource for offline script verification, and never reuse it for real validation. Real runs follow
 the authorization, interaction, runtime-review, and deadline requirements in
 the [README](../README.md#controlled-instrument-validation).
 

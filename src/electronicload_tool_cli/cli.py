@@ -1,10 +1,11 @@
-"""Command-line adapter for Core read-only operations."""
+"""Command-line adapter for Core read-only operations and VISA discovery."""
 
 import argparse
 import json
 import sys
 from importlib.metadata import version
 
+from electronicload_tool_core.discovery import discover_resources
 from electronicload_tool_core.errors import LoadError
 from electronicload_tool_core.identity import MODEL_ID
 from electronicload_tool_core.readonly import COMMANDS, execute
@@ -31,10 +32,11 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     json_output = "--json" in argv
     mode = "dry-run" if "--dry-run" in argv else "simulate" if "--simulate" in argv else "live"
-    command = argv[0] if argv and argv[0] in COMMANDS else None
+    command_names = (*COMMANDS, "list-resources")
+    command = argv[0] if argv and argv[0] in command_names else None
     parser = _Parser(
         prog="electronicload-tool",
-        description="Electronic Load Tool. Read-only queries, plans, and simulation.",
+        description="Electronic Load Tool. Read-only queries, plans, simulation, and VISA discovery.",
         allow_abbrev=False,
     )
     parser.json_errors = json_output
@@ -44,9 +46,13 @@ def main(argv: list[str] | None = None) -> int:
         version=f"%(prog)s {version('electronicload-tool')}",
     )
     subparsers = parser.add_subparsers(dest="command")
-    for name in COMMANDS:
+    for name in command_names:
         sub = subparsers.add_parser(name, allow_abbrev=False)
         sub.json_errors = json_output
+        if name == "list-resources":
+            sub.add_argument("--live-only", action="store_true", help="Probe USB INSTR via *IDN?.")
+            sub.add_argument("--json", action="store_true", help="Emit one JSON result or error.")
+            continue
         modes = sub.add_mutually_exclusive_group()
         modes.add_argument("--dry-run", action="store_true", help="Print a plan without hardware I/O.")
         modes.add_argument("--simulate", action="store_true", help="Use deterministic simulated data.")
@@ -64,19 +70,30 @@ def main(argv: list[str] | None = None) -> int:
         if args.command is None:
             parser.print_help()
             return 0
-        result = execute(
-            args.command, mode=mode, resource=args.resource, backend=args.backend,
-            model_id=args.model, validation=args.validation_allow_pending_live_support,
-        )
+        if args.command == "list-resources":
+            result = discover_resources(live_only=args.live_only)
+        else:
+            result = execute(
+                args.command, mode=mode, resource=args.resource, backend=args.backend,
+                model_id=args.model, validation=args.validation_allow_pending_live_support,
+            )
     except LoadError as exc:
         return _emit_error(exc, command, mode, json_output)
     except KeyboardInterrupt:
         return _emit_error(LoadError("interrupted", "Request interrupted.", 3), command, mode, json_output)
     if args.json:
-        print(json.dumps({
-            "ok": True, "command": args.command, "mode": mode,
-            "model_id": args.model, "result": result,
-        }, allow_nan=False))
+        payload = {"ok": True, "command": args.command, "mode": mode, "result": result}
+        if args.command != "list-resources":
+            payload["model_id"] = args.model
+        print(json.dumps(payload, allow_nan=False))
+    elif args.command == "list-resources":
+        print("Live resources:" if result["live_only"] else "Resources:")
+        if not result["resources"]:
+            print("  No live resources found" if result["live_only"] else "  <none>")
+        for item in result["resources"]:
+            print(f"  {item['resource']}")
+            if "idn" in item:
+                print(f"    IDN: {item['idn']}")
     else:
         print(f"{args.command} ({mode})")
         if args.command == "measure" and mode != "dry-run":
