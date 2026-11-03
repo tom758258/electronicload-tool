@@ -9,8 +9,9 @@ Protect public behavior, component boundaries, and safety requirements at their
 owning layer. Permanent tests cover CLI help/version, read-only Core policy,
 identity, query parsing, session cleanup, and CLI output/exit integration.
 Default tests replace VISA with a recording fake; an autouse fixture blocks
-accidental creation of a real resource manager. Do not add tests for
-unimplemented input switching, Worker, or WebUI behavior.
+accidental creation of a real resource manager. Add focused tests for implemented
+fixed-CC/Input switching and Common v3 Worker behavior. Do not add tests for
+unimplemented WebUI or unsupported modes.
 
 Avoid tests tied to private helpers, source text, exact help prose, or document
 formatting. Packaging and installation are checked with actual build artifacts;
@@ -45,6 +46,34 @@ Changing the parser warrants the existing help/version tests. Read-only changes
 do not by themselves require wheel/release acceptance or tests in other Tool
 repositories. Fake VISA, simulator, dry-run, and plan reports are not evidence
 of instrument support or permission to execute LIVE.
+
+## Fixed-CC/Input/Worker focused checks
+
+Scope these tests to the new Core, CLI and Worker behavior and the directly
+affected CLI parser/help/version and read-only CLI contracts:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q tests/test_control_core.py tests/test_safety.py tests/test_control_cli.py tests/test_worker.py tests/test_foundation.py tests/test_readonly_cli.py
+.\.venv\Scripts\python.exe -m ruff check src/electronicload_tool_core/control.py src/electronicload_tool_core/safety.py src/electronicload_tool_core/simulator.py src/electronicload_tool_cli/cli.py src/electronicload_tool_cli/worker.py src/electronicload_tool_cli/worker_client.py tests/test_control_core.py tests/test_safety.py tests/test_control_cli.py tests/test_worker.py
+.\scripts\preflight-cli.ps1
+```
+
+Worker integration uses a real local simulated subprocess, HTTP and JSONL, but
+never physical hardware. Test `live-control-check.ps1 -PlanOnly` and unattended
+LIVE refusal with a **fictional** USB resource and disposable Safety Config.
+These no-hardware checks must never issue SCPI. The prior
+`live-cli-check.ps1` remains read-only.
+
+Run controlled `live-control-check.ps1` write stages only with separately
+approved model/Resource, bounded DUT setup and explicit operator authorization.
+The `cc` stage must leave Input OFF; the `input` stage requires deliberate
+input-on and explicit OFF verification with an operator contingency. Failing
+LIVE validation does not automatically promote Product support.
+
+Because `tomli` is a new conditional runtime dependency for Python 3.10,
+also run the **focused packaging checks** above. These are not a full
+release-acceptance run. Report unavailable PowerShell, Ruff, runtime-dependency
+installation or real hardware as BLOCKED / NOT RUN, not PASS.
 
 ## Packaging checks
 

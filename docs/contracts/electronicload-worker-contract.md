@@ -1,0 +1,87 @@
+# Electronic Load Worker Contract
+
+This document defines IT8812C-specific behavior under the existing
+[Common Worker Protocol](common-worker-protocol.md) and
+[Common CLI JSON / JSONL Contract](common-cli-jsonl-contract.md).
+Common contracts remain authoritative for the HTTP and JSONL envelopes.
+
+## Versions and lifecycle
+
+- Manifest schema **2**, Worker protocol **3** (`v3-only`).
+- `tool_id: "electronicload"`; `execution.model: "multi_job"`,
+  `execution.context_binding: "per_command"`.
+- `common.async_jobs` contract version 1, for all six domain commands.
+  Cancellation and streaming are not adopted.
+- `electronicload-tool manifest --json` is static: no VISA, filesystem artifacts,
+  instrument discovery, or Worker startup.
+- Start the Worker using `electronicload-tool worker --mode simulate|live`.
+  `--control-port 0` selects an OS-assigned local port; the `ready` event
+  reports the chosen numeric-loopback control URLs.
+- HTTP endpoints: `GET /status`, `POST /command`, `POST /stop`. Bind only to
+  `127.0.0.1`. Do not use proxies or redirects in managed clients.
+- `GET /status` observes in-memory state only; it never opens or queries VISA.
+- A valid request is accepted as a single async job with HTTP **202**,
+  `kind: "async_job"`, and `worker_job_id`. One job can be active at a time;
+  another command receives HTTP **409 Busy**. No waiting queue exists.
+- An accepted job emits one `job_finished` terminal with `state`, `ok`, `result`,
+  `error`, fixed terminal time and job identity. `GET /status.last_job` retains
+  the latest matching terminal; `active_job` tracks the current operation.
+  Accepted **does not** mean succeeded. A Worker may continue after a failed job.
+- The Worker keeps results in memory and emits JSONL to stdout. It creates no
+  `request.json`, `result.json`, event log, artifact directory, or job history.
+  Human diagnostics go to stderr.
+- Stop acknowledges without performing VISA I/O in the HTTP handler, rejects
+  further submissions, and prevents a not-yet-sent `INP ON`. Blocking VISA I/O
+  already in progress is not forcibly interrupted. Worker Stop **does not**
+  imply Input OFF or authorize sending an automatic OFF.
+- Normal shutdown emits `summary` and terminates stdout (EOF) with an observed
+  process exit. A stop acknowledgement is not shutdown confirmation.
+
+## Commands and context
+
+| Command | Arguments | Result |
+| --- | --- | --- |
+| `identify` | `{}` | Physical/simulated identity |
+| `input-state` | `{}` | `input_state` |
+| `measure` | `{}` | `voltage_v`, `current_a`, `power_w` |
+| `set-cc` | `{"current": <number>, "range": "low"\|"high"}` | Four confirmed CC settings, physical input stays OFF |
+| `input-on` | `{"confirm_input_on": true}` | Confirmed `input_state: "ON"` or failure/UNKNOWN |
+| `input-off` | `{}` | Confirmed `input_state: "OFF"` or failure/UNKNOWN |
+
+`POST /command` uses exactly the Common v3 top-level fields:
+`schema_version: 3`, `command`, optional `arguments`/`job_id`, and required
+`context`. The Worker rejects unknown fields, invalid JSON primitive types,
+wrong schema tokens, malformed context and unsupported arguments before it
+creates a job or performs device I/O. `job_id` is for correlation, not deduplication.
+
+A live request uses `context: {"mode": "live"}` with optional matching
+`expected_model_id`. Simulation/dry-run uses the canonical
+`planning_model_id: "itech-it8812c"`; the Worker startup mode constrains the
+request mode. Worker does **not** allow the contributor-validation override.
+
+## Safety
+
+LIVE `set-cc` and `input-on` require an explicit valid TOML Safety Config,
+loaded once when the live Worker starts. The file contains only
+`[safety] max_current` in amperes, independent of the instrument's maximum.
+Changes to the file require a Worker restart. Standalone CLI reads its Safety
+Config on each invocation.
+
+LIVE Input ON has two gates: the Worker starts with `--allow-input-on`, and the
+single `input-on` request carries `confirm_input_on: true`. Neither gate
+replaces Core's physical checks. Before ON, Core requires physical input OFF,
+CC+FIX, valid current/range within the safety limit, Transient OFF and Short
+OFF. It does not compare against any previous `set-cc` command. An existing ON
+is rejected. Readback failure following an ON attempt returns UNKNOWN, not
+success, and does not trigger automatic OFF.
+
+`set-cc` performs `FUNC:MODE FIX`, `FUNC CURR`, range and current writes, each
+immediately preceded by a fresh `INP:STAT?` OFF confirmation, followed by
+four setting readbacks. Failed write/readback stops with no rollback or OFF.
+`input-off` is an independent explicit operation, with physical OFF verification.
+
+As of this implementation, only existing read-only IT8812C USB/System VISA
+commands are Product LIVE-open. New control commands remain LIVE pending
+until separately approved, bounded hardware evidence and support-policy
+acceptance. The hidden contributor-validation CLI option is not available
+in the Worker. Dry-run/simulation do not certify real hardware behavior.

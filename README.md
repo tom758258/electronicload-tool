@@ -1,15 +1,16 @@
 # Electronic Load Tool
 
-Electronic Load Tool provides read-only identification, input-state queries,
-and separate voltage/current measurements plus retrieval of the latest available
-power result through Core and CLI.
-The registered profile is ITECH IT8812C (`itech-it8812c`).
+Electronic Load Tool provides read-only identification and measurements,
+plus fixed-CC configuration and deliberate Input ON/OFF through a shared Core,
+Standalone CLI and bundled Common v3 Worker. The initial registered model is
+ITECH IT8812C (`itech-it8812c`).
 
-All three commands support hardware-free plans and deterministic simulation.
-Product LIVE supports `identify`, `input-state`, and `measure` only for the
-exact IT8812C identity over an explicit USB INSTR resource with System VISA
-(target runtime: Keysight IO Libraries Suite). Load configuration and input
-switching are not provided.
+Product LIVE currently supports `identify`, `input-state`, and `measure`
+only for the exact IT8812C identity through an operator-supplied USB INSTR
+resource and System VISA (target: Keysight IO Libraries Suite). Newly added
+`set-cc`, `input-on` and `input-off` control require separately approved
+real-instrument validation before Product LIVE scope is opened. No
+dry-run/simulation result grants LIVE control permission.
 
 ## Development environment
 
@@ -182,7 +183,65 @@ input OFF. A failed query never proves OFF or produces a substitute zero value.
 
 Core owns profiles, identity, support policy, queries, parsing, VISA lifetime,
 and simulation. CLI handles arguments and presentation. Core must not import
-CLI. WebUI and Worker are not included.
+CLI. WebUI is not implemented. The bundled Worker is part of the CLI package and uses the same Core.
+
+## Fixed CC, Input and Common v3 Worker
+
+Fixed CC uses a complete `set-cc` request with amperes and an explicit
+`low` (0–6 A) or `high` (0–60 A) range. CC configuration requires physical
+Input OFF before **every** write; it never turns the input on. The four mode,
+range and current settings are read back before success.
+
+Create a local Safety Config, for example:
+
+```toml
+[safety]
+max_current = 2.0
+```
+
+A valid Safety Config is mandatory for LIVE `set-cc` and `input-on`.
+The allowed maximum is the smaller of the model/range rating and the
+operator's `max_current`. The CLI reloads this file per invocation; a Worker
+loads it once at startup. The standalone LIVE Input ON command additionally
+requires `--confirm`, and the live Worker additionally requires the
+startup `--allow-input-on` and per-request `confirm_input_on: true`.
+Core checks the current **physical** fixed CC, current/range, Transient/Short
+OFF and Input OFF state, not remembered setpoints. An ON readback failure is
+UNKNOWN; it is never claimed to be OFF or retried automatically.
+
+```powershell
+.\.venv\Scripts\electronicload-tool.exe set-cc --simulate --current 1.5 --range low --json
+.\.venv\Scripts\electronicload-tool.exe input-on --simulate --confirm --json
+.\.venv\Scripts\electronicload-tool.exe input-off --simulate --json
+.\.venv\Scripts\electronicload-tool.exe manifest --json
+.\.venv\Scripts\electronicload-tool.exe worker --mode simulate --control-port 0
+```
+
+A Worker prints Common v3 JSONL on stdout and offers local `GET /status`,
+`POST /command`, and `POST /stop` on numeric loopback only. The Worker
+runs one async job at a time, reports completion via `job_finished` and
+`last_job`, and does not create request/result artifact files or a job
+history. Stop does **not** imply Input OFF. For domain argument shapes and
+permissions, see [Electronic Load Worker Contract](docs/contracts/electronicload-worker-contract.md).
+
+### Controlled write validation
+
+The existing `scripts/live-cli-check.ps1` remains **read-only**. The
+separate `scripts/live-control-check.ps1` provides operator-approved stages.
+First review the hardware-free plan:
+
+```powershell
+.\scripts\live-control-check.ps1 -Target itech-it8812c -Resource '<USB_RESOURCE>' -SafetyConfig '.\limits.toml' -Current 0.1 -Range low -Stage cc -PlanOnly
+```
+
+The LIVE `cc` stage requires the independent safety setup approval and
+`-ConfirmWrites`; it verifies Input OFF and leaves it OFF. The LIVE
+`input` stage additionally requires `-EnableInputOn`, interactive operator
+confirmation, a bounded DUT/source and an explicit Input OFF contingency.
+Scripts never guess a resource and refuse noninteractive LIVE runs. The
+control script uses a hidden contributor-validation path to verify pending
+control features **without** opening the public Product LIVE scope.
+See [Testing Guidelines](docs/testing-guidelines.md) and [AGENTS.md](AGENTS.md).
 
 ## Checks and builds
 
