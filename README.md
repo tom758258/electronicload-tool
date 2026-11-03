@@ -6,10 +6,10 @@ power result through Core and CLI.
 The registered profile is ITECH IT8812C (`itech-it8812c`).
 
 All three commands support hardware-free plans and deterministic simulation.
-Normal LIVE access permits only restricted identification diagnostics on an
-explicit USB INSTR resource through System VISA. Product LIVE input-state and
-measurement access is closed. Load configuration and input switching are not
-provided.
+Product LIVE supports `identify`, `input-state`, and `measure` only for the
+exact IT8812C identity over an explicit USB INSTR resource with System VISA
+(target runtime: Keysight IO Libraries Suite). Load configuration and input
+switching are not provided.
 
 ## Development environment
 
@@ -69,10 +69,9 @@ and version separately from `--json`.
 
 `--dry-run` and `--simulate` are mutually exclusive. There is no `--live` flag
 and no implicit simulation. For example, `measure` alone fails because the
-resource is missing; `measure --resource "<USB_RESOURCE>"` requests LIVE and is
-rejected by Product support policy. Replace placeholders with your own explicit
-resource only for an authorized operation. Resources are never discovered,
-guessed, or read from environment defaults.
+resource is missing. Read-only LIVE requests require an explicit USB INSTR
+resource and exact IT8812C identity. Replace placeholders only for authorized
+use. Resources are never discovered, guessed, or read from environment defaults.
 
 For an authorized identification diagnostic:
 
@@ -85,8 +84,8 @@ fields before accepting the identity. The two supported manufacturer tokens
 `ITECH Ltd` and `ITECH Ltd.` and model token `IT8812C` are matched without
 case sensitivity; other spellings and models are rejected. Detected text,
 canonical model token, and stable model ID remain distinct. CLI results omit
-raw IDN and serial numbers. Identification success does not open other LIVE
-commands.
+raw IDN and serial numbers. The same identity check precedes all LIVE
+input-state and measurement queries.
 
 ### Results and exits
 
@@ -96,10 +95,17 @@ Successful simulation of `measure --simulate --json` returns:
 {"ok":true,"command":"measure","mode":"simulate","model_id":"itech-it8812c","result":{"voltage_v":12.0,"current_a":0.5,"power_w":6.0}}
 ```
 
-A refused LIVE measurement returns:
+A LIVE request without a resource is refused:
 
 ```json
-{"ok":false,"command":"measure","mode":"live","error":{"code":"unsupported_live_scope","message":"Product LIVE is not open for this command."}}
+{"ok":false,"command":"measure","mode":"live","error":{"code":"missing_resource","message":"LIVE requests require an explicit --resource."}}
+```
+
+For authorized read-only LIVE use:
+
+```powershell
+.\.venv\Scripts\electronicload-tool.exe input-state --resource '<USB_RESOURCE>' --backend system --json
+.\.venv\Scripts\electronicload-tool.exe measure --resource '<USB_RESOURCE>' --backend system --json
 ```
 
 Modes are `live`, `dry-run`, and `simulate`. `identify` results contain
@@ -197,10 +203,10 @@ operator prompt itself is not interrupted, but an expired budget blocks further
 queries. Process deadline termination leaves session closure unconfirmed; it
 sends no input-off command. Individual VISA operations retain their 5000 ms timeout.
 
-`--validation-allow-pending-live-support` selects Core's validation policy for
-this workflow. It relaxes only the Product-open gate; it cannot bypass profile,
-identity, USB, backend, or query restrictions. It is not hardware authorization.
-Validation success does not change Product support policy.
+The read-only validation script exercises the normal Product LIVE commands;
+no pending-support override is needed. The legacy validation option remains
+available for compatibility but cannot bypass identity, USB, or backend checks.
+Validation does not authorize instrument use or expand Product LIVE scope.
 
 Reports are written below `.tmp_tests/readonly-live-*/`. `report.json` includes
 redacted results, query plans, runtime confirmation, and per-command status.
