@@ -1,6 +1,6 @@
 <#
-Explicitly opt-in, bounded IT8812C control validation. Does not promote Product LIVE
-support. Do not run this script without hardware authorization and safe setup.
+Explicit, bounded IT8812C control validation. Pending Product LIVE support is not promoted.
+LIVE writes require operator authorization, safe setup and an interactive Enter confirmation.
 #>
 [CmdletBinding()]
 param(
@@ -14,7 +14,8 @@ param(
     [ValidateSet('cc','input')][string]$Stage = 'cc',
     [switch]$PlanOnly,
     [switch]$ConfirmWrites,
-    [switch]$EnableInputOn
+    [switch]$EnableInputOn,
+    [switch]$DebugArtifacts
 )
 
 $ErrorActionPreference = 'Stop'
@@ -29,10 +30,15 @@ $report = [ordered]@{
     plan_only = [bool]$PlanOnly
     hardware_touched = $false
     status = 'NOT RUN'
+    safety_max_current_a = $null
+    precheck_input_state = 'NOT RUN'
     cases = @()
 }
 $inputOnAttempted = $false
 $watch = $null
+$commandIndex = 0
+$lastCommandError = $null
+$currentText = $Current.ToString([Globalization.CultureInfo]::InvariantCulture)
 
 function Save-Report {
     $path = Join-Path $script:reportDirectory 'shareable'
@@ -41,6 +47,7 @@ function Save-Report {
         ($script:report | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
     $summary = @('# Electronic Load Control Validation', '',
         "Stage: $($script:report.stage)", "Status: $($script:report.status)",
+        "Input precheck: $($script:report.precheck_input_state)",
         "Hardware touched: $($script:report.hardware_touched)", 'Resource: <redacted>')
     foreach ($case in $script:report.cases) {
         $summary += "$($case.name): $($case.status)"
@@ -49,8 +56,22 @@ function Save-Report {
         ($summary -join [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
 }
 
+function Save-PrivateCommand([int]$Sequence, [string]$Command, [string]$Stdout,
+                             [string]$Stderr, [string]$ExitStatus) {
+    if (-not $DebugArtifacts) { return }
+    $privateDir = Join-Path $script:reportDirectory 'private'
+    [void][IO.Directory]::CreateDirectory($privateDir)
+    $prefix = ('{0:D2}-{1}' -f $Sequence, $Command)
+    [IO.File]::WriteAllText((Join-Path $privateDir "$prefix.stdout.txt"),
+        $Stdout, [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $privateDir "$prefix.stderr.txt"),
+        $Stderr, [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $privateDir "$prefix.exit.txt"),
+        $ExitStatus, [Text.UTF8Encoding]::new($false))
+}
+
 function Invoke-CLI([string]$Command, [string[]]$Extra, [bool]$Live) {
-    $arguments = @('-c','from electronicload_tool_cli.cli import main; raise SystemExit(main())',
+    $arguments = @('-c', 'from electronicload_tool_cli.cli import main; raise SystemExit(main())',
         $Command, '--resource', $Resource, '--backend', $Backend, '--model', $Target,
         '--json') + $Extra
     if ($Live) { $arguments += '--validation-allow-pending-live-support' }
@@ -69,6 +90,12 @@ function Invoke-CLI([string]$Command, [string[]]$Extra, [bool]$Live) {
     $start.RedirectStandardError = $true
     $proc = [Diagnostics.Process]::new()
     $proc.StartInfo = $start
+    $script:commandIndex++
+    $sequence = $script:commandIndex
+    $script:lastCommandError = $null
+    $rawOutput = ''
+    $rawError = ''
+    $exitStatus = 'NOT STARTED'
     try {
         [void]$proc.Start()
         if ($Live) { $script:report.hardware_touched = $true }
@@ -76,34 +103,61 @@ function Invoke-CLI([string]$Command, [string[]]$Extra, [bool]$Live) {
         $stderr = $proc.StandardError.ReadToEndAsync()
         if (-not $proc.WaitForExit([int]$remaining)) {
             $proc.Kill(); [void]$proc.WaitForExit(5000)
+            $exitStatus = 'TIMEOUT; session/input state unconfirmed'
+            $rawOutput = $stdout.GetAwaiter().GetResult()
+            $rawError = $stderr.GetAwaiter().GetResult()
             throw "$Command exceeded its deadline; physical input/session state is unconfirmed."
         }
-        $payload = $stdout.GetAwaiter().GetResult() | ConvertFrom-Json
-        if ($proc.ExitCode -ne 0 -or -not $payload.ok) {
-            throw "$Command failed (exit $($proc.ExitCode), code $($payload.error.code))."
+        $exitStatus = [string]$proc.ExitCode
+        $rawOutput = $stdout.GetAwaiter().GetResult()
+        $rawError = $stderr.GetAwaiter().GetResult()
+        try {
+            $payload = $rawOutput | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            throw "$Command did not return valid CLI JSON (exit $exitStatus)."
+        }
+        if ($null -eq $payload -or $null -eq $payload.ok) {
+            throw "$Command returned a missing/invalid CLI result (exit $exitStatus)."
+        }
+        if ($proc.ExitCode -ne 0 -or $payload.ok -ne $true) {
+            $safeCode = [string]$payload.error.code
+            if ($safeCode -cnotmatch '^[a-z_]+$') { $safeCode = 'execution_failed' }
+            $script:lastCommandError = $safeCode
+            throw "$Command failed (exit $exitStatus, code $safeCode)."
         }
         return $payload
     } finally {
-        if (-not $proc.HasExited) { $proc.Kill(); [void]$proc.WaitForExit(5000) }
+        if ($proc.HasExited -eq $false) {
+            $proc.Kill()
+            [void]$proc.WaitForExit(5000)
+        }
         $proc.Dispose()
+        Save-PrivateCommand $sequence $Command $rawOutput $rawError $exitStatus
     }
 }
 
 try {
-    if (-not $Resource -or -not $SafetyConfig) {
-        Write-Host 'BLOCKED: -Resource and -SafetyConfig are required, including PlanOnly.'
+    if (-not $Resource) {
+        $report.status = 'BLOCKED'
+        Write-Host 'BLOCKED: an explicit -Resource is required, including PlanOnly.'
         exit 2
     }
     if (-not (Test-Path -LiteralPath $cli) -or -not (Test-Path -LiteralPath $python)) {
         throw 'Synchronize the repository .venv before validation.'
     }
+    if ([string]::IsNullOrWhiteSpace($SafetyConfig)) {
+        $SafetyConfig = Join-Path $repo 'examples/safety-config.toml'
+    }
     if (-not (Test-Path -LiteralPath $SafetyConfig)) {
         throw 'Safety Config file does not exist.'
     }
-    & $python -c 'from electronicload_tool_core.safety import load_safety_config; from electronicload_tool_core.control import validate_current; import sys; validate_current(sys.argv[2], sys.argv[3], load_safety_config(sys.argv[1]))' $SafetyConfig ([string]$Current) $Range
+    $SafetyConfig = (Resolve-Path -LiteralPath $SafetyConfig).Path
+    $limitOutput = & $python -c 'from electronicload_tool_core.safety import load_safety_config; from electronicload_tool_core.control import validate_current; import sys; s=load_safety_config(sys.argv[1]); validate_current(sys.argv[2],sys.argv[3],s); print(s.max_current)' $SafetyConfig $currentText $Range
     if ($LASTEXITCODE -ne 0) { throw 'Safety Config verification failed.' }
-    $base = @('--current', [string]$Current, '--range', $Range,
-              '--safety-config', $SafetyConfig)
+    $report.safety_max_current_a = [double]::Parse(
+        [string]$limitOutput, [Globalization.CultureInfo]::InvariantCulture)
+    Write-Host "Safety Config: $SafetyConfig (max_current=$($report.safety_max_current_a) A)"
+    $base = @('--current', $currentText, '--range', $Range, '--safety-config', $SafetyConfig)
     $planned = @(
         @{name='input-state'; args=@()},
         @{name='set-cc'; args=$base}
@@ -118,11 +172,13 @@ try {
         [void](Invoke-CLI $case.name $case.args $false)
         $report.cases += [ordered]@{name=$case.name;status='PLAN ONLY'}
     }
-    $report.status = 'PLAN ONLY'
-    Save-Report
-    Write-Host 'Plan-only validation PASS. No VISA or hardware writes performed.'
-    if ($PlanOnly) { exit 0 }
-    $report.status = 'NOT RUN'
+    if ($PlanOnly) {
+        $report.status = 'PLAN ONLY'
+        Write-Host 'Plan-only validation PASS. No VISA or hardware writes performed.'
+        exit 0
+    }
+    $report.cases = @()
+    Write-Host 'Plan precheck PASS. No VISA or hardware writes performed so far.'
     if (-not $ConfirmWrites -or ($Stage -eq 'input' -and -not $EnableInputOn)) {
         $report.status = 'BLOCKED'
         Write-Host 'BLOCKED: explicit -ConfirmWrites and input-stage -EnableInputOn are required.'
@@ -133,21 +189,36 @@ try {
         Write-Host 'BLOCKED: controlled LIVE validation requires an interactive console.'
         exit 2
     }
-    $word = if ($Stage -eq 'input') {'INPUT ON'} else {'CC ONLY'}
-    Write-Host "Stage=$Stage Current=$Current A Range=$Range; read-only identify and physical Input OFF are required."
-    $ack = Read-Host "Confirm approved setup and type '$word' to run (Ctrl+C cancels)"
-    if ($ack -cne $word) { $report.status = 'BLOCKED'; Write-Host 'BLOCKED: no operator confirmation.'; exit 2 }
-    $report.cases = @()
-    $watch = [Diagnostics.Stopwatch]::StartNew()
+    # Observe the physical state before asking for the final operator confirmation.
     $state = Invoke-CLI 'input-state' @() $true
-    if ($state.result.input_state -ne 'OFF') {
-        throw 'Precheck refused: physical Input state is not OFF; no automatic OFF will be sent.'
+    $observed = [string]$state.result.input_state
+    if ($observed -cnotin @('OFF', 'ON')) { $observed = 'UNKNOWN' }
+    $report.precheck_input_state = $observed
+    Write-Host "Physical Input precheck: $observed"
+    $report.cases += [ordered]@{name='precheck-input-off';status=$(if ($observed -ceq 'OFF') {'PASS'} else {'BLOCKED'});input_state=$observed}
+    Save-Report
+    if ($observed -cne 'OFF') {
+        $report.status = 'BLOCKED'
+        Write-Host "BLOCKED: physical Input is $observed, not OFF; no automatic OFF was sent."
+        exit 2
     }
-    $report.cases += [ordered]@{name='precheck-input-off';status='PASS'}
+    Write-Host "Stage=$Stage Current=$currentText A Range=$Range; max_current=$($report.safety_max_current_a) A"
+    if ($Stage -eq 'input') {
+        Write-Host 'This stage will deliberately turn the load ON, then command/verify OFF. Confirm bounded safe source/DUT and manual OFF contingency.'
+    } else {
+        Write-Host 'This stage writes CC settings while Input remains OFF.'
+    }
+    $ack = Read-Host 'Press Enter to start the approved validation, or Ctrl+C to cancel'
+    if ($ack -cne '') {
+        $report.status = 'BLOCKED'
+        Write-Host 'BLOCKED: operator did not confirm with Enter.'
+        exit 2
+    }
+    $watch = [Diagnostics.Stopwatch]::StartNew()
     [void](Invoke-CLI 'set-cc' $base $true)
     $report.cases += [ordered]@{name='set-cc';status='PASS'}
     if ($Stage -eq 'input') {
-        # This is an explicitly authorized ON/OFF validation sequence, not Worker Stop cleanup.
+        # Explicitly authorized ON/OFF test, not Worker Stop cleanup.
         $inputOnAttempted = $true
         [void](Invoke-CLI 'input-on' @('--safety-config',$SafetyConfig,'--confirm') $true)
         $report.cases += [ordered]@{name='input-on';status='PASS'}
@@ -156,19 +227,21 @@ try {
         $report.cases += [ordered]@{name='input-off';status='PASS'}
     } else {
         $state = Invoke-CLI 'input-state' @() $true
-        if ($state.result.input_state -ne 'OFF') { throw 'Input was not confirmed OFF.' }
-        $report.cases += [ordered]@{name='postcheck-input-off';status='PASS'}
+        $observed = [string]$state.result.input_state
+        if ($observed -cnotin @('OFF', 'ON')) { $observed = 'UNKNOWN' }
+        $report.cases += [ordered]@{name='postcheck-input-off';status=$(if ($observed -ceq 'OFF') {'PASS'} else {'FAIL'});input_state=$observed}
+        if ($observed -cne 'OFF') { throw "Input OFF postcheck failed: observed $observed." }
     }
     $report.status = 'PASS'
     Write-Host 'PASS: selected controlled validation stage.'
 } catch {
     $report.status = 'FAIL'
-    $report.cases += [ordered]@{name='error';status='FAIL';message='See operator terminal for diagnostics.'}
+    $safeError = if ($script:lastCommandError) { $script:lastCommandError } else { 'validation_failed' }
+    $report.cases += [ordered]@{name='error';status='FAIL';error_code=$safeError}
     Write-Host "FAIL: $($_.Exception.Message)"
 } finally {
     if ($inputOnAttempted) {
         try {
-            # The approved test procedure expressly attempts OFF after an ON attempt.
             [void](Invoke-CLI 'input-off' @() $true)
             $report.cases += [ordered]@{name='explicit-off-cleanup';status='PASS'}
         } catch {
@@ -179,6 +252,10 @@ try {
     }
     Save-Report
     Write-Host "Report: $reportDirectory/shareable/report.json"
+    if ($DebugArtifacts) {
+        Write-Host "Private debug logs: $reportDirectory/private (inspect and redact before sharing)"
+    }
 }
-if ($report.status -eq 'PASS') { exit 0 }
+if ($report.status -eq 'PASS' -or $report.status -eq 'PLAN ONLY') { exit 0 }
+if ($report.status -eq 'BLOCKED') { exit 2 }
 exit 3

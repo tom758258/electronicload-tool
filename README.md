@@ -234,10 +234,29 @@ First review the hardware-free plan:
 .\scripts\live-control-check.ps1 -Target itech-it8812c -Resource '<USB_RESOURCE>' -SafetyConfig '.\limits.toml' -Current 0.1 -Range low -Stage cc -PlanOnly
 ```
 
-The LIVE `cc` stage requires the independent safety setup approval and
-`-ConfirmWrites`; it verifies Input OFF and leaves it OFF. The LIVE
-`input` stage additionally requires `-EnableInputOn`, interactive operator
-confirmation, a bounded DUT/source and an explicit Input OFF contingency.
+The control-validation script uses `examples/safety-config.toml` if
+`-SafetyConfig` is omitted; `-SafetyConfig <path>` overrides that default.
+The supplied example has `max_current = 2.0` A: review it against the
+actual test setup before any LIVE attempt. The script reports the applied
+limit and the physical Input precheck, and does not silently switch Input OFF.
+
+The LIVE `cc` stage requires `-ConfirmWrites`; it verifies Input OFF and
+leaves it OFF. The LIVE `input` stage also requires `-EnableInputOn`, a
+bounded DUT/source, an explicit Input OFF contingency and an interactive
+operator confirmation. As with Powers Tool validation, **press Enter** after
+reviewing the displayed conditions, or Ctrl+C to cancel; no magic words are
+required. The physical read-only Input precheck runs *before* that prompt
+and refuses ON/UNKNOWN without sending OFF. The Core repeats the necessary
+physical checks before each write.
+
+Pass `-DebugArtifacts` to the control-validation script when troubleshooting.
+It creates extra raw CLI stdout/stderr/exit records under a local
+`.tmp_tests/control-live-*/private/` directory. These records can contain
+private VISA paths or device information: inspect/redact them before sharing.
+The normal `shareable/report.json` and `summary.md` keep the resource
+redacted and include a categorical Input precheck result and error code.
+No debug option adds SCPI writes or relaxes authorization.
+
 Scripts never guess a resource and refuse noninteractive LIVE runs. The
 control script uses a hidden contributor-validation path to verify pending
 control features **without** opening the public Product LIVE scope.

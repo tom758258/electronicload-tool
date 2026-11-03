@@ -60,7 +60,10 @@ affected CLI parser/help/version and read-only CLI contracts:
 
 Worker integration uses a real local simulated subprocess, HTTP and JSONL, but
 never physical hardware. Test `live-control-check.ps1 -PlanOnly` and unattended
-LIVE refusal with a **fictional** USB resource and disposable Safety Config.
+LIVE refusal with a **fictional** USB resource; the script defaults to the
+shipped `examples/safety-config.toml` (or accepts an explicit `-SafetyConfig`).
+Also test `-DebugArtifacts` in PlanOnly without accessing VISA, inspect
+redacted shareable reports and confirm raw diagnostic files remain private.
 These no-hardware checks must never issue SCPI. The prior
 `live-cli-check.ps1` remains read-only.
 
