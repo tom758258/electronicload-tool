@@ -23,8 +23,8 @@ def test_offline_json_contract(capsys, command, mode):
 
 @pytest.mark.parametrize("args,code", [
     (["measure"], "missing_resource"),
-    (["input-state", "--resource", RESOURCE], "unsupported_live_scope"),
-    (["measure", "--resource", RESOURCE], "unsupported_live_scope"),
+    (["measure", "--resource", RESOURCE, "--backend", "@py"], "unsupported_backend"),
+    (["input-state", "--resource", RESOURCE, "--model", "other"], "unsupported_model"),
     (["measure", "--dry-run", "--simulate"], "argument_error"),
     (["identify", "--live"], "argument_error"),
     (["identify", "--resource"], "argument_error"),
@@ -42,18 +42,18 @@ def test_refusals_are_one_json_object(capsys, args, code):
         assert result["mode"] == "live"
 
 
-def test_diagnostic_and_validation_policy_flow(fake_visa, capsys):
+def test_product_live_readonly_flow(fake_visa, capsys):
     assert main(["identify", "--resource", RESOURCE, "--json"]) == 0
     assert "PRIVATE-SERIAL" not in capsys.readouterr().out
-    assert main(["measure", "--resource", RESOURCE,
-                 "--validation-allow-pending-live-support", "--json"]) == 0
+    assert main(["input-state", "--resource", RESOURCE, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["result"]["input_state"] == "ON"
+    assert main(["measure", "--resource", RESOURCE, "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["result"]["power_w"] == 6.0
 
 
 def test_runtime_error_json(fake_visa, capsys):
     fake_visa.responses["INP:STAT?"] = TimeoutError("PRIVATE-RESOURCE")
-    assert main(["input-state", "--resource", RESOURCE,
-                 "--validation-allow-pending-live-support", "--json"]) == 3
+    assert main(["input-state", "--resource", RESOURCE, "--json"]) == 3
     output = capsys.readouterr()
     error = json.loads(output.out)["error"]
     assert error["details"]["input_state"] == "UNKNOWN"
@@ -81,8 +81,7 @@ def test_measure_dry_run_lists_fetch_query(capsys):
 
 def test_power_query_failure_is_cli_error(fake_visa, capsys):
     fake_visa.responses["FETC:POW?"] = TimeoutError("PRIVATE-RESOURCE")
-    assert main(["measure", "--resource", RESOURCE,
-                 "--validation-allow-pending-live-support", "--json"]) == 3
+    assert main(["measure", "--resource", RESOURCE, "--json"]) == 3
     output = capsys.readouterr()
     result = json.loads(output.out)
     assert result["ok"] is False

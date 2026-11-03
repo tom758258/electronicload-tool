@@ -15,6 +15,8 @@ QUERIES = {
     "measure": ("*IDN?", "MEAS:VOLT?", "MEAS:CURR?", "FETC:POW?"),
 }
 COMMANDS = tuple(QUERIES)
+# Exact Product LIVE command allowlist; model, USB and backend checks remain mandatory.
+PRODUCT_LIVE_COMMANDS = frozenset({"identify", "input-state", "measure"})
 
 
 def _query(session, query: str) -> str:
@@ -63,10 +65,10 @@ def execute(
             "queries": list(QUERIES[command]),
             "backend": "system", "transport": "usb", "timeout_ms": TIMEOUT_MS,
             "read_termination": TERMINATION, "write_termination": TERMINATION,
-            "live_access": "diagnostic" if command == "identify" else "validation-only",
+            "live_access": "product" if command in PRODUCT_LIVE_COMMANDS else "validation-only",
             "resource_required_for_live": True,
         }
-    if mode == "live" and command != "identify" and not validation:
+    if mode == "live" and command not in PRODUCT_LIVE_COMMANDS and not validation:
         raise LoadError("unsupported_live_scope", "Product LIVE is not open for this command.")
     try:
         if mode == "simulate":

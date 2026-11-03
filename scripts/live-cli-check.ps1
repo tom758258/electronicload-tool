@@ -19,7 +19,7 @@ $report = [ordered]@{
     backend = $Backend
     resource = '<redacted>'
     runtime_confirmation = 'NOT VERIFIED'
-    product_live = 'not open'
+    product_live = 'IT8812C USB/System VISA read-only open'
     per_command_deadline_ms = 30000
     total_deadline_ms = 90000
     plans = @()
@@ -45,7 +45,7 @@ function Invoke-LiveCommand([string]$Command) {
     # Core has validated these values; quote arguments without invoking another shell.
     $arguments = @('-c', 'from electronicload_tool_cli.cli import main; raise SystemExit(main())',
         $Command, '--resource', $Resource, '--backend', $Backend, '--model', $Target,
-        '--validation-allow-pending-live-support', '--json')
+        '--json')
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $python
     $start.Arguments = ($arguments | ForEach-Object { '"' + $_ + '"' }) -join ' '
@@ -177,7 +177,7 @@ try {
     }
     $report.status = 'PASS'
     Save-Report
-    Write-Host "PASS: bounded read-only validation. Product LIVE remains closed. Report: $reportDirectory/report.json"
+    Write-Host "PASS: bounded read-only validation of Product LIVE commands. Report: $reportDirectory/report.json"
     exit 0
 } catch {
     $report.status = 'FAIL'

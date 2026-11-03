@@ -30,7 +30,7 @@ def test_identity_keeps_detected_and_canonical_fields_separate():
 def test_identity_refusal_stops_queries_and_closes(fake_visa, reply):
     fake_visa.responses["*IDN?"] = reply
     with pytest.raises(LoadError) as exc:
-        execute("measure", resource=RESOURCE, validation=True)
+        execute("measure", resource=RESOURCE)
     assert exc.value.exit_code == 2
     assert [c for c in fake_visa.calls if isinstance(c, str) and c.endswith("?")] == ["*IDN?"]
     assert fake_visa.calls[-2:] == ["session_close", "manager_close"]
@@ -46,7 +46,7 @@ def test_observed_itech_manufacturer_spelling_allows_exact_readonly_scope(
 ):
     # Observed manufacturer punctuation; no real serial or VISA resource is stored.
     fake_visa.responses["*IDN?"] = "ITECH Ltd., IT8812C, SYNTHETIC, 1.35-1.41"
-    output = execute(command, resource=RESOURCE, validation=command != "identify")
+    output = execute(command, resource=RESOURCE)
     assert [c for c in fake_visa.calls if isinstance(c, str) and c.endswith("?")] == queries
     assert fake_visa.calls[-2:] == ["session_close", "manager_close"]
     assert "SYNTHETIC" not in str(output)
@@ -57,13 +57,12 @@ def test_observed_itech_manufacturer_spelling_allows_exact_readonly_scope(
 
 @pytest.mark.parametrize("kwargs,code", [
     ({}, "missing_resource"),
-    ({"resource": RESOURCE}, "unsupported_live_scope"),
-    ({"resource": RESOURCE, "validation": True, "backend": "@py"}, "unsupported_backend"),
-    ({"resource": RESOURCE, "validation": True, "model_id": "other"}, "unsupported_model"),
-    ({"resource": "TCPIP0::example.invalid::INSTR", "validation": True}, "invalid_resource"),
-    ({"resource": "ASRL1::INSTR", "validation": True}, "invalid_resource"),
-    ({"resource": "USB0::1::2::X::RAW", "validation": True}, "invalid_resource"),
-    ({"resource": "USB0::65536::2::X::INSTR", "validation": True}, "invalid_resource"),
+    ({"resource": RESOURCE, "backend": "@py"}, "unsupported_backend"),
+    ({"resource": RESOURCE, "model_id": "other"}, "unsupported_model"),
+    ({"resource": "TCPIP0::example.invalid::INSTR"}, "invalid_resource"),
+    ({"resource": "ASRL1::INSTR"}, "invalid_resource"),
+    ({"resource": "USB0::1::2::X::RAW"}, "invalid_resource"),
+    ({"resource": "USB0::65536::2::X::INSTR"}, "invalid_resource"),
 ])
 def test_rejected_scope_never_creates_a_manager(kwargs, code):
     with pytest.raises(LoadError, match=".") as exc:
@@ -79,7 +78,7 @@ def test_rejected_scope_never_creates_a_manager(kwargs, code):
      {"voltage_v": 12.0, "current_a": 0.5, "power_w": 6.0}),
 ])
 def test_exact_readonly_sequence_and_cleanup(fake_visa, command, queries, result):
-    output = execute(command, resource=RESOURCE, validation=command != "identify")
+    output = execute(command, resource=RESOURCE)
     assert result.items() <= output.items()
     assert fake_visa.calls == [
         ("backend", "@ivi"), "manager", ("open", RESOURCE, 5000), "open_resource",
@@ -95,11 +94,11 @@ def test_input_state_never_defaults_to_off(fake_visa, reply, state):
     fake_visa.responses["INP:STAT?"] = reply
     if state == "UNKNOWN":
         with pytest.raises(LoadError) as exc:
-            execute("input-state", resource=RESOURCE, validation=True)
+            execute("input-state", resource=RESOURCE)
         assert exc.value.exit_code == 3
         assert exc.value.details["input_state"] == "UNKNOWN"
     else:
-        assert execute("input-state", resource=RESOURCE, validation=True)["input_state"] == state
+        assert execute("input-state", resource=RESOURCE)["input_state"] == state
     assert fake_visa.calls[-2:] == ["session_close", "manager_close"]
 
 
@@ -108,7 +107,7 @@ def test_input_state_never_defaults_to_off(fake_visa, reply, state):
 def test_partial_measurement_is_failure_without_retry(fake_visa, query, reply):
     fake_visa.responses[query] = reply
     with pytest.raises(LoadError) as exc:
-        execute("measure", resource=RESOURCE, validation=True)
+        execute("measure", resource=RESOURCE)
     assert exc.value.exit_code == 3
     assert fake_visa.calls.count(query) == 1
     if query == "MEAS:CURR?":
@@ -212,5 +211,6 @@ def test_not_ready_visa_session_is_closed_without_clear_or_retry(monkeypatch, cl
 def test_offline_modes_do_not_open_visa(command):
     plan = execute(command, mode="dry-run")
     assert plan["queries"][0] == "*IDN?"
+    assert plan["live_access"] == "product"
     assert "voltage_v" not in plan and "input_state" not in plan
     assert execute(command, mode="simulate") == execute(command, mode="simulate")
