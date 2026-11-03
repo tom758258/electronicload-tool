@@ -58,14 +58,17 @@ affected CLI parser/help/version and read-only CLI contracts:
 .\scripts\preflight-cli.ps1
 ```
 
-Worker integration uses a real local simulated subprocess, HTTP and JSONL, but
-never physical hardware. Test `live-control-check.ps1 -PlanOnly` and unattended
-LIVE refusal with a **fictional** USB resource; the script defaults to the
-shipped `examples/safety-config.toml` (or accepts an explicit `-SafetyConfig`).
-Also test `-DebugArtifacts` in PlanOnly without accessing VISA, inspect
-redacted shareable reports and confirm raw diagnostic files remain private.
-These no-hardware checks must never issue SCPI. The prior
-`live-cli-check.ps1` remains read-only.
+Worker integration uses a real local simulated subprocess, HTTP and JSONL,
+but never physical hardware. The **single** `live-cli-check.ps1` now plans
+read-only plus CC High/Low, Input ON, on-state measurement and Input OFF in
+one fixed sequence. Test its `-PlanOnly` operation and unattended LIVE refusal
+with a **fictional** USB Resource. Without `-ConfirmWrites` or
+`-EnableInputOn`, and in noninteractive LIVE runs, verify it refuses before
+opening any VISA session or sending SCPI. The script defaults to
+`examples/safety-config.toml` (or accepts explicit `-SafetyConfig`).
+Verify redacted shareable case totals and normal mode's lack of private raw
+logs; `-DebugArtifacts` uses the existing private/raw location without
+changing authorization. No hardware is permitted in automated checks.
 
 Fake VISA for control must emulate Local mode ignoring setup writes until
 `SYST:REM`, numeric `CURR:RANG?` responses (including zero for low),
@@ -73,11 +76,16 @@ nonzero current readback mismatches, and Worker Stop/unsafe-state changes
 between remote transition and Input ON. Read-only commands must not send
 `SYST:REM` or other setup writes.
 
-Run controlled `live-control-check.ps1` write stages only with separately
-approved model/Resource, bounded DUT setup and explicit operator authorization.
-The `cc` stage must leave Input OFF; the `input` stage requires deliberate
-input-on and explicit OFF verification with an operator contingency. Failing
-LIVE validation does not automatically promote Product support.
+Run the **single** `live-cli-check.ps1` full LIVE command only with
+separately approved model/Resource, bounded DUT/source, explicit two-layer
+write/Input ON opt-in, and a manual OFF contingency. Check physical Input
+OFF before CC; high and low range are configured with the same bounded current
+before one authorized ON/OFF trial. Reject further normal tests on any failure.
+After a potentially attempted Input ON, make one explicit bounded OFF cleanup
+attempt; if physical OFF cannot be confirmed, flag operator action. Validation
+does not automatically promote Product LIVE support or demonstrate LIVE Worker
+coverage. Because this change touches only PowerShell verification/docs, do
+not rerun release packaging or unrelated pytest.
 
 Because `tomli` is a new conditional runtime dependency for Python 3.10,
 also run the **focused packaging checks** above. These are not a full

@@ -238,43 +238,15 @@ runs one async job at a time, reports completion via `job_finished` and
 history. Stop does **not** imply Input OFF. For domain argument shapes and
 permissions, see [Electronic Load Worker Contract](docs/contracts/electronicload-worker-contract.md).
 
-### Controlled write validation
+### Unified CLI instrument validation
 
-The existing `scripts/live-cli-check.ps1` remains **read-only**. The
-separate `scripts/live-control-check.ps1` provides operator-approved stages.
-First review the hardware-free plan:
-
-```powershell
-.\scripts\live-control-check.ps1 -Target itech-it8812c -Resource '<USB_RESOURCE>' -SafetyConfig '.\limits.toml' -Current 0.1 -Range low -Stage cc -PlanOnly
-```
-
-The control-validation script uses `examples/safety-config.toml` if
-`-SafetyConfig` is omitted; `-SafetyConfig <path>` overrides that default.
-The supplied example has `max_current = 2.0` A: review it against the
-actual test setup before any LIVE attempt. The script reports the applied
-limit and the physical Input precheck, and does not silently switch Input OFF.
-
-The LIVE `cc` stage requires `-ConfirmWrites`; it verifies Input OFF and
-leaves it OFF. The LIVE `input` stage also requires `-EnableInputOn`, a
-bounded DUT/source, an explicit Input OFF contingency and an interactive
-operator confirmation. As with Powers Tool validation, **press Enter** after
-reviewing the displayed conditions, or Ctrl+C to cancel; no magic words are
-required. The physical read-only Input precheck runs *before* that prompt
-and refuses ON/UNKNOWN without sending OFF. The Core repeats the necessary
-physical checks before each write.
-
-Pass `-DebugArtifacts` to the control-validation script when troubleshooting.
-It creates extra raw CLI stdout/stderr/exit records under a local
-`.tmp_tests/control-live-*/private/` directory. These records can contain
-private VISA paths or device information: inspect/redact them before sharing.
-The normal `shareable/report.json` and `summary.md` keep the resource
-redacted and include a categorical Input precheck result and error code.
-No debug option adds SCPI writes or relaxes authorization.
-
-Scripts never guess a resource and refuse noninteractive LIVE runs. The
-control script uses a hidden contributor-validation path to verify pending
-control features **without** opening the public Product LIVE scope.
-See [Testing Guidelines](docs/testing-guidelines.md) and [AGENTS.md](AGENTS.md).
+Use the single `scripts/live-cli-check.ps1` for all currently implemented CLI
+instrument checks: Identify, Input State, V/I/P, fixed CC (high and low range),
+explicit Input ON, on-state V/I/P, explicit Input OFF, and final Input OFF.
+The same script retains the existing `-PlanOnly`, `-DebugArtifacts`, report
+privacy, process deadlines and interactive Enter confirmation. There is no
+separate control script or mode/suite selection; see
+[Controlled instrument validation](#controlled-instrument-validation).
 
 ## Checks and builds
 
@@ -292,41 +264,81 @@ installed-wheel checks. Contributor changes follow [AGENTS.md](AGENTS.md).
 
 ## Controlled instrument validation
 
-Real-instrument validation requires separate authorization and an explicit
-user-supplied resource. Preview the exact profile, connection, and query plan
-without loading VISA:
+`scripts/live-cli-check.ps1` is the **one** CLI hardware verification entry
+point. It runs every currently implemented CLI function in order, rather than
+requiring multiple scripts, Suites or Stages. It is an explicit operator-
+approved hardware validation workflow, **not** a general unattended control
+command and not automatic Product LIVE promotion.
+
+Preview the same full command plan without opening VISA or touching hardware:
 
 ```powershell
-.\scripts\live-cli-check.ps1 -Target itech-it8812c -Connection usb -Resource '<USB_RESOURCE>' -Backend system -PlanOnly
+.\scripts\live-cli-check.ps1 -Target itech-it8812c -Connection usb -Resource '<USB_RESOURCE>' -Backend system -SafetyConfig '.\limits.toml' -Current 0.1 -PlanOnly
 ```
 
-After separate authorization, run without `-PlanOnly` in an interactive
-console. After preflight and plan review, press **Enter** to start or Ctrl+C
-to cancel. A separate `RUN` or `KEYSIGHT` response is no longer required.
-VISA library/manufacturer information remains diagnostic, with cross-command
-consistency checking; it is **not** proof of operator-verified Keysight runtime.
-Identify/identity checks are prechecks. Only Input State and the whole V/I/P
-Measurement are counted as two functional cases, with `[1/2]` and `[2/2]`
-progress and PASS/FAIL/NOT RUN summary. Noninteractive execution is refused
-before instrument access.
+For a separately approved, safe IT8812C + bounded source/DUT setup, run once
+in an interactive Windows console:
 
-The script invokes CLI through its installed Python entry function. Each
-command has a 30-second process deadline, and the batch has a 90-second I/O
-budget starting at identification. The Enter prompt does not consume that
-budget, and an expired budget blocks further queries. Process deadline
-termination leaves session closure unconfirmed; it sends no input-off command. Individual VISA operations retain their 5000 ms timeout.
+```powershell
+.\scripts\live-cli-check.ps1 -Target itech-it8812c -Connection usb -Resource '<USB_RESOURCE>' -Backend system -SafetyConfig '.\limits.toml' -Current 0.1 -ConfirmWrites -EnableInputOn
+```
 
-The read-only validation script exercises the normal Product LIVE commands;
-no pending-support override is needed. The legacy validation option remains
-available for compatibility but cannot bypass identity, USB, or backend checks.
-Validation does not authorize instrument use or expand Product LIVE scope.
+`-SafetyConfig` is optional: the bundled `examples/safety-config.toml`
+is used otherwise. That **example permits 2.0 A** and must be reviewed for
+the actual setup; passing a smaller operator-defined maximum is preferred
+where appropriate. Both requested low/high configurations must be within
+the configured limit and each range's programming resolution. The single
+`-Current` is used for both ranges, and the low range is selected last for
+the bounded Input ON trial. No automatic range choice is made in Core.
 
-Reports are written below `.tmp_tests/readonly-live-*/shareable/` as
-`report.json` and `summary.md` with redacted resource/path information,
-prechecks and two-case counts. The default retains no raw CLI responses or
-private Resource files. `-DebugArtifacts` additionally retains raw JSON,
-stderr and failure diagnostics under a local `private/` directory. Do not
-publish private artifacts or commit run evidence.
+The complete LIVE validation requires **both** `-ConfirmWrites` and
+`-EnableInputOn`, a user-supplied explicit USB INSTR Resource, interactive
+operator confirmation, verified physical Input OFF, a safe source/DUT and
+a manual OFF contingency. The script blocks missing gates/noninteractive
+runs before any physical VISA connection. After offline preflight, the operator
+presses **Enter once** to run; Ctrl+C cancels. No magic words, Suite, Stage
+or extra prompt are required.
+
+The fixed order is Identify (precheck); Input State (must be OFF);
+V/I/P measurement with Input OFF; CC High and CC Low setting/readback
+(with OFF checks before writes); deliberate Input ON with physical confirmation;
+V/I/P measurement while ON; explicit Input OFF and confirmation; and a final
+independent Input State OFF query. Any failed verification prevents further
+normal test cases. If Input ON might have been attempted, the script makes
+an **explicit bounded Input OFF cleanup attempt** even after a failure, and
+reports OFF as confirmed only on successful physical readback. If cleanup
+fails or times out, the operator must act; neither process termination nor
+VISA session closure proves Input OFF. No reset, `SYST:LOC`, protection clear,
+SCPI error-queue consumption or automatic reconnect is added.
+
+Read-only queries use normal Product LIVE permissions. Pending control
+commands are exercised only by the hidden contributor-validation permission
+on the real CLI: this **does not open public Product LIVE control**.
+The underlying exact identity/USB/System VISA and Core safety rules apply
+unchanged. System VISA library/manufacturer is reported for diagnostics and
+cross-command consistency, not independent operator verification.
+
+Each CLI command has a **30-second** process deadline; the full run has a
+**240-second** I/O budget beginning at Identify. An explicit OFF cleanup
+has a separate 30-second allowance if needed. The operator prompt is
+not timed. Instrument VISA timeouts stay at 5000 ms. V/I/P are separate
+measurements and power freshness/synchronization are not guaranteed.
+One run validates a bounded device configuration, not every possible current,
+load range, external DUT, failure condition, or Worker LIVE lifecycle.
+
+The existing report layout is retained under
+`.tmp_tests/readonly-live-*/shareable/` with `report.json` and
+`summary.md`. The report includes per-case PASS/FAIL/NOT RUN and a final
+summary; the resource stays redacted. Default execution retains **no raw
+CLI logs or private Resource file**. The existing `-DebugArtifacts` flag
+additionally saves raw CLI stdout/stderr/exit information and Resource
+details under `private/`. Raw files may contain lab or device identifiers:
+review/redact them before sharing; do not commit validation artifacts.
+`-DebugArtifacts` adds no instrument writes, no new permission and no
+alternate validation flow.
+
+Follow [Testing Guidelines](docs/testing-guidelines.md) and
+[AGENTS.md](AGENTS.md).
 
 ## License
 
