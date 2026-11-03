@@ -278,7 +278,7 @@ try {
         throw 'Safety Config file does not exist.'
     }
     $SafetyConfig = (Resolve-Path -LiteralPath $SafetyConfig).Path
-    $limitOutput = & $python -c 'from electronicload_tool_core.safety import load_safety_config; from electronicload_tool_core.control import validate_current; import sys; s=load_safety_config(sys.argv[1]); validate_current(sys.argv[2],"low",s); validate_current(sys.argv[2],"high",s); print(s.max_current)' $SafetyConfig $currentText
+    $limitOutput = & $python -c 'from electronicload_tool_core.safety import load_safety_config; from electronicload_tool_core.control import validate_current; import sys; s=load_safety_config(sys.argv[1]); validate_current(sys.argv[2],sys.argv[3],s); validate_current(sys.argv[2],sys.argv[4],s); print(s.max_current)' $SafetyConfig $currentText low high
     if ($LASTEXITCODE -ne 0) { throw 'Safety Config verification failed.' }
     $report.safety_max_current_a = [double]::Parse(
         [string]$limitOutput, [Globalization.CultureInfo]::InvariantCulture)
