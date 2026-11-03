@@ -4,7 +4,8 @@ param(
     [ValidateSet('usb')][string]$Connection = 'usb',
     [string]$Resource,
     [string]$Backend = 'system',
-    [switch]$PlanOnly
+    [switch]$PlanOnly,
+    [switch]$DebugArtifacts
 )
 
 $ErrorActionPreference = 'Stop'
@@ -19,6 +20,12 @@ $report = [ordered]@{
     backend = $Backend
     resource = '<redacted>'
     runtime_confirmation = 'NOT VERIFIED'
+    prechecks = [ordered]@{
+        plan = 'NOT RUN'; preflight = 'NOT RUN'; identify = 'NOT RUN'
+        runtime = 'NOT RUN'; runtime_manufacturer = $null
+    }
+    artifact_mode = $(if ($DebugArtifacts) { 'debug' } else { 'minimal' })
+    validation_mode = $(if ($PlanOnly) { 'plan-only' } else { 'live' })
     product_live = 'IT8812C USB/System VISA read-only open'
     per_command_deadline_ms = 30000
     total_deadline_ms = 90000
@@ -34,9 +41,79 @@ $watch = $null
 
 function Save-Report {
     if ($null -eq $script:reportDirectory) { return }
-    $path = Join-Path $script:reportDirectory 'report.json'
-    [IO.File]::WriteAllText($path, ($script:report | ConvertTo-Json -Depth 12),
+    $shareable = Join-Path $script:reportDirectory 'shareable'
+    [void][IO.Directory]::CreateDirectory($shareable)
+    $state = $script:report.results | Where-Object { $_.command -eq 'input-state' } | Select-Object -First 1
+    $measurement = $script:report.results | Where-Object { $_.command -eq 'measure' } | Select-Object -First 1
+    $cases = @(
+        [ordered]@{
+            name = 'input-state'
+            status = $state.status
+            input_state = $(if ($state.status -eq 'PASS') { $state.response.result.input_state } else { $null })
+            error_code = $state.error_code
+        }
+        [ordered]@{
+            name = 'measure'
+            status = $measurement.status
+            values = $(if ($measurement.status -eq 'PASS') {
+                [ordered]@{
+                    voltage_v = $measurement.response.result.voltage_v
+                    current_a = $measurement.response.result.current_a
+                    power_w = $measurement.response.result.power_w
+                }
+            } else { $null })
+            error_code = $measurement.error_code
+        }
+    )
+    $counts = [ordered]@{ total = 2; passed = 0; failed = 0; skipped = 0; not_run = 0 }
+    foreach ($item in $cases) {
+        switch ($item.status) {
+            'PASS' { $counts.passed++ }
+            'FAIL' { $counts.failed++ }
+            'SKIP' { $counts.skipped++ }
+            'NOT RUN' { $counts.not_run++ }
+        }
+    }
+    $script:report['summary_counts'] = $counts
+    $public = [ordered]@{
+        target = $script:report.target
+        connection = $script:report.connection
+        backend = $script:report.backend
+        resource = '<redacted>'
+        validation_mode = $script:report.validation_mode
+        artifact_mode = $script:report.artifact_mode
+        hardware_touched = $script:report.hardware_touched
+        overall_status = $script:report.status
+        per_command_deadline_ms = 30000
+        total_deadline_ms = 90000
+        product_live = $script:report.product_live
+        prechecks = $script:report.prechecks
+        cases = $cases
+        summary_counts = $counts
+    }
+    [IO.File]::WriteAllText((Join-Path $shareable 'report.json'),
+        ($public | ConvertTo-Json -Depth 12), [Text.UTF8Encoding]::new($false))
+    $lines = @(
+        '# Electronic Load Read-only Validation'
+        ''
+        "Overall: $($public.overall_status)"
+        "Preflight: $($public.prechecks.preflight)"
+        "Identify: $($public.prechecks.identify)"
+        "VISA runtime: $($public.prechecks.runtime)"
+        "[1/2] Input State: $($state.status)"
+        "[2/2] Measurement (V/I/P): $($measurement.status)"
+        "Cases: $($counts.passed) PASS, $($counts.failed) FAIL, $($counts.skipped) SKIP, $($counts.not_run) NOT RUN"
+        'Resource: <redacted>'
+    )
+    [IO.File]::WriteAllText((Join-Path $shareable 'summary.md'),
+        ($lines -join [Environment]::NewLine) + [Environment]::NewLine,
         [Text.UTF8Encoding]::new($false))
+}
+
+function Show-Summary {
+    $counts = $script:report.summary_counts
+    Write-Host "Summary: $($counts.total) total, $($counts.passed) PASS, $($counts.failed) FAIL, $($counts.skipped) SKIP, $($counts.not_run) NOT RUN"
+    Write-Host "Overall: $($script:report.status)"
 }
 
 function Invoke-LiveCommand([string]$Command) {
@@ -74,10 +151,14 @@ function Invoke-LiveCommand([string]$Command) {
         }
         $output = $stdout.GetAwaiter().GetResult()
         $diagnostic = $stderr.GetAwaiter().GetResult()
-        [IO.File]::WriteAllText((Join-Path $script:reportDirectory "$Command.private.json"),
-            $output, [Text.UTF8Encoding]::new($false))
-        [IO.File]::WriteAllText((Join-Path $script:reportDirectory "$Command.private.stderr.txt"),
-            $diagnostic, [Text.UTF8Encoding]::new($false))
+        if ($DebugArtifacts) {
+            $privateDir = Join-Path $script:reportDirectory 'private'
+            [void][IO.Directory]::CreateDirectory($privateDir)
+            [IO.File]::WriteAllText((Join-Path $privateDir "$Command.json"),
+                $output, [Text.UTF8Encoding]::new($false))
+            [IO.File]::WriteAllText((Join-Path $privateDir "$Command.stderr.txt"),
+                $diagnostic, [Text.UTF8Encoding]::new($false))
+        }
         $result = $output | ConvertFrom-Json
         $shareable = $output | ConvertFrom-Json
         if ($null -ne $shareable.result.visa) {
@@ -86,6 +167,10 @@ function Invoke-LiveCommand([string]$Command) {
         $entry['exit_code'] = $process.ExitCode
         $entry.status = $(if ($process.ExitCode -eq 0 -and $result.ok) { 'PASS' } else { 'FAIL' })
         $entry['response'] = $shareable
+        if ($entry.status -eq 'FAIL') {
+            $code = [string]$result.error.code
+            $entry['error_code'] = $(if ($code -cmatch '^[a-z_]+$') { $code } else { 'execution_failed' })
+        }
         Save-Report
         if ($process.ExitCode -ne 0 -or $result.ok -ne $true) {
             throw "$Command failed; see the local report."
@@ -118,6 +203,7 @@ try {
         }
         $report.plans += $plan
     }
+    $report.prechecks.plan = 'PASS'
     $name = 'readonly-live-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfff') + '-' +
         [Guid]::NewGuid().ToString('N').Substring(0, 8)
     $reportDirectory = Join-Path $repo ".tmp_tests/$name"
@@ -132,61 +218,107 @@ try {
     if ($PlanOnly) {
         $report.status = 'PLAN ONLY'
         Save-Report
-        Write-Host "PASS: no hardware accessed. Report: $reportDirectory/report.json"
+        Show-Summary
+        Write-Host "PASS: no hardware accessed. Report: $reportDirectory/shareable/report.json"
         exit 0
     }
     if ([Console]::IsInputRedirected -or -not [Environment]::UserInteractive) {
         $report.status = 'BLOCKED'
         Save-Report
+        Show-Summary
         Write-Host 'BLOCKED: real validation requires an interactive operator.'
         exit 2
     }
     & (Join-Path $PSScriptRoot 'preflight-cli.ps1')
-    if ($LASTEXITCODE -ne 0) { throw 'Preflight failed.' }
+    if ($LASTEXITCODE -ne 0) {
+        $report.prechecks.preflight = 'FAIL'
+        throw 'Preflight failed.'
+    }
+    $report.prechecks.preflight = 'PASS'
     Write-Host "Target: $Target; resource: $Resource; backend: $Backend"
-    $confirmation = Read-Host 'With separate hardware authorization, type RUN to identify this device'
-    if ($confirmation -cne 'RUN') {
+    $confirmation = Read-Host 'With separate hardware authorization, press Enter to start (Ctrl+C to cancel)'
+    if ($confirmation -cne '') {
         $report.status = 'BLOCKED'
         Save-Report
+        Show-Summary
         Write-Host 'BLOCKED: operator did not confirm.'
         exit 2
     }
-    [IO.File]::WriteAllText((Join-Path $reportDirectory 'resource.private.txt'),
-        $Resource, [Text.UTF8Encoding]::new($false))
+    if ($DebugArtifacts) {
+        $privateDir = Join-Path $reportDirectory 'private'
+        [void][IO.Directory]::CreateDirectory($privateDir)
+        [IO.File]::WriteAllText((Join-Path $privateDir 'resource.txt'),
+            $Resource, [Text.UTF8Encoding]::new($false))
+    }
     $watch = [Diagnostics.Stopwatch]::StartNew()
+    $phase = 'identify'
+    Write-Host 'Running precheck: Identify...'
     $identity = Invoke-LiveCommand 'identify'
+    $report.prechecks.identify = 'PASS'
+    if ($null -eq $identity.result.visa -or
+        [string]::IsNullOrWhiteSpace([string]$identity.result.visa.library)) {
+        throw 'VISA runtime library metadata is missing.'
+    }
+    Write-Host 'PASS precheck: Identify'
     Write-Host "VISA library: $($identity.result.visa.library)"
     Write-Host "VISA implementation manufacturer: $($identity.result.visa.manufacturer)"
-    Write-Host 'Inspect the private identify JSON for the full loaded library path.'
-    Write-Host 'IVI alone does not prove Keysight runtime. Verify the library and installed IO Libraries.'
-    $confirmation = Read-Host 'Type KEYSIGHT only after verifying the runtime; otherwise press Enter'
-    if ($confirmation -cne 'KEYSIGHT' -or -not $identity.result.visa.manufacturer) {
-        $report.status = 'BLOCKED'
-        Save-Report
-        Write-Host 'BLOCKED: Keysight runtime is unverified; remaining queries were not run.'
-        exit 2
-    }
-    $report.runtime_confirmation = 'operator confirmed Keysight library and installation'
+    Write-Host 'Runtime metadata is diagnostic only; no Keysight operator verification was performed.'
+    $report.prechecks.runtime = 'OBSERVED (not operator-verified)'
+    $report.prechecks.runtime_manufacturer = $identity.result.visa.manufacturer
+    $report.runtime_confirmation = 'not operator-verified'
+    $phase = 'cases'
     foreach ($command in @('input-state', 'measure')) {
-        $result = Invoke-LiveCommand $command
-        if ($result.result.visa.library -cne $identity.result.visa.library -or
-            $result.result.visa.manufacturer -cne $identity.result.visa.manufacturer) {
-            throw 'VISA runtime evidence changed between commands; validation cannot pass.'
+        $number = $(if ($command -eq 'input-state') { 1 } else { 2 })
+        $label = $(if ($number -eq 1) { 'Input State' } else { 'Measurement (V/I/P)' })
+        Write-Host "Running [$number/2] $label..."
+        try {
+            $result = Invoke-LiveCommand $command
+            if ($result.result.visa.library -cne $identity.result.visa.library -or
+                $result.result.visa.manufacturer -cne $identity.result.visa.manufacturer) {
+                throw 'VISA runtime evidence changed between commands; validation cannot pass.'
+            }
+            if ($number -eq 1) {
+                Write-Host "PASS [1/2] Input State: $($result.result.input_state)"
+            } else {
+                Write-Host "PASS [2/2] Measurement: $($result.result.voltage_v) V, $($result.result.current_a) A, $($result.result.power_w) W"
+            }
+        } catch {
+            $entry = $report.results | Where-Object { $_.command -eq $command }
+            if ($entry.status -eq 'NOT RUN') {
+                Write-Host "NOT RUN [$number/2] $label (command did not start)"
+            } else {
+                $entry.status = 'FAIL'
+                if (-not $entry.Contains('error_code')) { $entry['error_code'] = 'execution_failed' }
+                Write-Host "FAIL [$number/2] $label ($($entry.error_code))"
+            }
+            throw
         }
-        Write-Host "PASS: $command"
     }
     $report.status = 'PASS'
     Save-Report
-    Write-Host "PASS: bounded read-only validation of Product LIVE commands. Report: $reportDirectory/report.json"
+    Show-Summary
+    Write-Host "PASS: bounded read-only validation of Product LIVE commands. Report: $reportDirectory/shareable/report.json"
     exit 0
 } catch {
-    $report.status = 'FAIL'
-    $report['failure'] = 'Validation failed; inspect failure.private.txt locally.'
-    if ($null -ne $reportDirectory) {
-        [IO.File]::WriteAllText((Join-Path $reportDirectory 'failure.private.txt'),
+    if ($phase -eq 'identify') {
+        $report.prechecks.identify = 'FAIL'
+        $report.status = 'BLOCKED'
+    } elseif ($phase -eq 'cases') {
+        $report.status = 'FAIL'
+    } else {
+        $report.status = 'BLOCKED'
+    }
+    if ($DebugArtifacts -and $null -ne $reportDirectory) {
+        $privateDir = Join-Path $reportDirectory 'private'
+        [void][IO.Directory]::CreateDirectory($privateDir)
+        [IO.File]::WriteAllText((Join-Path $privateDir 'failure.txt'),
             $_.Exception.ToString(), [Text.UTF8Encoding]::new($false))
     }
     Save-Report
-    Write-Host "FAIL: $($_.Exception.Message)"
+    if ($null -ne $reportDirectory) {
+        Show-Summary
+        Write-Host "Report: $reportDirectory/shareable/report.json"
+    }
+    Write-Host 'Validation did not complete; check the report.'
     exit 3
 }

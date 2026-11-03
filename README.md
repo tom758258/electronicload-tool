@@ -52,6 +52,8 @@ activation.
 .\.venv\Scripts\electronicload-tool.exe identify --simulate --json
 .\.venv\Scripts\electronicload-tool.exe input-state --dry-run
 .\.venv\Scripts\electronicload-tool.exe measure --simulate --json
+.\.venv\Scripts\electronicload-tool.exe list-resources
+.\.venv\Scripts\electronicload-tool.exe list-resources --live-only --json
 ```
 
 Help and version exit successfully. Running without arguments also shows help.
@@ -71,7 +73,8 @@ and version separately from `--json`.
 and no implicit simulation. For example, `measure` alone fails because the
 resource is missing. Read-only LIVE requests require an explicit USB INSTR
 resource and exact IT8812C identity. Replace placeholders only for authorized
-use. Resources are never discovered, guessed, or read from environment defaults.
+use. Operation commands never discover, guess, or select resources automatically.
+Only the explicit `list-resources` diagnostic enumerates them.
 
 For an authorized identification diagnostic:
 
@@ -86,6 +89,22 @@ case sensitivity; other spellings and models are rejected. Detected text,
 canonical model token, and stable model ID remain distinct. CLI results omit
 raw IDN and serial numbers. The same identity check precedes all LIVE
 input-state and measurement queries.
+
+### VISA resource discovery
+
+`list-resources` lists all resource types returned by System VISA (`@ivi`),
+including possibly stale entries. It does not open devices or send SCPI.
+`list-resources --live-only` explicitly opens **only USB INSTR** resources
+and sends `*IDN?`; it lists only responders with structurally valid IDN,
+including unregistered brands/models. Unregistered models have `model_id: null`
+and are **not** authorized for Product LIVE operation. Neither command
+auto-selects a resource for any other command. There is no Discovery
+`--dry-run`, `--simulate`, or alternate backend.
+
+Both commands support `--json` (one success/error object). Text output uses
+`Resources:` or `Live resources:` and displays `IDN:` for live responders.
+Discovery text and JSON may contain **real resource names and IDN serials**:
+use them only as local diagnostics; do not publish unredacted output.
 
 ### Results and exits
 
@@ -120,8 +139,9 @@ updates under nonzero load, power accuracy, or V/I/P synchronization.
 
 LIVE results also include `result.visa.library` and `result.visa.manufacturer`
 for runtime inspection. These identify the VISA implementation, not the load
-manufacturer. Library paths can contain local information; validation saves
-full output privately and removes the directory from the shareable report.
+manufacturer. Library paths can contain local information; the validation script
+keeps raw output only when `-DebugArtifacts` is specified and always writes
+redacted shareable reports.
 Neither `@ivi` nor a library filename alone proves Keysight runtime identity.
 
 Exit codes follow the [Common contract](docs/contracts/common-cli-jsonl-contract.md):
@@ -170,7 +190,7 @@ Run checks from the repository root after syncing the development environment:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_foundation.py
-.\.venv\Scripts\python.exe -m pytest -q tests/test_readonly_core.py tests/test_readonly_cli.py
+.\.venv\Scripts\python.exe -m pytest -q tests/test_readonly_core.py tests/test_readonly_cli.py tests/test_discovery.py tests/test_discovery_cli.py
 .\.venv\Scripts\python.exe -m ruff check src tests
 .\scripts\preflight-cli.ps1
 ```
@@ -188,30 +208,33 @@ without loading VISA:
 .\scripts\live-cli-check.ps1 -Target itech-it8812c -Connection usb -Resource '<USB_RESOURCE>' -Backend system -PlanOnly
 ```
 
-After separate authorization, run the same command without `-PlanOnly` in an
-interactive console. It runs preflight, presents the plan, and requires `RUN`
-before identification. The operator must then inspect the actual VISA library
-and manufacturer information, verify the Keysight installation, and confirm
-`KEYSIGHT` before state and measurement queries. Missing runtime evidence or
-declined confirmation blocks the remaining commands. Noninteractive execution
-is refused before any hardware access.
+After separate authorization, run without `-PlanOnly` in an interactive
+console. After preflight and plan review, press **Enter** to start or Ctrl+C
+to cancel. A separate `RUN` or `KEYSIGHT` response is no longer required.
+VISA library/manufacturer information remains diagnostic, with cross-command
+consistency checking; it is **not** proof of operator-verified Keysight runtime.
+Identify/identity checks are prechecks. Only Input State and the whole V/I/P
+Measurement are counted as two functional cases, with `[1/2]` and `[2/2]`
+progress and PASS/FAIL/NOT RUN summary. Noninteractive execution is refused
+before instrument access.
 
 The script invokes CLI through its installed Python entry function. Each
 command has a 30-second process deadline, and the batch has a 90-second I/O
-budget starting at identification. Runtime review consumes that budget; the
-operator prompt itself is not interrupted, but an expired budget blocks further
-queries. Process deadline termination leaves session closure unconfirmed; it
-sends no input-off command. Individual VISA operations retain their 5000 ms timeout.
+budget starting at identification. The Enter prompt does not consume that
+budget, and an expired budget blocks further queries. Process deadline
+termination leaves session closure unconfirmed; it sends no input-off command. Individual VISA operations retain their 5000 ms timeout.
 
 The read-only validation script exercises the normal Product LIVE commands;
 no pending-support override is needed. The legacy validation option remains
 available for compatibility but cannot bypass identity, USB, or backend checks.
 Validation does not authorize instrument use or expand Product LIVE scope.
 
-Reports are written below `.tmp_tests/readonly-live-*/`. `report.json` includes
-redacted results, query plans, runtime confirmation, and per-command status.
-Files marked `.private` retain local resource/library information; do not share
-them. Keep all run evidence out of tracked documentation.
+Reports are written below `.tmp_tests/readonly-live-*/shareable/` as
+`report.json` and `summary.md` with redacted resource/path information,
+prechecks and two-case counts. The default retains no raw CLI responses or
+private Resource files. `-DebugArtifacts` additionally retains raw JSON,
+stderr and failure diagnostics under a local `private/` directory. Do not
+publish private artifacts or commit run evidence.
 
 ## License
 
