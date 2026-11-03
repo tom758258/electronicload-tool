@@ -1,7 +1,8 @@
 # Electronic Load Tool
 
 Electronic Load Tool provides read-only identification, input-state queries,
-and single-shot voltage, current, and power measurements through Core and CLI.
+and separate voltage/current measurements plus retrieval of the latest available
+power result through Core and CLI.
 The registered profile is ITECH IT8812C (`itech-it8812c`).
 
 All three commands support hardware-free plans and deterministic simulation.
@@ -106,7 +107,10 @@ Modes are `live`, `dry-run`, and `simulate`. `identify` results contain
 `input-state` contains `input_state` (`OFF` or `ON`). Failed state queries report
 `UNKNOWN` in `error.details.input_state`. Measurement keys carry their units:
 `voltage_v`, `current_a`, and `power_w`. Partial or nonfinite measurements fail
-the whole request. V/I/P are separate acquisitions, not simultaneous samples.
+the whole request. Voltage and current use separate MEASure queries. Power
+uses FETCh to read the latest available power result; it does not guarantee
+that a new sample is taken. The tool does not guarantee power-data freshness,
+updates under nonzero load, power accuracy, or V/I/P synchronization.
 
 LIVE results also include `result.visa.library` and `result.visa.manufacturer`
 for runtime inspection. These identify the VISA implementation, not the load
@@ -132,7 +136,7 @@ Core owns the following query sequences, based on the
 | --- | --- |
 | `identify` | `*IDN?` |
 | `input-state` | `*IDN?`, then `INP:STAT?`; only `0` means OFF and `1` means ON. |
-| `measure` | `*IDN?`, then `MEAS:VOLT?`, `MEAS:CURR?`, `MEAS:POW?`. |
+| `measure` | `*IDN?`, then `MEAS:VOLT?`, `MEAS:CURR?`, `FETC:POW?`. |
 
 LIVE uses USB INSTR and System VISA only, with a 5000 ms I/O timeout and
 LF read/write termination. The VISA open call also receives 5000 ms, although
