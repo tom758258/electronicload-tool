@@ -51,7 +51,8 @@ def worker():
                 http(ready['stop_url'],{'schema_version':3})
                 p.wait(timeout=5)
             except Exception:
-                p.kill();p.wait(timeout=5)
+                p.kill()
+                p.wait(timeout=5)
         t.join(timeout=5)
 
 
@@ -85,12 +86,14 @@ def test_worker_multi_job_terminal_without_files(worker,tmp_path):
         _,status=http(status_url)
         assert status['last_job']['worker_job_id']==accepted['worker_job_id']
         assert status['last_job']['result']==finished['result']
-    bad=request('input-off');bad['schema_version']=3.0
+    bad=request('input-off')
+    bad['schema_version']=3.0
     assert http(command_url,bad)[0]==400
     assert http(stop_url,{'schema_version':3})[0]==202
     assert p.wait(timeout=5)==0
     summary=[]
-    while not out.empty(): summary.append(out.get())
+    while not out.empty():
+        summary.append(out.get())
     assert any(e['event']=='summary' and e['ok'] for e in summary)
     assert not list(tmp_path.rglob('request.json')) and not list(tmp_path.rglob('result.json'))
 
