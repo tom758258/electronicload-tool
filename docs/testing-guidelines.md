@@ -67,6 +67,12 @@ redacted shareable reports and confirm raw diagnostic files remain private.
 These no-hardware checks must never issue SCPI. The prior
 `live-cli-check.ps1` remains read-only.
 
+Fake VISA for control must emulate Local mode ignoring setup writes until
+`SYST:REM`, numeric `CURR:RANG?` responses (including zero for low),
+nonzero current readback mismatches, and Worker Stop/unsafe-state changes
+between remote transition and Input ON. Read-only commands must not send
+`SYST:REM` or other setup writes.
+
 Run controlled `live-control-check.ps1` write stages only with separately
 approved model/Resource, bounded DUT setup and explicit operator authorization.
 The `cc` stage must leave Input OFF; the `input` stage requires deliberate

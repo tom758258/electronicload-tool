@@ -188,9 +188,17 @@ CLI. WebUI is not implemented. The bundled Worker is part of the CLI package and
 ## Fixed CC, Input and Common v3 Worker
 
 Fixed CC uses a complete `set-cc` request with amperes and an explicit
-`low` (0–6 A) or `high` (0–60 A) range. CC configuration requires physical
-Input OFF before **every** write; it never turns the input on. The four mode,
-range and current settings are read back before success.
+`low` (0–6 A) or `high` (0–60 A) range. Before LIVE configuration, Core
+checks the exact IT8812C identity and physically confirms Input OFF, then
+sends the programming-guide-required `SYST:REM` transition. It rechecks
+Input OFF before **each** of the four subsequent CC writes; after all four
+setting readbacks it verifies Input OFF once more. Configuration never turns
+Input ON. The `CURR:RANG?` reply is a numeric range-selector value, not
+necessarily a range ceiling: for IT8812C, 0–6 selects low resolution range,
+and values greater than 6 through 60 select high. A numeric range reply of 0
+does not prove that a requested nonzero current was applied: `CURR?` must
+also agree with the requested setpoint. Mismatches include safe numeric
+readback evidence in the error result without assuming success.
 
 Create a local Safety Config, for example:
 
@@ -206,8 +214,14 @@ loads it once at startup. The standalone LIVE Input ON command additionally
 requires `--confirm`, and the live Worker additionally requires the
 startup `--allow-input-on` and per-request `confirm_input_on: true`.
 Core checks the current **physical** fixed CC, current/range, Transient/Short
-OFF and Input OFF state, not remembered setpoints. An ON readback failure is
-UNKNOWN; it is never claimed to be OFF or retried automatically.
+OFF and Input OFF state, not remembered setpoints. For Input ON, the complete
+physical safety checks run before and after `SYST:REM` (and the Worker Stop
+gate is checked immediately before `INP ON`). Explicit Input OFF also enters
+remote mode before sending and verifying `INP OFF`. Read-only identify,
+input-state, measure and resource discovery **never** send `SYST:REM`.
+There is no automatic `SYST:LOC` or `SYST:RWL` command; closing VISA never
+implies Input OFF or returning to local. An ON readback failure is UNKNOWN;
+it is never claimed to be OFF or retried automatically.
 
 ```powershell
 .\.venv\Scripts\electronicload-tool.exe set-cc --simulate --current 1.5 --range low --json

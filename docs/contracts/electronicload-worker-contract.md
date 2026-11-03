@@ -75,10 +75,28 @@ OFF. It does not compare against any previous `set-cc` command. An existing ON
 is rejected. Readback failure following an ON attempt returns UNKNOWN, not
 success, and does not trigger automatic OFF.
 
-`set-cc` performs `FUNC:MODE FIX`, `FUNC CURR`, range and current writes, each
-immediately preceded by a fresh `INP:STAT?` OFF confirmation, followed by
-four setting readbacks. Failed write/readback stops with no rollback or OFF.
-`input-off` is an independent explicit operation, with physical OFF verification.
+After exact identity verification, LIVE `set-cc` checks physical
+`INP:STAT?` OFF before sending `SYST:REM` (required by the IT8800
+Programming Guide). It then performs `FUNC:MODE FIX`, `FUNC CURR`, range
+and current writes, each immediately preceded by a **fresh** `INP:STAT?`
+OFF confirmation. Four setting readbacks and a final Input OFF query must
+all succeed before reporting success. The instrument is not switched back
+to local automatically (`SYST:LOC` is not sent).
+
+`CURR:RANG?` returns a numeric range-selection value rather than a required
+6/60 ceiling. IT8812C selects its highest-resolution low range for selector
+values 0 through 6 A, and high range for greater than 6 through 60 A.
+Out-of-bounds or nonnumeric replies are rejected. Even if the range reply is
+zero, a requested nonzero `CURR` must read back correctly, or the whole
+command fails; diagnostics include the finite numerical readbacks.
+Readback failures stop without rollback, Input OFF or automatic retries.
+
+LIVE `input-on` checks all physical safety prerequisites **before and after**
+`SYST:REM`, including the Worker stop gate, before `INP ON` is permitted.
+`input-off` is an independent explicitly requested operation; it sends
+`SYST:REM` followed by `INP OFF` and verifies physical OFF. The initial
+read-only commands never switch remote mode. Closing the session never
+means Input OFF or local mode. Neither `SYST:RWL` nor `SYST:LOC` is sent.
 
 As of this implementation, only existing read-only IT8812C USB/System VISA
 commands are Product LIVE-open. New control commands remain LIVE pending

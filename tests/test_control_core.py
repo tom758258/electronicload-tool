@@ -22,6 +22,7 @@ class Fake:
         self.short = False
         self.response_errors = {}
         self.write_fail = None
+        self.remote = False
 
     def query(self, command):
         self.calls.append(command)
@@ -38,12 +39,17 @@ class Fake:
         self.calls.append(command)
         if command == self.write_fail:
             raise TimeoutError('PRIVATE-RESOURCE')
+        if command == 'SYST:REM':
+            self.remote = True
+            return
+        if not self.remote:
+            return
         if command == 'FUNC:MODE FIX':
             self.mode='FIX'
         if command == 'FUNC CURR':
             self.function='CURR'
         if command == 'CURR:RANG MIN':
-            self.range=6.0
+            self.range=0.0
             self.current=min(self.current,6)
         if command == 'CURR:RANG MAX':
             self.range=60.0
@@ -71,9 +77,11 @@ def test_four_off_checks_and_four_readbacks(monkeypatch):
     session(fake,monkeypatch)
     result=live('set-cc',limits=SafetyLimits(2),current=1.5,range_name='low')
     assert result['range']=='low' and result['current_a']==1.5
-    assert fake.calls==['*IDN?','INP:STAT?','FUNC:MODE FIX',
+    assert fake.calls==['*IDN?','INP:STAT?','SYST:REM',
+                        'INP:STAT?','FUNC:MODE FIX',
                         'INP:STAT?','FUNC CURR','INP:STAT?','CURR:RANG MIN',
-                        'INP:STAT?','CURR 1.5','FUNC:MODE?','FUNC?','CURR:RANG?','CURR?']
+                        'INP:STAT?','CURR 1.5','FUNC:MODE?','FUNC?','CURR:RANG?','CURR?',
+                        'INP:STAT?']
     assert not fake.input
 
 
@@ -165,7 +173,7 @@ def test_input_on_readback_failure_reports_unknown_no_rescue(monkeypatch):
         nonlocal count
         if command=='INP:STAT?':
             count+=1
-            if count==2:
+            if count==3:
                 raise TimeoutError('PRIVATE-RESOURCE')
         return original(command)
     fake.query=query
@@ -182,7 +190,7 @@ def test_input_off_no_safety_and_verified(monkeypatch):
     fake.input=True
     session(fake,monkeypatch)
     assert live('input-off')['input_state']=='OFF'
-    assert fake.calls==['*IDN?','INP OFF','INP:STAT?']
+    assert fake.calls==['*IDN?','SYST:REM','INP OFF','INP:STAT?']
 
 
 def test_input_on_write_timeout_is_unknown(monkeypatch):
@@ -206,3 +214,136 @@ def test_input_off_write_timeout_is_unknown(monkeypatch):
     with pytest.raises(LoadError) as err:
         live('input-off')
     assert err.value.details['input_state']=='UNKNOWN'
+
+
+def test_remote_required_for_local_hardware_cc(monkeypatch):
+    fake = Fake()
+    session(fake, monkeypatch)
+    # The hardware mock ignores configuration writes until remote mode.
+    fake.write('CURR 0.1')
+    assert fake.current == 0
+    fake.calls.clear()
+    result = live('set-cc', limits=SafetyLimits(0.5), current=0.1, range_name='low')
+    assert result['range'] == 'low'
+    assert result['range_readback_a'] == 0.0
+    assert result['current_a'] == 0.1
+    assert fake.calls.count('SYST:REM') == 1
+    assert fake.remote is True
+    assert fake.calls[-1] == 'INP:STAT?'
+
+
+def test_setting_not_applied_never_passes_even_with_zero_range_readback(monkeypatch):
+    fake = Fake()
+    fake.range = 0.0
+    session(fake, monkeypatch)
+    # The remote command has no effect on this mock (failed remote control).
+    def ignored_remote(command):
+        fake.calls.append(command)
+    fake.write = ignored_remote
+    with pytest.raises(LoadError) as error:
+        live('set-cc', limits=SafetyLimits(0.5), current=0.1, range_name='low')
+    assert error.value.code == 'readback_mismatch'
+    assert error.value.details['observed']['current_a'] == 0.0
+    assert error.value.details['completed_steps'] == ['fixed_mode', 'cc_mode', 'range', 'current']
+    assert 'INP ON' not in fake.calls
+
+
+def test_unknown_range_fails_closed_with_safe_numeric_diagnostics(monkeypatch):
+    fake = Fake()
+    fake.range = 61.0
+    fake.current = 0.1
+    session(fake, monkeypatch)
+    with pytest.raises(LoadError) as error:
+        live('input-on', limits=SafetyLimits(0.5), confirmed=True)
+    assert error.value.code == 'invalid_range_readback'
+    assert error.value.details == {'range_readback_a': 61.0, 'current_readback_a': 0.1}
+    assert 'SYST:REM' not in fake.calls
+    assert 'INP ON' not in fake.calls
+
+
+def test_input_on_rechecks_changed_state_after_remote(monkeypatch):
+    fake = Fake()
+    fake.range = 0.0
+    fake.current = 0.1
+    original_write = fake.write
+
+    def remote_changes_mode(command):
+        original_write(command)
+        if command == 'SYST:REM':
+            fake.transient = True
+
+    fake.write = remote_changes_mode
+    session(fake, monkeypatch)
+    with pytest.raises(LoadError) as error:
+        live('input-on', limits=SafetyLimits(0.5), confirmed=True)
+    assert error.value.code == 'unsafe_mode'
+    assert 'SYST:REM' in fake.calls
+    assert 'INP ON' not in fake.calls
+
+
+def test_worker_stop_after_remote_blocks_input_on(monkeypatch):
+    fake = Fake()
+    fake.range = 0.0
+    fake.current = 0.1
+    stop = Event()
+    original_write = fake.write
+
+    def remote_requests_stop(command):
+        original_write(command)
+        if command == 'SYST:REM':
+            stop.set()
+
+    fake.write = remote_requests_stop
+    session(fake, monkeypatch)
+    with pytest.raises(LoadError) as error:
+        live('input-on', limits=SafetyLimits(0.5), confirmed=True, stop=stop)
+    assert error.value.code == 'stopping'
+    assert 'INP ON' not in fake.calls
+
+
+def test_remote_failure_does_not_attempt_cc_or_input_on(monkeypatch):
+    fake = Fake()
+    fake.write_fail = 'SYST:REM'
+    session(fake, monkeypatch)
+    with pytest.raises(LoadError) as error:
+        live('set-cc', limits=SafetyLimits(0.5), current=0.1, range_name='low')
+    assert error.value.code == 'write_failed'
+    assert error.value.details['completed_steps'] == []
+    assert fake.calls == ['*IDN?', 'INP:STAT?', 'SYST:REM']
+    assert not fake.input
+
+
+def test_range_mapping_uses_programmed_range_value_not_only_ceiling(monkeypatch):
+    for raw, name in ((0, 'low'), (6, 'low'), (6.0001, 'high'), (60, 'high')):
+        fake = Fake()
+        fake.current = 0.1
+        fake.range = raw
+        session(fake, monkeypatch)
+        result = live('input-on', limits=SafetyLimits(0.5), confirmed=True)
+        assert result['range'] == name
+        assert result['range_readback_a'] == raw
+
+
+def test_input_off_remote_transition_failure_reports_unknown(monkeypatch):
+    fake = Fake()
+    fake.input = True
+    fake.write_fail = 'SYST:REM'
+    session(fake, monkeypatch)
+    with pytest.raises(LoadError) as error:
+        live('input-off')
+    assert error.value.code == 'write_failed'
+    assert error.value.details['input_state'] == 'UNKNOWN'
+    assert fake.calls == ['*IDN?', 'SYST:REM']
+    assert fake.input is True
+
+
+def test_offline_control_never_requires_or_opens_remote_hardware(monkeypatch):
+    def forbidden_open(_resource):
+        raise AssertionError('Offline request accessed a live VISA session')
+
+    monkeypatch.setattr(control, 'open_session', forbidden_open)
+    assert control.execute('set-cc', mode='dry-run', current=0.1, range_name='low')[
+        'hardware_access'
+    ] is False
+    assert control.execute('set-cc', mode='simulate', current=0.1,
+                           range_name='low')['current_a'] == 0.1

@@ -21,6 +21,7 @@ class ControlSimulator:
         self.mode = "FIX"
         self.range_a = 60.0
         self.current_a = 0.0
+        self.remote = False
 
     def query(self, command: str) -> str:
         return {
@@ -38,13 +39,18 @@ class ControlSimulator:
         }[command]
 
     def write(self, command: str) -> None:
+        if command == "SYST:REM":
+            self.remote = True
+            return
+        if not self.remote:
+            return
         if command == "FUNC:MODE FIX":
             self.mode = "FIX"
         elif command == "FUNC CURR":
             self.function = "CURR"
         elif command.startswith("CURR:RANG "):
-            self.range_a = 6.0 if command.endswith("MIN") else 60.0
-            self.current_a = min(self.current_a, self.range_a)
+            self.range_a = 0.0 if command.endswith("MIN") else 60.0
+            self.current_a = min(self.current_a, 6.0 if command.endswith("MIN") else 60.0)
         elif command.startswith("CURR "):
             self.current_a = float(command.split(" ", 1)[1])
         elif command in {"INP ON", "INP OFF"}:

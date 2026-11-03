@@ -88,11 +88,19 @@ def _input_off(session) -> None:
 
 
 def _range_name(value: float) -> str:
-    # The guide specifies a numeric NR3 response, not a LOW/HIGH label.
-    for name, high in RANGE_LIMITS.items():
-        if value == high:
-            return name
-    raise LoadError("invalid_range_readback", "Current range could not be identified.", 3)
+    """Classify the requested numeric range using IT8812C range selection.
+
+    IT8800 Programming Guide: CURR:RANG accepts 0..MAX and selects the
+    smallest range containing that value (highest resolution on overlap).
+    CURR:RANG? returns an NR3 numeric value, not necessarily a range ceiling.
+    A zero reply alone is *not* proof that a requested nonzero CC level applied.
+    """
+    if 0 <= value <= RANGE_LIMITS["low"]:
+        return "low"
+    if RANGE_LIMITS["low"] < value <= RANGE_LIMITS["high"]:
+        return "high"
+    raise LoadError("invalid_range_readback", "Current range readback is outside model limits.",
+                    3, range_readback_a=value)
 
 
 def _current_within(actual: float, wanted: Decimal, range_name: str) -> bool:
@@ -101,12 +109,19 @@ def _current_within(actual: float, wanted: Decimal, range_name: str) -> bool:
 
 
 def _settings(session) -> dict:
+    # Read both numeric settings before classifying range: if either readback
+    # fails, preserve the evidence that explains a rejected setting.
     fixed = _query(session, "FUNC:MODE?").upper()
     function = _query(session, "FUNC?").upper()
-    range_name = _range_name(_number(session, "CURR:RANG?"))
+    raw_range = _number(session, "CURR:RANG?")
     current = _number(session, "CURR?")
+    try:
+        range_name = _range_name(raw_range)
+    except LoadError as exc:
+        exc.details["current_readback_a"] = current
+        raise
     return {"function_mode": fixed, "function": function, "range": range_name,
-            "current_a": current}
+            "range_readback_a": raw_range, "current_a": current}
 
 
 def _check_settings(session, settings: dict, limits: SafetyLimits) -> None:
@@ -117,6 +132,21 @@ def _check_settings(session, settings: dict, limits: SafetyLimits) -> None:
     actual = settings["current_a"]
     if actual < 0 or actual > RANGE_LIMITS[settings["range"]] or actual > limits.max_current:
         raise LoadError("safety_limit_exceeded", "Current exceeds range or safety limits.")
+
+
+def _check_input_on_conditions(session, limits: SafetyLimits, stop: Event | None) -> dict:
+    if stop is not None and stop.is_set():
+        raise LoadError("stopping", "Input ON was blocked because Worker is stopping.")
+    state = _flag(session, "INP:STAT?")
+    if state != "OFF":
+        raise LoadError("already_on", "Input is already ON.")
+    settings = _settings(session)
+    _check_settings(session, settings, limits)
+    if _flag(session, "TRAN?") != "OFF" or _flag(session, "INP:SHOR:STAT?") != "OFF":
+        raise LoadError("unsafe_mode", "Transient and Short must be OFF.")
+    if stop is not None and stop.is_set():
+        raise LoadError("stopping", "Input ON was blocked because Worker is stopping.")
+    return settings
 
 
 def _perform(session, command: str, *, current: object | None,
@@ -132,6 +162,10 @@ def _perform(session, command: str, *, current: object | None,
                     (f"CURR:RANG {'MIN' if range_name == 'low' else 'MAX'}", "range"),
                     (f"CURR {requested:f}", "current"))
         try:
+            # Remote is a control-state change: never send it for a read-only
+            # operation or before a fresh physical Input OFF confirmation.
+            _input_off(session)
+            _write(session, "SYST:REM")
             for action, name in sequence:
                 _input_off(session)
                 _write(session, action)
@@ -141,7 +175,12 @@ def _perform(session, command: str, *, current: object | None,
                 or settings["function"] not in {"CURR", "CURRENT"}
                 or settings["range"] != range_name
                 or not _current_within(settings["current_a"], requested, range_name)):
-                raise LoadError("readback_mismatch", "CC setting did not match readback.", 3)
+                raise LoadError("readback_mismatch", "CC setting did not match readback.", 3,
+                                requested_current_a=float(requested),
+                                requested_range=range_name,
+                                observed=settings)
+            # A successful readback of settings does not itself prove Input OFF.
+            _input_off(session)
         except LoadError as exc:
             exc.details["completed_steps"] = completed
             raise
@@ -151,15 +190,11 @@ def _perform(session, command: str, *, current: object | None,
             raise LoadError("confirmation_required", "Input ON needs explicit confirmation.")
         if limits is None:
             raise LoadError("missing_safety_config", "Input ON requires a safety config.")
-        state = _flag(session, "INP:STAT?")
-        if state != "OFF":
-            raise LoadError("already_on", "Input is already ON.")
-        settings = _settings(session)
-        _check_settings(session, settings, limits)
-        if _flag(session, "TRAN?") != "OFF" or _flag(session, "INP:SHOR:STAT?") != "OFF":
-            raise LoadError("unsafe_mode", "Transient and Short must be OFF.")
-        if stop is not None and stop.is_set():
-            raise LoadError("stopping", "Input ON was blocked because Worker is stopping.")
+        _check_input_on_conditions(session, limits, stop)
+        # The remote transition might change hardware state. Recheck every
+        # condition afterward, including the Worker stop gate, before INP ON.
+        _write(session, "SYST:REM")
+        settings = _check_input_on_conditions(session, limits, stop)
         try:
             _write(session, "INP ON")
             actual = _flag(session, "INP:STAT?")
@@ -170,7 +205,10 @@ def _perform(session, command: str, *, current: object | None,
             raise LoadError("input_on_not_confirmed", "Input ON was not confirmed.", 3,
                             input_state=actual, input_on_attempted=True)
         return {"input_state": "ON", **settings}
+    # The explicit OFF operation must also enter remote mode to be effective,
+    # and never assumes VISA close or remote/local release switches Input OFF.
     try:
+        _write(session, "SYST:REM")
         _write(session, "INP OFF")
         actual = _flag(session, "INP:STAT?")
     except LoadError as exc:
