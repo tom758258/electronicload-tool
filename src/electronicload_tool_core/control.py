@@ -17,7 +17,7 @@ from .simulator import ControlSimulator
 
 CONTROL_COMMANDS = ("set-cc", "input-on", "input-off")
 # Exact IT8812C Product LIVE control commands; the model, USB/System VISA,
-# Safety Config and explicit Input ON gates remain mandatory.
+# Optional Safety Config and explicit Input ON authorization remain enforced.
 PRODUCT_LIVE_COMMANDS = frozenset(CONTROL_COMMANDS)
 RANGE_LIMITS = {"low": 6.0, "high": 60.0}
 RANGE_RESOLUTION = {"low": Decimal("0.0001"), "high": Decimal("0.001")}
@@ -38,13 +38,13 @@ def _decimal(value: object) -> Decimal:
     return result
 
 
-def validate_current(value: object, range_name: str, limits: SafetyLimits) -> Decimal:
+def validate_current(value: object, range_name: str, limits: SafetyLimits | None) -> Decimal:
     if range_name not in RANGE_LIMITS:
         raise LoadError("invalid_range", "Range must be low or high.")
     current = _decimal(value)
     if current < 0 or current > Decimal(str(RANGE_LIMITS[range_name])):
         raise LoadError("current_out_of_range", "Current is outside the selected range.")
-    if current > Decimal(str(limits.max_current)):
+    if limits is not None and current > Decimal(str(limits.max_current)):
         raise LoadError("safety_limit_exceeded", "Current exceeds the configured safety limit.")
     if current % RANGE_RESOLUTION[range_name] != 0:
         raise LoadError("invalid_current_resolution", "Current exceeds the range's programming resolution.")
@@ -144,17 +144,18 @@ def _settings(session) -> dict:
             "range_readback_a": raw_range, "current_a": current}
 
 
-def _check_settings(session, settings: dict, limits: SafetyLimits) -> None:
+def _check_settings(session, settings: dict, limits: SafetyLimits | None) -> None:
     if settings["function_mode"] not in {"FIX", "FIXED"}:
         raise LoadError("unsafe_mode", "Input ON requires fixed mode.")
     if settings["function"] not in {"CURR", "CURRENT"}:
         raise LoadError("unsafe_mode", "Input ON requires CC mode.")
     actual = settings["current_a"]
-    if actual < 0 or actual > RANGE_LIMITS[settings["range"]] or actual > limits.max_current:
+    if (actual < 0 or actual > RANGE_LIMITS[settings["range"]]
+            or (limits is not None and actual > limits.max_current)):
         raise LoadError("safety_limit_exceeded", "Current exceeds range or safety limits.")
 
 
-def _check_input_on_conditions(session, limits: SafetyLimits, stop: Event | None) -> dict:
+def _check_input_on_conditions(session, limits: SafetyLimits | None, stop: Event | None) -> dict:
     if stop is not None and stop.is_set():
         raise LoadError("stopping", "Input ON was blocked because Worker is stopping.")
     state = _flag(session, "INP:STAT?")
@@ -174,8 +175,6 @@ def _perform(session, command: str, *, current: object | None,
              confirmed: bool, stop: Event | None) -> dict:
     parse_identity(_query(session, "*IDN?"))
     if command == "set-cc":
-        if limits is None:
-            raise LoadError("missing_safety_config", "CC requires a safety config.")
         requested = validate_current(current, range_name, limits)
         completed = []
         # IT8812C hardware rejects nonzero CURR after CURR:RANG MIN
@@ -213,8 +212,6 @@ def _perform(session, command: str, *, current: object | None,
     if command == "input-on":
         if not confirmed:
             raise LoadError("confirmation_required", "Input ON needs explicit confirmation.")
-        if limits is None:
-            raise LoadError("missing_safety_config", "Input ON requires a safety config.")
         _check_input_on_conditions(session, limits, stop)
         # The remote transition might change hardware state. Recheck every
         # condition afterward, including the Worker stop gate, before INP ON.
@@ -261,8 +258,9 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
     if mode == "live":
         if command not in PRODUCT_LIVE_COMMANDS and not validation:
             raise LoadError("unsupported_live_scope", "Control is pending LIVE validation.")
-        effective_limits = limits or (load_safety_config(safety_config)
-                                       if command != "input-off" else None)
+        effective_limits = limits
+        if command != "input-off" and effective_limits is None and safety_config is not None:
+            effective_limits = load_safety_config(safety_config)
     else:
         effective_limits = limits or SafetyLimits(60.0)
     if command == "set-cc":

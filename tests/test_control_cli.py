@@ -15,7 +15,7 @@ def test_new_simulation_and_json(capsys):
     assert json.loads(capsys.readouterr().out)['result']['input_state']=='OFF'
 
 
-def test_refusal_and_no_hardware(capsys):
+def test_refusal_and_no_hardware(capsys, tmp_path):
     assert main(['set-cc','--dry-run','--current','1.5','--range','low','--json'])==0
     assert json.loads(capsys.readouterr().out)['result']['hardware_access'] is False
     assert main(['input-on','--simulate','--json'])==2
@@ -23,8 +23,9 @@ def test_refusal_and_no_hardware(capsys):
     assert main(['set-cc','--current','1.5','--range','low','--json'])==2
     assert json.loads(capsys.readouterr().out)['error']['code']=='missing_resource'
     assert main(['set-cc','--resource','USB0::0xFFFF::0x0001::SYNTHETIC::INSTR',
-                 '--current','1.5','--range','low','--json'])==2
-    assert json.loads(capsys.readouterr().out)['error']['code']=='missing_safety_config'
+                 '--current','1.5','--range','low',
+                 '--safety-config',str(tmp_path / 'missing.toml'),'--json'])==2
+    assert json.loads(capsys.readouterr().out)['error']['code']=='invalid_safety_config'
 
 
 def test_manifest_static(capsys):
@@ -50,3 +51,22 @@ def test_normal_live_cli_control_dispatches_without_validation_override(monkeypa
     assert payload['ok'] is True and payload['result']['input_state'] == 'OFF'
     assert observed['command'] == 'input-off'
     assert observed['validation'] is False
+
+
+def test_live_cli_passes_optional_safety_config_to_shared_core(monkeypatch, capsys):
+    observed = []
+
+    def fake_control(command, **kwargs):
+        observed.append((command, kwargs))
+        return {'input_state': 'OFF' if command == 'set-cc' else 'ON'}
+
+    monkeypatch.setattr(cli, 'control_execute', fake_control)
+    resource = 'USB0::0xFFFF::0x0001::SYNTHETIC::INSTR'
+    assert main(['set-cc', '--resource', resource, '--current', '0.1',
+                 '--range', 'low', '--json']) == 0
+    assert json.loads(capsys.readouterr().out)['ok'] is True
+    assert main(['input-on', '--resource', resource, '--confirm', '--json']) == 0
+    assert json.loads(capsys.readouterr().out)['ok'] is True
+    assert [command for command, _ in observed] == ['set-cc', 'input-on']
+    assert all(kwargs['safety_config'] is None for _, kwargs in observed)
+    assert observed[1][1]['confirmed'] is True

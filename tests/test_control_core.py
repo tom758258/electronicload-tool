@@ -104,6 +104,67 @@ def test_four_off_checks_and_four_readbacks(monkeypatch):
     assert not fake.input
 
 
+@pytest.mark.parametrize('current,range_name', [(0.1, 'low'), (7.0, 'high')])
+def test_live_cc_without_safety_config_respects_model_range(monkeypatch, current, range_name):
+    fake = Fake()
+    session(fake, monkeypatch)
+    result = live('set-cc', current=current, range_name=range_name)
+    assert result['current_a'] == current
+    assert result['range'] == range_name
+    assert result['input_state'] == 'OFF'
+    assert 'INP ON' not in fake.calls
+
+
+@pytest.mark.parametrize('current,range_name', [(6.1, 'low'), (60.1, 'high')])
+def test_live_cc_without_safety_config_rejects_out_of_range(monkeypatch, current, range_name):
+    fake = Fake()
+    session(fake, monkeypatch)
+    with pytest.raises(LoadError) as error:
+        live('set-cc', current=current, range_name=range_name)
+    assert error.value.code == 'current_out_of_range'
+    assert fake.calls == []
+
+
+def test_live_explicit_safety_config_limits_cc_and_rejects_invalid_file(monkeypatch, tmp_path):
+    fake = Fake()
+    session(fake, monkeypatch)
+    path = tmp_path / 'limits.toml'
+    path.write_text('[safety]' + chr(10) + 'max_current = 0.5' + chr(10),
+                    encoding='utf-8')
+    assert live('set-cc', current=0.1, range_name='low',
+                safety_config=str(path))['current_a'] == 0.1
+    fake.calls.clear()
+    with pytest.raises(LoadError) as error:
+        live('set-cc', current=0.6, range_name='low', safety_config=str(path))
+    assert error.value.code == 'safety_limit_exceeded'
+    assert fake.calls == []
+    with pytest.raises(LoadError) as error:
+        live('set-cc', current=0.1, range_name='low',
+             safety_config=str(tmp_path / 'missing.toml'))
+    assert error.value.code == 'invalid_safety_config'
+    assert fake.calls == []
+
+
+def test_live_input_on_without_safety_config_still_checks_physical_current(monkeypatch):
+    fake = Fake()
+    fake.current = 0.1
+    session(fake, monkeypatch)
+    with pytest.raises(LoadError) as error:
+        live('input-on')
+    assert error.value.code == 'confirmation_required'
+    assert 'INP ON' not in fake.calls
+    assert live('input-on', confirmed=True)['input_state'] == 'ON'
+    assert fake.calls.count('INP ON') == 1
+
+    fake.input = False
+    fake.current = 61.0
+    fake.calls.clear()
+    with pytest.raises(LoadError) as error:
+        live('input-on', confirmed=True)
+    assert error.value.code == 'safety_limit_exceeded'
+    assert 'INP ON' not in fake.calls
+
+
 def test_setting_failure_does_not_rollback_or_off(monkeypatch):
     fake=Fake()
     session(fake,monkeypatch)
