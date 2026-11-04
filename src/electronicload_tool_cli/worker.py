@@ -161,7 +161,7 @@ def _arguments(command, raw, runtime):
         if (set(raw) != permitted or not isinstance(raw["range"], str)
                 or type(raw["current"]) not in (int, float)):
             raise LoadError("argument_error", "CC requires current and range.")
-        validate_current(raw["current"], raw["range"], runtime.limits or SafetyLimits(60))
+        validate_current(raw["current"], raw["range"], runtime.limits)
     if command == "input-on" and "confirm_input_on" in raw:
         if type(raw["confirm_input_on"]) is not bool:
             raise LoadError("argument_error", "confirm_input_on must be boolean.")
@@ -230,9 +230,6 @@ def _handler(runtime):
                     raise LoadError("invalid_request", "job_id must be a string.")
                 context = _context(req, runtime.mode)
                 arguments = _arguments(command, req.get("arguments", {}), runtime)
-                if (context["mode"] == "live" and runtime.limits is None
-                    and command in {"set-cc", "input-on"}):
-                    raise LoadError("missing_safety_config", "Live control requires a Safety Config.")
                 if command == "input-on" and context["mode"] == "live":
                     if not runtime.allow_input_on:
                         raise LoadError("input_on_not_allowed", "Worker Input ON is disabled.")

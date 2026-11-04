@@ -61,11 +61,13 @@ request mode. Worker does **not** allow the contributor-validation override.
 
 ## Safety
 
-LIVE `set-cc` and `input-on` require an explicit valid TOML Safety Config,
-loaded once when the live Worker starts. The file contains only
-`[safety] max_current` in amperes, independent of the instrument's maximum.
-Changes to the file require a Worker restart. Standalone CLI reads its Safety
-Config on each invocation.
+LIVE `set-cc` and `input-on` may run without a Safety Config. Core always
+checks the IT8812C current range; `set-cc` also validates programming
+resolution. When a TOML Safety Config is supplied, its `[safety] max_current` adds a stricter current
+ceiling. An invalid supplied file is refused. The live Worker loads a provided
+file once at startup; changes require a restart. Standalone CLI reads a
+provided file on each invocation. Range/current checks do not guarantee DUT
+safety or enforce the entire voltage/power operating envelope.
 
 LIVE Input ON has two gates: the Worker starts with `--allow-input-on`, and the
 single `input-on` request carries `confirm_input_on: true`. Neither gate
@@ -115,7 +117,7 @@ Neither `SYST:RWL` nor `SYST:LOC` is sent.
 Product LIVE is open only for the exact IT8812C identity over USB INSTR /
 System VISA: `identify`, `input-state`, `measure`, `set-cc`, `input-on`
 and `input-off`. The control commands retain Core safety checks, explicit
-Resource requirements, required Safety Config and Input ON confirmation gates.
+Resource requirements, optional Safety Config and Input ON confirmation gates.
 The Worker uses this same Core support policy and its own startup/per-request
 Input ON authorization; its end-to-end physical LIVE behavior is not implied
 to be hardware-validated by CLI acceptance. The hidden contributor-validation

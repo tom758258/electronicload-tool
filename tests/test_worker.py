@@ -124,3 +124,70 @@ def test_local_lifecycle_client(worker):
         assert err.code=='invalid_url'
     else:
         assert False,'Nonlocal HTTP URL was accepted'
+
+
+def test_live_worker_optional_safety_config_admission_and_authorization(monkeypatch):
+    from http.server import ThreadingHTTPServer
+    from electronicload_tool_cli import worker as worker_module
+    from electronicload_tool_core.safety import SafetyLimits
+
+    calls = []
+
+    def fake_control(command, **kwargs):
+        calls.append((command, kwargs))
+        return {'input_state': 'ON' if command == 'input-on' else 'OFF'}
+
+    monkeypatch.setattr(worker_module, 'control_execute', fake_control)
+    runtime = worker_module.Runtime(mode='live',
+                                    resource='USB0::0xFFFF::0x0001::SYNTHETIC::INSTR',
+                                    limits=None, allow_input_on=True)
+    server = ThreadingHTTPServer(('127.0.0.1', 0), worker_module._handler(runtime))
+    runtime.server = server
+    runtime.port = server.server_port
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    def live_request(command, arguments):
+        return {'schema_version': 3, 'command': command, 'arguments': arguments,
+                'context': {'mode': 'live'}}
+
+    def finish(worker_job_id):
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            _, status = http(runtime.urls()['status_url'])
+            job = status['last_job']
+            if job is not None and job['worker_job_id'] == worker_job_id:
+                return job
+            time.sleep(0.01)
+        pytest.fail('Live Worker fake job did not finish')
+
+    try:
+        command_url = runtime.urls()['command_url']
+        assert http(command_url, live_request('set-cc',
+                    {'current': 6.1, 'range': 'low'}))[0] == 400
+        code, accepted = http(command_url, live_request('set-cc',
+                               {'current': 0.1, 'range': 'low'}))
+        assert code == 202 and accepted['status'] == 'accepted'
+        assert finish(accepted['worker_job_id'])['state'] == 'succeeded'
+        assert calls[-1][1]['limits'] is None
+
+        runtime.limits = SafetyLimits(0.05)
+        assert http(command_url, live_request('set-cc',
+                    {'current': 0.1, 'range': 'low'}))[0] == 400
+        runtime.limits = None
+        code, rejected = http(command_url, live_request('input-on', {}))
+        assert code == 409 and rejected['error']['code'] == 'confirmation_required'
+        runtime.allow_input_on = False
+        assert http(command_url, live_request('input-on',
+                    {'confirm_input_on': True}))[0] == 409
+        runtime.allow_input_on = True
+        code, accepted = http(command_url, live_request('input-on',
+                               {'confirm_input_on': True}))
+        assert code == 202 and accepted['status'] == 'accepted'
+        assert finish(accepted['worker_job_id'])['state'] == 'succeeded'
+        assert calls[-1][0] == 'input-on' and calls[-1][1]['limits'] is None
+        assert calls[-1][1]['confirmed'] is True
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=3)

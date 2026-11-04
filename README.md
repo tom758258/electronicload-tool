@@ -8,9 +8,9 @@ ITECH IT8812C (`itech-it8812c`).
 Product LIVE supports `identify`, `input-state`, `measure`, `set-cc`,
 `input-on` and `input-off` only for the exact IT8812C identity with an
 operator-supplied USB INSTR Resource and System VISA (target: Keysight IO
-Libraries Suite). Control commands require an explicit Safety Config and
-Input ON additionally requires deliberate confirmation. Simulation and
-dry-run never grant hardware authorization.
+Libraries Suite). A Safety Config is optional for load control; when supplied,
+it adds a current ceiling to the model/range limits. Input ON still requires
+deliberate confirmation. Simulation and dry-run never grant hardware authorization.
 
 ## Development environment
 
@@ -200,18 +200,23 @@ does not prove that a requested nonzero current was applied: `CURR?` must
 also agree with the requested setpoint. Mismatches include safe numeric
 readback evidence in the error result without assuming success.
 
-Create a local Safety Config, for example:
+Optionally create a local Safety Config to impose a stricter current ceiling,
+for example:
 
 ```toml
 [safety]
 max_current = 2.0
 ```
 
-A valid Safety Config is mandatory for LIVE `set-cc` and `input-on`.
-The allowed maximum is the smaller of the model/range rating and the
-operator's `max_current`. The CLI reloads this file per invocation; a Worker
-loads it once at startup. The standalone LIVE Input ON command additionally
-requires `--confirm`, and the live Worker additionally requires the
+LIVE `set-cc` and `input-on` do not require a Safety Config. Without one,
+Core enforces the selected IT8812C 6 A/60 A CC range; `set-cc` also
+checks programming resolution. `input-on` checks the physical CC setting
+against its range.
+When supplied, `max_current` further restricts the allowed maximum; a missing
+or invalid supplied file is rejected. The CLI reloads the file per invocation;
+a Worker loads it once at startup. Range/current checks do not guarantee DUT
+safety or enforce a complete voltage/power operating envelope. The standalone
+LIVE Input ON command additionally requires `--confirm`, and the live Worker additionally requires the
 startup `--allow-input-on` and per-request `confirm_input_on: true`.
 Core checks the current **physical** fixed CC, current/range, Transient/Short
 OFF and Input OFF state, not remembered setpoints. For Input ON, the complete
@@ -250,7 +255,18 @@ separate control script or mode/suite selection; see
 
 ## Checks and builds
 
-Run checks from the repository root after syncing the development environment:
+Run checks from the repository root after syncing the development environment.
+Before the first pytest run, create the ignored repository-local test directory.
+`pyproject.toml` uses `--basetemp=.tmp_tests/pytest`; without the parent
+`.tmp_tests/` directory, pytest's `tmp_path` fixture can fail with
+`FileNotFoundError` on Windows. The local directory also avoids relying on
+system temporary-directory permissions.
+
+```powershell
+New-Item -ItemType Directory -Force .tmp_tests | Out-Null
+```
+
+Then run the relevant checks:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_foundation.py
@@ -314,8 +330,9 @@ SCPI error-queue consumption or automatic reconnect is added.
 All six implemented CLI commands use normal Product LIVE permissions,
 including fixed CC and deliberate Input ON/OFF. The unified validation script
 runs the actual public CLI path and does not require the hidden contributor
-validation override. Exact identity/USB/System VISA, Safety Config and Input ON
-confirmation requirements remain unchanged. System VISA library/manufacturer
+validation override. Exact identity/USB/System VISA and Input ON
+confirmation requirements remain unchanged; Safety Config is still supplied by this bounded validation script,
+not required by ordinary LIVE Core operations. System VISA library/manufacturer
 is reported for diagnostics and cross-command consistency, not independent
 operator verification. The script does not validate Worker LIVE lifecycle or
 nonzero-load current/power accuracy.
