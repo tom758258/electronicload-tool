@@ -112,8 +112,13 @@ separate from instrument I/O. The initial read-only commands never switch
 remote mode. Closing the session never means Input OFF or local mode.
 Neither `SYST:RWL` nor `SYST:LOC` is sent.
 
-As of this implementation, only existing read-only IT8812C USB/System VISA
-commands are Product LIVE-open. New control commands remain LIVE pending
-until separately approved, bounded hardware evidence and support-policy
-acceptance. The hidden contributor-validation CLI option is not available
-in the Worker. Dry-run/simulation do not certify real hardware behavior.
+Product LIVE is open only for the exact IT8812C identity over USB INSTR /
+System VISA: `identify`, `input-state`, `measure`, `set-cc`, `input-on`
+and `input-off`. The control commands retain Core safety checks, explicit
+Resource requirements, required Safety Config and Input ON confirmation gates.
+The Worker uses this same Core support policy and its own startup/per-request
+Input ON authorization; its end-to-end physical LIVE behavior is not implied
+to be hardware-validated by CLI acceptance. The hidden contributor-validation
+CLI option remains for compatibility, is not used by the Worker, and cannot
+bypass identity or connection restrictions. Dry-run/simulation do not certify
+real hardware behavior.

@@ -5,12 +5,12 @@ plus fixed-CC configuration and deliberate Input ON/OFF through a shared Core,
 Standalone CLI and bundled Common v3 Worker. The initial registered model is
 ITECH IT8812C (`itech-it8812c`).
 
-Product LIVE currently supports `identify`, `input-state`, and `measure`
-only for the exact IT8812C identity through an operator-supplied USB INSTR
-resource and System VISA (target: Keysight IO Libraries Suite). Newly added
-`set-cc`, `input-on` and `input-off` control require separately approved
-real-instrument validation before Product LIVE scope is opened. No
-dry-run/simulation result grants LIVE control permission.
+Product LIVE supports `identify`, `input-state`, `measure`, `set-cc`,
+`input-on` and `input-off` only for the exact IT8812C identity with an
+operator-supplied USB INSTR Resource and System VISA (target: Keysight IO
+Libraries Suite). Control commands require an explicit Safety Config and
+Input ON additionally requires deliberate confirmation. Simulation and
+dry-run never grant hardware authorization.
 
 ## Development environment
 
@@ -311,12 +311,14 @@ fails or times out, the operator must act; neither process termination nor
 VISA session closure proves Input OFF. No reset, `SYST:LOC`, protection clear,
 SCPI error-queue consumption or automatic reconnect is added.
 
-Read-only queries use normal Product LIVE permissions. Pending control
-commands are exercised only by the hidden contributor-validation permission
-on the real CLI: this **does not open public Product LIVE control**.
-The underlying exact identity/USB/System VISA and Core safety rules apply
-unchanged. System VISA library/manufacturer is reported for diagnostics and
-cross-command consistency, not independent operator verification.
+All six implemented CLI commands use normal Product LIVE permissions,
+including fixed CC and deliberate Input ON/OFF. The unified validation script
+runs the actual public CLI path and does not require the hidden contributor
+validation override. Exact identity/USB/System VISA, Safety Config and Input ON
+confirmation requirements remain unchanged. System VISA library/manufacturer
+is reported for diagnostics and cross-command consistency, not independent
+operator verification. The script does not validate Worker LIVE lifecycle or
+nonzero-load current/power accuracy.
 
 Each CLI command has a **30-second** process deadline; the full run has a
 **240-second** I/O budget beginning at Identify. An explicit OFF cleanup

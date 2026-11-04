@@ -2,6 +2,7 @@
 import json
 
 from electronicload_tool_cli.cli import main
+from electronicload_tool_cli import cli
 
 
 def test_new_simulation_and_json(capsys):
@@ -23,7 +24,7 @@ def test_refusal_and_no_hardware(capsys):
     assert json.loads(capsys.readouterr().out)['error']['code']=='missing_resource'
     assert main(['set-cc','--resource','USB0::0xFFFF::0x0001::SYNTHETIC::INSTR',
                  '--current','1.5','--range','low','--json'])==2
-    assert json.loads(capsys.readouterr().out)['error']['code']=='unsupported_live_scope'
+    assert json.loads(capsys.readouterr().out)['error']['code']=='missing_safety_config'
 
 
 def test_manifest_static(capsys):
@@ -33,3 +34,19 @@ def test_manifest_static(capsys):
     assert p['worker_protocol']['schema_versions']==[3]
     assert p['execution']=={'model':'multi_job','context_binding':'per_command'}
     assert p['features']=={'common.async_jobs':{'contract_version':1}}
+
+
+def test_normal_live_cli_control_dispatches_without_validation_override(monkeypatch, capsys):
+    observed = {}
+
+    def fake_control(command, **kwargs):
+        observed.update(command=command, **kwargs)
+        return {'input_state': 'OFF'}
+
+    monkeypatch.setattr(cli, 'control_execute', fake_control)
+    assert main(['input-off', '--resource',
+                 'USB0::0xFFFF::0x0001::SYNTHETIC::INSTR', '--json']) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['ok'] is True and payload['result']['input_state'] == 'OFF'
+    assert observed['command'] == 'input-off'
+    assert observed['validation'] is False

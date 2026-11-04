@@ -16,9 +16,9 @@ from .visa import open_session, validate_connection
 from .simulator import ControlSimulator
 
 CONTROL_COMMANDS = ("set-cc", "input-on", "input-off")
-# These commands are not yet Product LIVE validated. Validation is opt-in and
-# never permitted from the Worker. Offline and simulator access is independent.
-PRODUCT_LIVE_COMMANDS = frozenset()
+# Exact IT8812C Product LIVE control commands; the model, USB/System VISA,
+# Safety Config and explicit Input ON gates remain mandatory.
+PRODUCT_LIVE_COMMANDS = frozenset(CONTROL_COMMANDS)
 RANGE_LIMITS = {"low": 6.0, "high": 60.0}
 RANGE_RESOLUTION = {"low": Decimal("0.0001"), "high": Decimal("0.001")}
 INPUT_STATE_CONFIRM_TIMEOUT_S = 2.0
@@ -181,7 +181,7 @@ def _perform(session, command: str, *, current: object | None,
         # IT8812C hardware rejects nonzero CURR after CURR:RANG MIN
         # (error 120). A numeric selector equal to the requested low-range
         # setpoint was verified on physical hardware with Input OFF.
-        # Leave the high-range MAX path unchanged; it is not yet LIVE-tested.
+        # Preserve the high-range MAX path.
         range_command = (f"CURR:RANG {requested:f}" if range_name == "low"
                          else "CURR:RANG MAX")
         sequence = (("FUNC:MODE FIX", "fixed_mode"), ("FUNC CURR", "cc_mode"),

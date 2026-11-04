@@ -43,7 +43,7 @@ $report = [ordered]@{
     }
     artifact_mode = $(if ($DebugArtifacts) { 'debug' } else { 'minimal' })
     validation_mode = $(if ($PlanOnly) { 'plan-only' } else { 'live' })
-    product_live = 'read-only open; control pending LIVE acceptance'
+    product_live = 'IT8812C USB/System VISA read-only and fixed CC/Input LIVE open'
     per_command_deadline_ms = $perCommandDeadlineMs
     total_deadline_ms = $totalDeadlineMs
     safety_max_current_a = $null
@@ -146,7 +146,7 @@ function Show-Summary {
 }
 
 function Invoke-LiveCommand([string]$Command, [string]$CaseName,
-                            [string[]]$ExtraArgs = @(), [switch]$Control,
+                            [string[]]$ExtraArgs = @(),
                             [switch]$Cleanup) {
     $remaining = if ($Cleanup) { $script:perCommandDeadlineMs } else {
         [Math]::Min($script:perCommandDeadlineMs,
@@ -156,7 +156,6 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
     $arguments = @('-c', 'from electronicload_tool_cli.cli import main; raise SystemExit(main())',
         $Command, '--resource', $Resource, '--backend', $Backend, '--model', $Target,
         '--json') + $ExtraArgs
-    if ($Control) { $arguments += '--validation-allow-pending-live-support' }
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $python
     $start.Arguments = ($arguments | ForEach-Object { '"' + ($_ -replace '"','\"') + '"' }) -join ' '
@@ -398,7 +397,7 @@ try {
     Write-Host 'PASS Measurement (Input OFF)'
 
     Write-Host 'Running CC High-range configuration with Input OFF...'
-    $high = Invoke-LiveCommand -Command 'set-cc' -CaseName 'set-cc-high' -ExtraArgs $highArgs -Control
+    $high = Invoke-LiveCommand -Command 'set-cc' -CaseName 'set-cc-high' -ExtraArgs $highArgs
     Assert-Runtime $high 'set-cc-high'
     if ($high.result.range -cne 'high' -or $high.result.input_state -cne 'OFF') {
         Fail-Case 'set-cc-high' 'readback_mismatch' 'High-range CC setting or Input OFF readback did not match.'
@@ -406,7 +405,7 @@ try {
     Write-Host 'PASS Set CC: High range'
 
     Write-Host 'Running CC Low-range configuration with Input OFF...'
-    $low = Invoke-LiveCommand -Command 'set-cc' -CaseName 'set-cc-low' -ExtraArgs $lowArgs -Control
+    $low = Invoke-LiveCommand -Command 'set-cc' -CaseName 'set-cc-low' -ExtraArgs $lowArgs
     Assert-Runtime $low 'set-cc-low'
     if ($low.result.range -cne 'low' -or $low.result.input_state -cne 'OFF') {
         Fail-Case 'set-cc-low' 'readback_mismatch' 'Low-range CC setting or Input OFF readback did not match.'
@@ -417,7 +416,7 @@ try {
     # must not assume an exception means the physical Input remains OFF.
     $inputOnAttempted = $true
     Write-Host 'Running explicitly authorized Input ON...'
-    $on = Invoke-LiveCommand -Command 'input-on' -CaseName 'input-on' -ExtraArgs $onArgs -Control
+    $on = Invoke-LiveCommand -Command 'input-on' -CaseName 'input-on' -ExtraArgs $onArgs
     Assert-Runtime $on 'input-on'
     if ($on.result.input_state -cne 'ON') { Fail-Case 'input-on' 'input_on_not_confirmed' 'Input ON was not confirmed.' }
     Write-Host 'PASS Input ON'
@@ -428,7 +427,7 @@ try {
     Write-Host 'PASS Measurement (Input ON)'
 
     Write-Host 'Running explicit Input OFF...'
-    $off = Invoke-LiveCommand -Command 'input-off' -CaseName 'input-off' -Control
+    $off = Invoke-LiveCommand -Command 'input-off' -CaseName 'input-off'
     Assert-Runtime $off 'input-off'
     Assert-InputOff $off 'input-off'
     $inputOnAttempted = $false
@@ -463,7 +462,7 @@ try {
         }
         try {
             Write-Host 'Input ON was attempted: explicitly commanding OFF cleanup...'
-            $cleanup = Invoke-LiveCommand -Command 'input-off' -CaseName 'cleanup-input-off' -Control -Cleanup
+            $cleanup = Invoke-LiveCommand -Command 'input-off' -CaseName 'cleanup-input-off' -Cleanup
             Assert-InputOff $cleanup 'cleanup-input-off'
             $inputOnAttempted = $false
             Write-Host 'PASS Explicit Input OFF cleanup'

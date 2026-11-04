@@ -137,10 +137,42 @@ def test_invalid_cc_no_writes(monkeypatch,current,range_name,code):
     assert fake.calls==[]
 
 
-def test_live_controls_still_pending_product_acceptance():
+def test_live_control_product_scope_preserves_safety_and_input_confirmation(monkeypatch):
+    fake = Fake()
+    session(fake, monkeypatch)
+    assert control.PRODUCT_LIVE_COMMANDS == frozenset(control.CONTROL_COMMANDS)
+
+    result = control.execute('set-cc', resource=RESOURCE, limits=SafetyLimits(0.5),
+                             current=0.1, range_name='low')
+    assert result['input_state'] == 'OFF'
+    assert 'INP ON' not in fake.calls
+
     with pytest.raises(LoadError) as err:
-        control.execute('set-cc',resource=RESOURCE,limits=SafetyLimits(2),current=1,range_name='low')
-    assert err.value.code=='unsupported_live_scope'
+        control.execute('input-on', resource=RESOURCE, limits=SafetyLimits(0.5))
+    assert err.value.code == 'confirmation_required'
+    assert 'INP ON' not in fake.calls
+
+    assert control.execute('input-on', resource=RESOURCE, limits=SafetyLimits(0.5),
+                           confirmed=True)['input_state'] == 'ON'
+    assert control.execute('input-off', resource=RESOURCE)['input_state'] == 'OFF'
+    assert fake.calls.count('INP ON') == 1
+    assert fake.calls.count('INP OFF') == 1
+
+
+@pytest.mark.parametrize('kwargs,code', [
+    ({'model_id': 'unregistered'}, 'unsupported_model'),
+    ({'backend': 'unsupported'}, 'unsupported_backend'),
+    ({'resource': None}, 'missing_resource'),
+])
+def test_product_live_rejects_unregistered_connection_scopes(monkeypatch, kwargs, code):
+    fake = Fake()
+    session(fake, monkeypatch)
+    options = {'resource': RESOURCE, 'limits': SafetyLimits(0.5),
+               'current': 0.1, 'range_name': 'low', **kwargs}
+    with pytest.raises(LoadError) as err:
+        control.execute('set-cc', **options)
+    assert err.value.code == code
+    assert fake.calls == []
 
 
 def test_input_on_requires_fresh_safe_state_and_explicit_confirmation(monkeypatch):
