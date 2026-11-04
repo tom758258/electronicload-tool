@@ -126,6 +126,17 @@ def test_local_lifecycle_client(worker):
         assert False,'Nonlocal HTTP URL was accepted'
 
 
+def test_live_worker_rejects_explicit_empty_safety_config():
+    from electronicload_tool_cli.worker import run_worker
+    from electronicload_tool_core.errors import LoadError
+
+    with pytest.raises(LoadError) as error:
+        run_worker(mode='live',
+                   resource='USB0::0xFFFF::0x0001::SYNTHETIC::INSTR',
+                   safety_config='')
+    assert error.value.code == 'missing_safety_config'
+
+
 def test_live_worker_optional_safety_config_admission_and_authorization(monkeypatch):
     from http.server import ThreadingHTTPServer
     from electronicload_tool_cli import worker as worker_module
