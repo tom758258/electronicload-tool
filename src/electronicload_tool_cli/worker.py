@@ -270,7 +270,7 @@ def run_worker(*, mode="simulate", resource=None, backend="system", safety_confi
     if mode not in {"simulate", "live"}:
         raise LoadError("invalid_mode", "Worker requires live or simulate mode.")
     validate_connection(resource, backend, required=mode == "live")
-    limits = (load_safety_config(safety_config) if safety_config else None) if mode == "live" else SafetyLimits(60)
+    limits = (load_safety_config(safety_config) if safety_config is not None else None) if mode == "live" else SafetyLimits(60)
     runtime = Runtime(mode=mode, resource=resource, backend=backend, limits=limits,
                       allow_input_on=allow_input_on, port=port)
     try:
