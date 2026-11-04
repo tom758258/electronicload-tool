@@ -89,7 +89,10 @@ def test_worker_multi_job_terminal_without_files(worker,tmp_path):
     bad=request('input-off')
     bad['schema_version']=3.0
     assert http(command_url,bad)[0]==400
-    assert http(stop_url,{'schema_version':3})[0]==202
+    code, stopped = http(stop_url,{'schema_version':3})
+    assert code == 202
+    assert stopped == {'schema_version':3, 'run_id':ready['run_id'],
+                       'status':'accepted', 'error':None}
     assert p.wait(timeout=5)==0
     summary=[]
     while not out.empty():
@@ -107,6 +110,96 @@ def test_worker_invalid_request_does_not_create_job(worker):
         assert http(command_url,payload)[0]==400
     assert http(ready['status_url'])[1]['last_job'] is None
 
+
+def test_stop_waits_for_http_reply_when_active_job_finishes(monkeypatch):
+    """A completing job must not shut down HTTP before Stop's JSON is sent."""
+    from http.server import ThreadingHTTPServer
+    from electronicload_tool_cli import worker as worker_module
+
+    job_started = threading.Event()
+    finish_job = threading.Event()
+    job_finished = threading.Event()
+    reply_waiting = threading.Event()
+    release_reply = threading.Event()
+    shutdown_called = threading.Event()
+    shutdown_calls = []
+    runtime = worker_module.Runtime(mode='simulate')
+
+    def delayed_execute(command, arguments, context):
+        job_started.set()
+        assert finish_job.wait(timeout=3)
+        return {'input_state': 'OFF'}
+
+    monkeypatch.setattr(runtime, '_execute', delayed_execute)
+    original_emit = runtime.emit
+
+    def track_events(event, **values):
+        original_emit(event, **values)
+        if event == 'job_finished':
+            job_finished.set()
+
+    monkeypatch.setattr(runtime, 'emit', track_events)
+    handler = worker_module._handler(runtime)
+    original_send = handler._send
+
+    def delay_stop_reply(self, status, payload):
+        if self.path == '/stop' and status == 202:
+            reply_waiting.set()
+            assert release_reply.wait(timeout=3)
+        return original_send(self, status, payload)
+
+    monkeypatch.setattr(handler, '_send', delay_stop_reply)
+    with ThreadingHTTPServer(('127.0.0.1', 0), handler) as server:
+        runtime.server = server
+        runtime.port = server.server_port
+        original_shutdown = server.shutdown
+
+        def track_shutdown():
+            shutdown_calls.append(1)
+            shutdown_called.set()
+            original_shutdown()
+
+        monkeypatch.setattr(server, 'shutdown', track_shutdown)
+        serving = threading.Thread(target=server.serve_forever, daemon=True)
+        serving.start()
+        stopped = {}
+
+        def request_stop():
+            try:
+                stopped['response'] = http(runtime.urls()['stop_url'], {'schema_version':3})
+            except Exception as exc:
+                stopped['error'] = exc
+
+        stop_thread = threading.Thread(target=request_stop, daemon=True)
+        try:
+            code, accepted = http(runtime.urls()['command_url'], request('input-off'))
+            assert code == 202 and accepted['worker_job_id']
+            assert job_started.wait(timeout=3)
+            stop_thread.start()
+            assert reply_waiting.wait(timeout=3)
+            finish_job.set()
+            assert job_finished.wait(timeout=3)
+            assert not shutdown_called.wait(timeout=0.2)
+            release_reply.set()
+            stop_thread.join(timeout=3)
+            assert not stop_thread.is_alive()
+            assert 'error' not in stopped, stopped
+            assert stopped['response'] == (202, {
+                'schema_version': 3, 'run_id': runtime.run_id,
+                'status': 'accepted', 'error': None})
+            assert shutdown_called.wait(timeout=3)
+            serving.join(timeout=3)
+            assert not serving.is_alive()
+            runtime.job_thread.join(timeout=3)
+            assert not runtime.job_thread.is_alive()
+            assert len(shutdown_calls) == 1
+        finally:
+            finish_job.set()
+            release_reply.set()
+            original_shutdown()
+            serving.join(timeout=3)
+            if runtime.job_thread is not None:
+                runtime.job_thread.join(timeout=3)
 
 def test_local_lifecycle_client(worker):
     _,out,ready=worker

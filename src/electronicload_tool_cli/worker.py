@@ -47,7 +47,9 @@ class Runtime:
         self.allow_input_on = allow_input_on
         self.run_id = uuid.uuid4().hex
         self.stop = threading.Event()
+        self.stop_reply_sent = threading.Event()
         self.lock = threading.Lock()
+        self.shutdown_started = False
         self.emit_lock = threading.Lock()
         self.active_job = None
         self.last_job = None
@@ -102,6 +104,14 @@ class Runtime:
             result["visa"] = runtime
             return result
 
+    def _shutdown_after_stop_reply(self):
+        self.stop_reply_sent.wait()
+        with self.lock:
+            if self.shutdown_started:
+                return
+            self.shutdown_started = True
+        threading.Thread(target=self.server.shutdown, daemon=True).start()
+
     def run_job(self, job, arguments, context):
         with self.lock:
             job["state"] = "running"
@@ -125,7 +135,7 @@ class Runtime:
             self.last_job = terminal
         self.emit("job_finished", **terminal)
         if self.stop.is_set():
-            threading.Thread(target=self.server.shutdown, daemon=True).start()
+            self._shutdown_after_stop_reply()
 
 
 def _context(request, mode):
@@ -215,10 +225,13 @@ def _handler(runtime):
                     runtime.stop.set()
                     with runtime.lock:
                         busy = runtime.active_job is not None
-                    if not busy:
-                        threading.Thread(target=runtime.server.shutdown, daemon=True).start()
-                    self._send(202, {"schema_version": 3, "run_id": runtime.run_id,
-                                     "status": "accepted", "error": None})
+                    try:
+                        self._send(202, {"schema_version": 3, "run_id": runtime.run_id,
+                                         "status": "accepted", "error": None})
+                    finally:
+                        runtime.stop_reply_sent.set()
+                        if not busy:
+                            runtime._shutdown_after_stop_reply()
                     return
                 if set(req) - {"schema_version", "command", "arguments", "job_id", "context"}:
                     raise LoadError("invalid_request", "Unknown request fields.")
