@@ -9,8 +9,9 @@ Protect public behavior, component boundaries, and safety requirements at their
 owning layer. Permanent tests cover CLI help/version, read-only Core policy,
 identity, query parsing, session cleanup, and CLI output/exit integration.
 Default tests replace VISA with a recording fake; an autouse fixture blocks
-accidental creation of a real resource manager. Do not add tests for
-unimplemented input switching, Worker, or WebUI behavior.
+accidental creation of a real resource manager. Add focused tests for implemented
+fixed-CC/Input switching and Common v3 Worker behavior. Do not add tests for
+unimplemented WebUI or unsupported modes.
 
 Avoid tests tied to private helpers, source text, exact help prose, or document
 formatting. Packaging and installation are checked with actual build artifacts;
@@ -45,6 +46,51 @@ Changing the parser warrants the existing help/version tests. Read-only changes
 do not by themselves require wheel/release acceptance or tests in other Tool
 repositories. Fake VISA, simulator, dry-run, and plan reports are not evidence
 of instrument support or permission to execute LIVE.
+
+## Fixed-CC/Input/Worker focused checks
+
+Scope these tests to the new Core, CLI and Worker behavior and the directly
+affected CLI parser/help/version and read-only CLI contracts:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q tests/test_control_core.py tests/test_safety.py tests/test_control_cli.py tests/test_worker.py tests/test_foundation.py tests/test_readonly_cli.py
+.\.venv\Scripts\python.exe -m ruff check src/electronicload_tool_core/control.py src/electronicload_tool_core/safety.py src/electronicload_tool_core/simulator.py src/electronicload_tool_cli/cli.py src/electronicload_tool_cli/worker.py src/electronicload_tool_cli/worker_client.py tests/test_control_core.py tests/test_safety.py tests/test_control_cli.py tests/test_worker.py
+.\scripts\preflight-cli.ps1
+```
+
+Worker integration uses a real local simulated subprocess, HTTP and JSONL,
+but never physical hardware. The **single** `live-cli-check.ps1` now plans
+read-only plus CC High/Low, Input ON, on-state measurement and Input OFF in
+one fixed sequence. Test its `-PlanOnly` operation and unattended LIVE refusal
+with a **fictional** USB Resource. Without `-ConfirmWrites` or
+`-EnableInputOn`, and in noninteractive LIVE runs, verify it refuses before
+opening any VISA session or sending SCPI. The script defaults to
+`examples/safety-config.toml` (or accepts explicit `-SafetyConfig`).
+Verify redacted shareable case totals and normal mode's lack of private raw
+logs; `-DebugArtifacts` uses the existing private/raw location without
+changing authorization. No hardware is permitted in automated checks.
+
+Fake VISA for control must emulate Local mode ignoring setup writes until
+`SYST:REM`, numeric `CURR:RANG?` responses (including zero for low),
+nonzero current readback mismatches, and Worker Stop/unsafe-state changes
+between remote transition and Input ON. Read-only commands must not send
+`SYST:REM` or other setup writes.
+
+Run the **single** `live-cli-check.ps1` full LIVE command only with
+separately approved model/Resource, bounded DUT/source, explicit two-layer
+write/Input ON opt-in, and a manual OFF contingency. Check physical Input
+OFF before CC; high and low range are configured with the same bounded current
+before one authorized ON/OFF trial. Reject further normal tests on any failure.
+After a potentially attempted Input ON, make one explicit bounded OFF cleanup
+attempt; if physical OFF cannot be confirmed, flag operator action. Validation
+does not automatically promote Product LIVE support or demonstrate LIVE Worker
+coverage. Because this change touches only PowerShell verification/docs, do
+not rerun release packaging or unrelated pytest.
+
+Because `tomli` is a new conditional runtime dependency for Python 3.10,
+also run the **focused packaging checks** above. These are not a full
+release-acceptance run. Report unavailable PowerShell, Ruff, runtime-dependency
+installation or real hardware as BLOCKED / NOT RUN, not PASS.
 
 ## Packaging checks
 
