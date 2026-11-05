@@ -84,8 +84,10 @@ class Runtime:
         if command in CONTROL_COMMANDS:
             if context["mode"] == "live" and self.mode != "live":
                 raise LoadError("invalid_mode", "Live command not available in simulated Worker.")
+            # Common v3 uses dry_run; Core uses dry-run.
+            core_mode = "dry-run" if context["mode"] == "dry_run" else context["mode"]
             return control_execute(
-                command, mode=context["mode"], resource=self.resource,
+                command, mode=core_mode, resource=self.resource,
                 backend=self.backend, model_id=MODEL_ID,
                 current=arguments.get("current"), voltage=arguments.get("voltage"),
                 range_name=arguments.get("range"),
