@@ -10,7 +10,7 @@ owning layer. Permanent tests cover CLI help/version, read-only Core policy,
 identity, query parsing, session cleanup, and CLI output/exit integration.
 Default tests replace VISA with a recording fake; an autouse fixture blocks
 accidental creation of a real resource manager. Add focused tests for implemented
-fixed-CC/Input switching and Common v3 Worker behavior. Do not add tests for
+fixed-CC/Input switching, offline CV preview, and Common v3 Worker behavior. Do not add tests for
 unimplemented WebUI or unsupported modes.
 
 Avoid tests tied to private helpers, source text, exact help prose, or document
@@ -53,8 +53,8 @@ Scope these tests to the new Core, CLI and Worker behavior and the directly
 affected CLI parser/help/version and read-only CLI contracts:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q tests/test_control_core.py tests/test_safety.py tests/test_control_cli.py tests/test_worker.py tests/test_foundation.py tests/test_readonly_cli.py
-.\.venv\Scripts\python.exe -m ruff check src/electronicload_tool_core/control.py src/electronicload_tool_core/safety.py src/electronicload_tool_core/simulator.py src/electronicload_tool_cli/cli.py src/electronicload_tool_cli/worker.py src/electronicload_tool_cli/worker_client.py tests/test_control_core.py tests/test_safety.py tests/test_control_cli.py tests/test_worker.py
+.\.venv\Scripts\python.exe -m pytest -q tests/test_control_core.py tests/test_control_cli.py tests/test_worker.py tests/test_foundation.py tests/test_readonly_cli.py
+.\.venv\Scripts\python.exe -m ruff check src/electronicload_tool_core/control.py src/electronicload_tool_core/simulator.py src/electronicload_tool_cli/cli.py src/electronicload_tool_cli/worker.py src/electronicload_tool_cli/worker_client.py tests/test_control_core.py tests/test_control_cli.py tests/test_worker.py
 .\scripts\preflight-cli.ps1
 ```
 
@@ -64,8 +64,7 @@ read-only plus CC High/Low, Input ON, on-state measurement and Input OFF in
 one fixed sequence. Test its `-PlanOnly` operation and unattended LIVE refusal
 with a **fictional** USB Resource. Without `-ConfirmWrites` or
 `-EnableInputOn`, and in noninteractive LIVE runs, verify it refuses before
-opening any VISA session or sending SCPI. The script defaults to
-`examples/safety-config.toml` (or accepts explicit `-SafetyConfig`).
+opening any VISA session or sending SCPI. The script defaults to 0.1 A, with a 2 A script-only hard ceiling.
 Verify redacted shareable case totals and normal mode's lack of private raw
 logs; `-DebugArtifacts` uses the existing private/raw location without
 changing authorization. No hardware is permitted in automated checks.
@@ -87,10 +86,9 @@ does not automatically promote Product LIVE support or demonstrate LIVE Worker
 coverage. Because this change touches only PowerShell verification/docs, do
 not rerun release packaging or unrelated pytest.
 
-Because `tomli` is a new conditional runtime dependency for Python 3.10,
-also run the **focused packaging checks** above. These are not a full
-release-acceptance run. Report unavailable PowerShell, Ruff, runtime-dependency
-installation or real hardware as BLOCKED / NOT RUN, not PASS.
+Dependency/lockfile changes require the focused packaging checks below.
+Report unavailable PowerShell, Ruff, dependencies and hardware as BLOCKED
+or NOT RUN, not PASS.
 
 ## Packaging checks
 

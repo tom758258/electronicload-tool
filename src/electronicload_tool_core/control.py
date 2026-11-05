@@ -1,4 +1,4 @@
-"""Fixed-CC and deliberate input switching for the single verified IT8812C profile.
+"""Fixed CC, offline CV preview and deliberate input switching for IT8812C.
 
 No hidden write retry, automatic input OFF or VISA connection selection.
 """
@@ -11,16 +11,18 @@ from time import monotonic, sleep
 
 from .errors import LoadError, communication_error
 from .identity import MODEL_ID, parse_identity
-from .safety import SafetyLimits, load_safety_config
 from .visa import open_session, validate_connection
 from .simulator import ControlSimulator
 
-CONTROL_COMMANDS = ("set-cc", "input-on", "input-off")
+CONTROL_COMMANDS = ("set-cc", "set-cv", "input-on", "input-off")
 # Exact IT8812C Product LIVE control commands; the model, USB/System VISA,
-# Optional Safety Config and explicit Input ON authorization remain enforced.
-PRODUCT_LIVE_COMMANDS = frozenset(CONTROL_COMMANDS)
+# Explicit Input ON authorization remains enforced.
+PRODUCT_LIVE_COMMANDS = frozenset({"set-cc", "input-on", "input-off"})
 RANGE_LIMITS = {"low": 6.0, "high": 60.0}
 RANGE_RESOLUTION = {"low": Decimal("0.0001"), "high": Decimal("0.001")}
+CV_RANGE_LIMITS = {"low": Decimal("18"), "high": Decimal("120")}
+CV_RESOLUTION = {"low": Decimal("0.001"), "high": Decimal("0.01")}
+CV_MIN_VOLTAGE = Decimal("0.1")
 INPUT_STATE_CONFIRM_TIMEOUT_S = 2.0
 INPUT_STATE_POLL_INTERVAL_S = 0.1
 NUMBER = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[Ee][+-]?[0-9]+)?\Z")
@@ -38,17 +40,47 @@ def _decimal(value: object) -> Decimal:
     return result
 
 
-def validate_current(value: object, range_name: str, limits: SafetyLimits | None) -> Decimal:
+def validate_current(value: object, range_name: str) -> Decimal:
     if range_name not in RANGE_LIMITS:
         raise LoadError("invalid_range", "Range must be low or high.")
     current = _decimal(value)
     if current < 0 or current > Decimal(str(RANGE_LIMITS[range_name])):
         raise LoadError("current_out_of_range", "Current is outside the selected range.")
-    if limits is not None and current > Decimal(str(limits.max_current)):
-        raise LoadError("safety_limit_exceeded", "Current exceeds the configured safety limit.")
     if current % RANGE_RESOLUTION[range_name] != 0:
         raise LoadError("invalid_current_resolution", "Current exceeds the range's programming resolution.")
     return current
+
+
+
+def validate_voltage(value: object, range_name: str) -> Decimal:
+    if range_name not in CV_RANGE_LIMITS:
+        raise LoadError("invalid_range", "Range must be low or high.")
+    if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
+        raise LoadError("invalid_voltage", "Voltage must be a finite numeric value.")
+    try:
+        voltage = Decimal(str(value))
+    except InvalidOperation as exc:
+        raise LoadError("invalid_voltage", "Voltage must be finite.") from exc
+    if not voltage.is_finite():
+        raise LoadError("invalid_voltage", "Voltage must be finite.")
+    if not CV_MIN_VOLTAGE <= voltage <= CV_RANGE_LIMITS[range_name]:
+        raise LoadError("voltage_out_of_range", "Voltage is outside the selected range.")
+    if voltage % CV_RESOLUTION[range_name] != 0:
+        raise LoadError("invalid_voltage_resolution", "Voltage exceeds range resolution.")
+    return voltage
+
+
+def _offline_cv_settings(session) -> dict:
+    # 18/120 readback is only a simulator convention, NOT physical IT8812C evidence.
+    raw_range = _number(session, "VOLT:RANG?")
+    voltage = _number(session, "VOLT?")
+    if raw_range not in (18.0, 120.0):
+        raise LoadError("invalid_range_readback", "Unknown simulated CV range.", 3,
+                        range_readback_v=raw_range, voltage_readback_v=voltage)
+    name = "low" if raw_range == 18.0 else "high"
+    if not CV_MIN_VOLTAGE <= Decimal(str(voltage)) <= CV_RANGE_LIMITS[name]:
+        raise LoadError("voltage_out_of_range", "Simulated CV readback is out of range.", 3)
+    return {"range": name, "range_readback_v": raw_range, "voltage_v": voltage}
 
 
 def _query(session, query: str) -> str:
@@ -128,11 +160,18 @@ def _current_within(actual: float, wanted: Decimal, range_name: str) -> bool:
     return abs(Decimal(str(actual)) - wanted) <= RANGE_RESOLUTION[range_name] / 2
 
 
-def _settings(session) -> dict:
-    # Read both numeric settings before classifying range: if either readback
-    # fails, preserve the evidence that explains a rejected setting.
+def _settings(session, *, allow_cv: bool = False) -> dict:
     fixed = _query(session, "FUNC:MODE?").upper()
     function = _query(session, "FUNC?").upper()
+    if function in {"VOLT", "VOLTAGE"}:
+        if not allow_cv:
+            raise LoadError("unsupported_live_scope",
+                            "Physical CV Input ON requires hardware validation.")
+        return {"function_mode": fixed, "function": function,
+                **_offline_cv_settings(session)}
+    if function not in {"CURR", "CURRENT"}:
+        raise LoadError("unsafe_mode", "Unsupported fixed load function.")
+    # Preserve verified CC range/current readback and diagnostics.
     raw_range = _number(session, "CURR:RANG?")
     current = _number(session, "CURR?")
     try:
@@ -143,26 +182,26 @@ def _settings(session) -> dict:
     return {"function_mode": fixed, "function": function, "range": range_name,
             "range_readback_a": raw_range, "current_a": current}
 
-
-def _check_settings(session, settings: dict, limits: SafetyLimits | None) -> None:
+def _check_settings(session, settings: dict) -> None:
     if settings["function_mode"] not in {"FIX", "FIXED"}:
         raise LoadError("unsafe_mode", "Input ON requires fixed mode.")
+    if settings["function"] in {"VOLT", "VOLTAGE"}:
+        validate_voltage(settings["voltage_v"], settings["range"])
+        return
     if settings["function"] not in {"CURR", "CURRENT"}:
-        raise LoadError("unsafe_mode", "Input ON requires CC mode.")
+        raise LoadError("unsafe_mode", "Input ON requires CC or CV mode.")
     actual = settings["current_a"]
-    if (actual < 0 or actual > RANGE_LIMITS[settings["range"]]
-            or (limits is not None and actual > limits.max_current)):
-        raise LoadError("safety_limit_exceeded", "Current exceeds range or safety limits.")
+    if actual < 0 or actual > RANGE_LIMITS[settings["range"]]:
+        raise LoadError("safety_limit_exceeded", "Current exceeds the model range.")
 
-
-def _check_input_on_conditions(session, limits: SafetyLimits | None, stop: Event | None) -> dict:
+def _check_input_on_conditions(session, stop: Event | None, *, allow_cv: bool) -> dict:
     if stop is not None and stop.is_set():
         raise LoadError("stopping", "Input ON was blocked because Worker is stopping.")
     state = _flag(session, "INP:STAT?")
     if state != "OFF":
         raise LoadError("already_on", "Input is already ON.")
-    settings = _settings(session)
-    _check_settings(session, settings, limits)
+    settings = _settings(session, allow_cv=allow_cv)
+    _check_settings(session, settings)
     if _flag(session, "TRAN?") != "OFF" or _flag(session, "INP:SHOR:STAT?") != "OFF":
         raise LoadError("unsafe_mode", "Transient and Short must be OFF.")
     if stop is not None and stop.is_set():
@@ -171,11 +210,11 @@ def _check_input_on_conditions(session, limits: SafetyLimits | None, stop: Event
 
 
 def _perform(session, command: str, *, current: object | None,
-             range_name: str | None, limits: SafetyLimits | None,
-             confirmed: bool, stop: Event | None) -> dict:
+             voltage: object | None, range_name: str | None,
+             confirmed: bool, stop: Event | None, allow_cv: bool) -> dict:
     parse_identity(_query(session, "*IDN?"))
     if command == "set-cc":
-        requested = validate_current(current, range_name, limits)
+        requested = validate_current(current, range_name)
         completed = []
         # IT8812C hardware rejects nonzero CURR after CURR:RANG MIN
         # (error 120). A numeric selector equal to the requested low-range
@@ -209,14 +248,32 @@ def _perform(session, command: str, *, current: object | None,
             exc.details["completed_steps"] = completed
             raise
         return {"input_state": "OFF", **settings}
+    if command == "set-cv":
+        requested = validate_voltage(voltage, range_name)
+        _input_off(session)
+        # No real CV range SCPI is sent: the guide has conflicting descriptions.
+        # The simulation model applies settings internally until hardware proof.
+        if not isinstance(session, ControlSimulator):
+            raise LoadError("unsupported_live_scope", "CV LIVE range semantics unverified.")
+        session.configure_cv(requested, range_name)
+        settings = _settings(session, allow_cv=True)
+        if (settings["function_mode"] not in {"FIX", "FIXED"}
+                or settings["function"] not in {"VOLT", "VOLTAGE"}
+                or settings["range"] != range_name
+                or abs(Decimal(str(settings["voltage_v"])) - requested)
+                > CV_RESOLUTION[range_name] / 2):
+            raise LoadError("readback_mismatch", "CV simulation did not match readback.", 3,
+                            requested_voltage_v=float(requested), observed=settings)
+        _input_off(session)
+        return {"input_state": "OFF", **settings}
     if command == "input-on":
         if not confirmed:
             raise LoadError("confirmation_required", "Input ON needs explicit confirmation.")
-        _check_input_on_conditions(session, limits, stop)
+        _check_input_on_conditions(session, stop, allow_cv=allow_cv)
         # The remote transition might change hardware state. Recheck every
         # condition afterward, including the Worker stop gate, before INP ON.
         _write(session, "SYST:REM")
-        settings = _check_input_on_conditions(session, limits, stop)
+        settings = _check_input_on_conditions(session, stop, allow_cv=allow_cv)
         try:
             _write(session, "INP ON")
             confirmed_on = _confirm_input_state(session, "ON")
@@ -244,8 +301,8 @@ def _perform(session, command: str, *, current: object | None,
 
 def execute(command: str, *, mode: str = "live", resource: str | None = None,
             backend: str = "system", model_id: str = MODEL_ID,
-            safety_config: str | None = None, limits: SafetyLimits | None = None,
-            current: object | None = None, range_name: str | None = None,
+            current: object | None = None, voltage: object | None = None,
+            range_name: str | None = None,
             confirmed: bool = False, validation: bool = False,
             stop: Event | None = None, simulator: ControlSimulator | None = None) -> dict:
     if command not in CONTROL_COMMANDS or mode not in {"live", "simulate", "dry-run"}:
@@ -255,26 +312,30 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
     validate_connection(resource, backend, required=mode == "live")
     if command == "set-cc" and current is None:
         raise LoadError("argument_error", "CC requires current and low/high range.")
-    if mode == "live":
-        if command not in PRODUCT_LIVE_COMMANDS and not validation:
-            raise LoadError("unsupported_live_scope", "Control is pending LIVE validation.")
-        effective_limits = limits
-        if command != "input-off" and effective_limits is None and safety_config is not None:
-            effective_limits = load_safety_config(safety_config)
-    else:
-        effective_limits = limits or SafetyLimits(60.0)
+    if command == "set-cv" and voltage is None:
+        raise LoadError("argument_error", "CV requires voltage and low/high range.")
+    if mode == "live" and command == "set-cv":
+        raise LoadError("unsupported_live_scope",
+                        "CV LIVE range programming requires hardware confirmation.")
+    if mode == "live" and command not in PRODUCT_LIVE_COMMANDS and not validation:
+        raise LoadError("unsupported_live_scope", "Control is pending LIVE validation.")
     if command == "set-cc":
-        validate_current(current, range_name, effective_limits)
+        validate_current(current, range_name)
+    if command == "set-cv":
+        validate_voltage(voltage, range_name)
     if mode == "dry-run":
         return {"command": command, "hardware_access": False, "range": range_name,
                 "current_a": float(_decimal(current)) if current is not None else None,
+                "voltage_v": float(validate_voltage(voltage, range_name))
+                if command == "set-cv" else None,
                 "input_on_requires_confirmation": command == "input-on"}
     if mode == "simulate":
         return _perform(simulator or ControlSimulator(), command, current=current,
-                        range_name=range_name, limits=effective_limits,
-                        confirmed=confirmed, stop=stop)
+                        voltage=voltage, range_name=range_name, confirmed=confirmed,
+                        stop=stop, allow_cv=True)
     with open_session(resource) as (session, runtime):
-        result = _perform(session, command, current=current, range_name=range_name,
-                          limits=effective_limits, confirmed=confirmed, stop=stop)
+        result = _perform(session, command, current=current, voltage=voltage,
+                          range_name=range_name, confirmed=confirmed,
+                          stop=stop, allow_cv=False)
         result["visa"] = runtime
     return result

@@ -219,21 +219,9 @@ def test_local_lifecycle_client(worker):
         assert False,'Nonlocal HTTP URL was accepted'
 
 
-def test_live_worker_rejects_explicit_empty_safety_config():
-    from electronicload_tool_cli.worker import run_worker
-    from electronicload_tool_core.errors import LoadError
-
-    with pytest.raises(LoadError) as error:
-        run_worker(mode='live',
-                   resource='USB0::0xFFFF::0x0001::SYNTHETIC::INSTR',
-                   safety_config='')
-    assert error.value.code == 'missing_safety_config'
-
-
-def test_live_worker_optional_safety_config_admission_and_authorization(monkeypatch):
+def test_live_worker_model_range_admission_and_authorization(monkeypatch):
     from http.server import ThreadingHTTPServer
     from electronicload_tool_cli import worker as worker_module
-    from electronicload_tool_core.safety import SafetyLimits
 
     calls = []
 
@@ -244,7 +232,7 @@ def test_live_worker_optional_safety_config_admission_and_authorization(monkeypa
     monkeypatch.setattr(worker_module, 'control_execute', fake_control)
     runtime = worker_module.Runtime(mode='live',
                                     resource='USB0::0xFFFF::0x0001::SYNTHETIC::INSTR',
-                                    limits=None, allow_input_on=True)
+                                    allow_input_on=True)
     server = ThreadingHTTPServer(('127.0.0.1', 0), worker_module._handler(runtime))
     runtime.server = server
     runtime.port = server.server_port
@@ -273,12 +261,7 @@ def test_live_worker_optional_safety_config_admission_and_authorization(monkeypa
                                {'current': 0.1, 'range': 'low'}))
         assert code == 202 and accepted['status'] == 'accepted'
         assert finish(accepted['worker_job_id'])['state'] == 'succeeded'
-        assert calls[-1][1]['limits'] is None
 
-        runtime.limits = SafetyLimits(0.05)
-        assert http(command_url, live_request('set-cc',
-                    {'current': 0.1, 'range': 'low'}))[0] == 400
-        runtime.limits = None
         code, rejected = http(command_url, live_request('input-on', {}))
         assert code == 409 and rejected['error']['code'] == 'confirmation_required'
         runtime.allow_input_on = False
@@ -289,9 +272,31 @@ def test_live_worker_optional_safety_config_admission_and_authorization(monkeypa
                                {'confirm_input_on': True}))
         assert code == 202 and accepted['status'] == 'accepted'
         assert finish(accepted['worker_job_id'])['state'] == 'succeeded'
-        assert calls[-1][0] == 'input-on' and calls[-1][1]['limits'] is None
+        assert calls[-1][0] == 'input-on'
         assert calls[-1][1]['confirmed'] is True
     finally:
         server.shutdown()
         server.server_close()
         server_thread.join(timeout=3)
+
+
+def test_cv_worker_simulated_job_and_invalid_arguments(worker):
+    _, out, ready = worker
+    command_url = ready['command_url']
+    for args in ({'voltage': 18.001, 'range': 'low'},
+                 {'voltage': 5, 'range': 'invalid'},
+                 {'voltage': True, 'range': 'low'}):
+        assert http(command_url, request('set-cv', args))[0] == 400
+
+    code, accepted = http(command_url, request('set-cv', {'voltage': 5, 'range': 'low'}))
+    assert code == 202 and accepted['kind'] == 'async_job'
+    finished = wait_finished(out, accepted['worker_job_id'])
+    assert finished['ok'] is True
+    assert finished['result']['range'] == 'low'
+    assert finished['result']['voltage_v'] == 5
+    assert finished['result']['input_state'] == 'OFF'
+
+    code, accepted = http(command_url, request('input-on',
+                                               {'confirm_input_on': True}))
+    assert code == 202
+    assert wait_finished(out, accepted['worker_job_id'])['result']['input_state'] == 'ON'

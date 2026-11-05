@@ -39,6 +39,10 @@ try {
         $result = ($output -join "`n") | ConvertFrom-Json
         if ($LASTEXITCODE -ne 0 -or $result.ok -ne $true) { throw "set-cc $mode failed." }
         Write-Host "PASS: set-cc $mode"
+        $output = & $cli set-cv "--$mode" --voltage 5 --range low --json
+        $result = ($output -join "`n") | ConvertFrom-Json
+        if ($LASTEXITCODE -ne 0 -or $result.ok -ne $true) { throw "set-cv $mode failed." }
+        Write-Host "PASS: set-cv $mode"
         $output = & $cli input-off "--$mode" --json
         $result = ($output -join "`n") | ConvertFrom-Json
         if ($LASTEXITCODE -ne 0 -or $result.ok -ne $true) { throw "input-off $mode failed." }

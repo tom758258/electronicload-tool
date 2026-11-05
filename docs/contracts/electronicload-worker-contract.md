@@ -10,7 +10,7 @@ Common contracts remain authoritative for the HTTP and JSONL envelopes.
 - Manifest schema **2**, Worker protocol **3** (`v3-only`).
 - `tool_id: "electronicload"`; `execution.model: "multi_job"`,
   `execution.context_binding: "per_command"`.
-- `common.async_jobs` contract version 1, for all six domain commands.
+- `common.async_jobs` contract version 1, for all domain commands.
   Cancellation and streaming are not adopted.
 - `electronicload-tool manifest --json` is static: no VISA, filesystem artifacts,
   instrument discovery, or Worker startup.
@@ -45,6 +45,7 @@ Common contracts remain authoritative for the HTTP and JSONL envelopes.
 | `input-state` | `{}` | `input_state` |
 | `measure` | `{}` | `voltage_v`, `current_a`, `power_w` |
 | `set-cc` | `{"current": <number>, "range": "low"\|"high"}` | Four confirmed CC settings, physical input stays OFF |
+| `set-cv` | `{"voltage": <number>, "range": "low"\|"high"}` | Offline-only CV setpoint simulation; LIVE refused |
 | `input-on` | `{"confirm_input_on": true}` | Confirmed `input_state: "ON"` or failure/UNKNOWN |
 | `input-off` | `{}` | Confirmed `input_state: "OFF"` or failure/UNKNOWN |
 
@@ -61,18 +62,22 @@ request mode. Worker does **not** allow the contributor-validation override.
 
 ## Safety
 
-LIVE `set-cc` and `input-on` may run without a Safety Config. Core always
-checks the IT8812C current range; `set-cc` also validates programming
-resolution. When a TOML Safety Config is supplied, its `[safety] max_current` adds a stricter current
-ceiling. An invalid supplied file is refused. The live Worker loads a provided
-file once at startup; changes require a restart. Standalone CLI reads a
-provided file on each invocation. Range/current checks do not guarantee DUT
-safety or enforce the entire voltage/power operating envelope.
+Core checks the IT8812C current range for LIVE `set-cc` and `input-on`;
+`set-cc` also validates programming resolution. There is no operator-supplied
+Safety Config or extra DUT current ceiling. Model range/current checks do not
+guarantee DUT safety or enforce the full voltage/power operating envelope.
+
+Fixed CV can be planned and simulated, with published IT8812C Low
+0.1–18 V (1 mV) / High 0.1–120 V (10 mV) validation and explicit range
+selection. Physical CV range SCPI and readback semantics remain unverified.
+LIVE `set-cv` and LIVE CV `input-on` are blocked, including when an
+operator uses the contributor-validation CLI override; the simulated CV
+readback does not certify hardware support.
 
 LIVE Input ON has two gates: the Worker starts with `--allow-input-on`, and the
 single `input-on` request carries `confirm_input_on: true`. Neither gate
-replaces Core's physical checks. Before ON, Core requires physical input OFF,
-CC+FIX, valid current/range within the safety limit, Transient OFF and Short
+replaces Core's physical checks. Before LIVE ON, Core requires physical input OFF,
+CC+FIX, valid current/range within the model range, Transient OFF and Short
 OFF. It does not compare against any previous `set-cc` command. An existing ON
 is rejected. Readback failure following an ON attempt returns UNKNOWN, not
 success, and does not trigger automatic OFF.
@@ -116,8 +121,8 @@ Neither `SYST:RWL` nor `SYST:LOC` is sent.
 
 Product LIVE is open only for the exact IT8812C identity over USB INSTR /
 System VISA: `identify`, `input-state`, `measure`, `set-cc`, `input-on`
-and `input-off`. The control commands retain Core safety checks, explicit
-Resource requirements, optional Safety Config and Input ON confirmation gates.
+and `input-off` (input-on is physical fixed CC only). The control commands retain Core safety checks, explicit
+Resource requirements, model limits and Input ON confirmation gates.
 The Worker uses this same Core support policy and its own startup/per-request
 Input ON authorization; its end-to-end physical LIVE behavior is not implied
 to be hardware-validated by CLI acceptance. The hidden contributor-validation

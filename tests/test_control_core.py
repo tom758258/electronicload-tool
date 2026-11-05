@@ -5,7 +5,6 @@ import pytest
 
 from electronicload_tool_core import control
 from electronicload_tool_core.errors import LoadError
-from electronicload_tool_core.safety import SafetyLimits
 
 RESOURCE = 'USB0::0xFFFF::0x0001::SYNTHETIC::INSTR'
 
@@ -94,7 +93,7 @@ def live(command, **kw):
 def test_four_off_checks_and_four_readbacks(monkeypatch):
     fake=Fake()
     session(fake,monkeypatch)
-    result=live('set-cc',limits=SafetyLimits(2),current=1.5,range_name='low')
+    result=live('set-cc',current=1.5,range_name='low')
     assert result['range']=='low' and result['current_a']==1.5
     assert fake.calls==['*IDN?','INP:STAT?','SYST:REM',
                         'INP:STAT?','FUNC:MODE FIX',
@@ -105,7 +104,7 @@ def test_four_off_checks_and_four_readbacks(monkeypatch):
 
 
 @pytest.mark.parametrize('current,range_name', [(0.1, 'low'), (7.0, 'high')])
-def test_live_cc_without_safety_config_respects_model_range(monkeypatch, current, range_name):
+def test_live_cc_without_extra_config_respects_model_range(monkeypatch, current, range_name):
     fake = Fake()
     session(fake, monkeypatch)
     result = live('set-cc', current=current, range_name=range_name)
@@ -116,7 +115,7 @@ def test_live_cc_without_safety_config_respects_model_range(monkeypatch, current
 
 
 @pytest.mark.parametrize('current,range_name', [(6.1, 'low'), (60.1, 'high')])
-def test_live_cc_without_safety_config_rejects_out_of_range(monkeypatch, current, range_name):
+def test_live_cc_without_extra_config_rejects_out_of_range(monkeypatch, current, range_name):
     fake = Fake()
     session(fake, monkeypatch)
     with pytest.raises(LoadError) as error:
@@ -125,27 +124,7 @@ def test_live_cc_without_safety_config_rejects_out_of_range(monkeypatch, current
     assert fake.calls == []
 
 
-def test_live_explicit_safety_config_limits_cc_and_rejects_invalid_file(monkeypatch, tmp_path):
-    fake = Fake()
-    session(fake, monkeypatch)
-    path = tmp_path / 'limits.toml'
-    path.write_text('[safety]' + chr(10) + 'max_current = 0.5' + chr(10),
-                    encoding='utf-8')
-    assert live('set-cc', current=0.1, range_name='low',
-                safety_config=str(path))['current_a'] == 0.1
-    fake.calls.clear()
-    with pytest.raises(LoadError) as error:
-        live('set-cc', current=0.6, range_name='low', safety_config=str(path))
-    assert error.value.code == 'safety_limit_exceeded'
-    assert fake.calls == []
-    with pytest.raises(LoadError) as error:
-        live('set-cc', current=0.1, range_name='low',
-             safety_config=str(tmp_path / 'missing.toml'))
-    assert error.value.code == 'invalid_safety_config'
-    assert fake.calls == []
-
-
-def test_live_input_on_without_safety_config_still_checks_physical_current(monkeypatch):
+def test_live_input_on_without_extra_config_still_checks_physical_current(monkeypatch):
     fake = Fake()
     fake.current = 0.1
     session(fake, monkeypatch)
@@ -170,7 +149,7 @@ def test_setting_failure_does_not_rollback_or_off(monkeypatch):
     session(fake,monkeypatch)
     fake.write_fail='CURR:RANG 1.5'
     with pytest.raises(LoadError) as err:
-        live('set-cc',limits=SafetyLimits(2),current=1.5,range_name='low')
+        live('set-cc',current=1.5,range_name='low')
     assert err.value.code=='write_failed'
     assert err.value.details['completed_steps']==['fixed_mode','cc_mode']
     assert 'CURR 1.5' not in fake.calls and 'INP OFF' not in fake.calls
@@ -181,19 +160,19 @@ def test_cc_requires_off(monkeypatch):
     fake.input=True
     session(fake,monkeypatch)
     with pytest.raises(LoadError,match='Input'):
-        live('set-cc',limits=SafetyLimits(2),current=1.5,range_name='low')
+        live('set-cc',current=1.5,range_name='low')
     assert not any(x.startswith('FUNC ') for x in fake.calls)
 
 
 @pytest.mark.parametrize('current,range_name,code',[
-    (2.1,'low','safety_limit_exceeded'), (6.1,'low','current_out_of_range'),
+    (6.1,'low','current_out_of_range'),
     (1.2345,'high','invalid_current_resolution'), (float('nan'),'low','invalid_current'),
     (True,'low','invalid_current'), (1.0,'medium','invalid_range')])
 def test_invalid_cc_no_writes(monkeypatch,current,range_name,code):
     fake=Fake()
     session(fake,monkeypatch)
     with pytest.raises(LoadError) as err:
-        live('set-cc',limits=SafetyLimits(2),current=current,range_name=range_name)
+        live('set-cc',current=current,range_name=range_name)
     assert err.value.code==code
     assert fake.calls==[]
 
@@ -201,20 +180,18 @@ def test_invalid_cc_no_writes(monkeypatch,current,range_name,code):
 def test_live_control_product_scope_preserves_safety_and_input_confirmation(monkeypatch):
     fake = Fake()
     session(fake, monkeypatch)
-    assert control.PRODUCT_LIVE_COMMANDS == frozenset(control.CONTROL_COMMANDS)
+    assert control.PRODUCT_LIVE_COMMANDS == frozenset({'set-cc', 'input-on', 'input-off'})
 
-    result = control.execute('set-cc', resource=RESOURCE, limits=SafetyLimits(0.5),
-                             current=0.1, range_name='low')
+    result = control.execute('set-cc', resource=RESOURCE, current=0.1, range_name='low')
     assert result['input_state'] == 'OFF'
     assert 'INP ON' not in fake.calls
 
     with pytest.raises(LoadError) as err:
-        control.execute('input-on', resource=RESOURCE, limits=SafetyLimits(0.5))
+        control.execute('input-on', resource=RESOURCE)
     assert err.value.code == 'confirmation_required'
     assert 'INP ON' not in fake.calls
 
-    assert control.execute('input-on', resource=RESOURCE, limits=SafetyLimits(0.5),
-                           confirmed=True)['input_state'] == 'ON'
+    assert control.execute('input-on', resource=RESOURCE, confirmed=True)['input_state'] == 'ON'
     assert control.execute('input-off', resource=RESOURCE)['input_state'] == 'OFF'
     assert fake.calls.count('INP ON') == 1
     assert fake.calls.count('INP OFF') == 1
@@ -228,7 +205,7 @@ def test_live_control_product_scope_preserves_safety_and_input_confirmation(monk
 def test_product_live_rejects_unregistered_connection_scopes(monkeypatch, kwargs, code):
     fake = Fake()
     session(fake, monkeypatch)
-    options = {'resource': RESOURCE, 'limits': SafetyLimits(0.5),
+    options = {'resource': RESOURCE,
                'current': 0.1, 'range_name': 'low', **kwargs}
     with pytest.raises(LoadError) as err:
         control.execute('set-cc', **options)
@@ -241,16 +218,16 @@ def test_input_on_requires_fresh_safe_state_and_explicit_confirmation(monkeypatc
     fake.current=1.5
     fake.range=6
     session(fake,monkeypatch)
-    assert live('input-on',limits=SafetyLimits(2),confirmed=True)['input_state']=='ON'
+    assert live('input-on',confirmed=True)['input_state']=='ON'
     assert fake.calls[-2:]==['INP ON','INP:STAT?']
     with pytest.raises(LoadError) as err:
-        live('input-on',limits=SafetyLimits(2),confirmed=True)
+        live('input-on',confirmed=True)
     assert err.value.code=='already_on'
     assert fake.calls.count('INP ON')==1
 
 
 @pytest.mark.parametrize('attribute,value',[('transient',True),('short',True),('mode','LIST'),
-                                             ('function','VOLT'),('current',3),('input',True)])
+                                             ('function','VOLT'),('current',7),('input',True)])
 def test_unsafe_state_rejected(monkeypatch,attribute,value):
     fake=Fake()
     fake.current=1
@@ -258,7 +235,7 @@ def test_unsafe_state_rejected(monkeypatch,attribute,value):
     setattr(fake,attribute,value)
     session(fake,monkeypatch)
     with pytest.raises(LoadError):
-        live('input-on',limits=SafetyLimits(2),confirmed=True)
+        live('input-on',confirmed=True)
     assert 'INP ON' not in fake.calls
 
 
@@ -270,7 +247,7 @@ def test_stop_prevents_unsent_on(monkeypatch):
     stop=Event()
     stop.set()
     with pytest.raises(LoadError) as err:
-        live('input-on',limits=SafetyLimits(2),confirmed=True,stop=stop)
+        live('input-on',confirmed=True,stop=stop)
     assert err.value.code=='stopping'
     assert 'INP ON' not in fake.calls
 
@@ -291,7 +268,7 @@ def test_input_on_readback_failure_reports_unknown_no_rescue(monkeypatch):
     fake.query=query
     session(fake,monkeypatch)
     with pytest.raises(LoadError) as err:
-        live('input-on',limits=SafetyLimits(2),confirmed=True)
+        live('input-on',confirmed=True)
     assert err.value.details['input_state']=='UNKNOWN'
     assert err.value.details['input_on_attempted'] is True
     assert 'INP OFF' not in fake.calls
@@ -330,7 +307,7 @@ def test_delayed_input_confirmation_does_not_repeat_write(monkeypatch, command, 
     clock, sleeps = fake_time(monkeypatch)
     session(fake, monkeypatch)
 
-    kw = {'limits': SafetyLimits(0.5), 'confirmed': True} if command == 'input-on' else {}
+    kw = {'confirmed': True} if command == 'input-on' else {}
     assert live(command, **kw)['input_state'] == expected
     assert fake.calls.count('INP ON' if command == 'input-on' else 'INP OFF') == 1
     assert fake.pending_input is None
@@ -351,7 +328,7 @@ def test_input_confirmation_timeout_fails_closed(monkeypatch, command, initial, 
     clock, sleeps = fake_time(monkeypatch)
     session(fake, monkeypatch)
 
-    kw = {'limits': SafetyLimits(0.5), 'confirmed': True} if command == 'input-on' else {}
+    kw = {'confirmed': True} if command == 'input-on' else {}
     with pytest.raises(LoadError) as err:
         live(command, **kw)
     assert err.value.code == error_code
@@ -383,7 +360,7 @@ def test_input_on_write_timeout_is_unknown(monkeypatch):
     fake.write_fail='INP ON'
     session(fake,monkeypatch)
     with pytest.raises(LoadError) as err:
-        live('input-on',limits=SafetyLimits(2),confirmed=True)
+        live('input-on',confirmed=True)
     assert err.value.details['input_on_attempted'] is True
     assert err.value.details['input_state']=='UNKNOWN'
     assert fake.calls.count('INP ON') == 1 and 'INP OFF' not in fake.calls
@@ -406,7 +383,7 @@ def test_remote_required_for_local_hardware_cc(monkeypatch):
     fake.write('CURR 0.1')
     assert fake.current == 0
     fake.calls.clear()
-    result = live('set-cc', limits=SafetyLimits(0.5), current=0.1, range_name='low')
+    result = live('set-cc', current=0.1, range_name='low')
     assert result['range'] == 'low'
     assert result['range_readback_a'] == 0.1
     assert result['current_a'] == 0.1
@@ -424,7 +401,7 @@ def test_setting_not_applied_never_passes_even_with_zero_range_readback(monkeypa
         fake.calls.append(command)
     fake.write = ignored_remote
     with pytest.raises(LoadError) as error:
-        live('set-cc', limits=SafetyLimits(0.5), current=0.1, range_name='low')
+        live('set-cc', current=0.1, range_name='low')
     assert error.value.code == 'readback_mismatch'
     assert error.value.details['observed']['current_a'] == 0.0
     assert error.value.details['completed_steps'] == ['fixed_mode', 'cc_mode', 'range', 'current']
@@ -437,7 +414,7 @@ def test_unknown_range_fails_closed_with_safe_numeric_diagnostics(monkeypatch):
     fake.current = 0.1
     session(fake, monkeypatch)
     with pytest.raises(LoadError) as error:
-        live('input-on', limits=SafetyLimits(0.5), confirmed=True)
+        live('input-on', confirmed=True)
     assert error.value.code == 'invalid_range_readback'
     assert error.value.details == {'range_readback_a': 61.0, 'current_readback_a': 0.1}
     assert 'SYST:REM' not in fake.calls
@@ -458,7 +435,7 @@ def test_input_on_rechecks_changed_state_after_remote(monkeypatch):
     fake.write = remote_changes_mode
     session(fake, monkeypatch)
     with pytest.raises(LoadError) as error:
-        live('input-on', limits=SafetyLimits(0.5), confirmed=True)
+        live('input-on', confirmed=True)
     assert error.value.code == 'unsafe_mode'
     assert 'SYST:REM' in fake.calls
     assert 'INP ON' not in fake.calls
@@ -479,7 +456,7 @@ def test_worker_stop_after_remote_blocks_input_on(monkeypatch):
     fake.write = remote_requests_stop
     session(fake, monkeypatch)
     with pytest.raises(LoadError) as error:
-        live('input-on', limits=SafetyLimits(0.5), confirmed=True, stop=stop)
+        live('input-on', confirmed=True, stop=stop)
     assert error.value.code == 'stopping'
     assert 'INP ON' not in fake.calls
 
@@ -489,7 +466,7 @@ def test_remote_failure_does_not_attempt_cc_or_input_on(monkeypatch):
     fake.write_fail = 'SYST:REM'
     session(fake, monkeypatch)
     with pytest.raises(LoadError) as error:
-        live('set-cc', limits=SafetyLimits(0.5), current=0.1, range_name='low')
+        live('set-cc', current=0.1, range_name='low')
     assert error.value.code == 'write_failed'
     assert error.value.details['completed_steps'] == []
     assert fake.calls == ['*IDN?', 'INP:STAT?', 'SYST:REM']
@@ -502,7 +479,7 @@ def test_range_mapping_uses_programmed_range_value_not_only_ceiling(monkeypatch)
         fake.current = 0.1
         fake.range = raw
         session(fake, monkeypatch)
-        result = live('input-on', limits=SafetyLimits(0.5), confirmed=True)
+        result = live('input-on', confirmed=True)
         assert result['range'] == name
         assert result['range_readback_a'] == raw
 
@@ -543,7 +520,7 @@ def test_numeric_low_range_fix_reproduces_real_error_120_and_recovers(monkeypatc
     # The bounded numeric range selector was separately verified on IT8812C.
     fake.calls.clear()
     session(fake, monkeypatch)
-    result = live('set-cc', limits=SafetyLimits(0.5), current=0.1, range_name='low')
+    result = live('set-cc', current=0.1, range_name='low')
     assert result['input_state'] == 'OFF'
     assert result['range_readback_a'] == 0.1
     assert result['current_a'] == 0.1
@@ -555,8 +532,59 @@ def test_numeric_low_range_fix_reproduces_real_error_120_and_recovers(monkeypatc
 def test_high_range_still_uses_existing_max_command(monkeypatch):
     fake = Fake()
     session(fake, monkeypatch)
-    result = live('set-cc', limits=SafetyLimits(2), current=1.5, range_name='high')
+    result = live('set-cc', current=1.5, range_name='high')
     assert result['range'] == 'high'
     assert result['range_readback_a'] == 60.0
     assert result['current_a'] == 1.5
     assert 'CURR:RANG MAX' in fake.calls
+
+
+@pytest.mark.parametrize('range_name,voltage', [('low', 5), ('high', 50)])
+def test_fixed_cv_offline_setup_and_confirmed_input(range_name, voltage):
+    from electronicload_tool_core.simulator import ControlSimulator
+
+    sim = ControlSimulator()
+    result = control.execute('set-cv', mode='simulate', simulator=sim,
+                             range_name=range_name, voltage=voltage)
+    assert result['input_state'] == 'OFF'
+    assert result['range'] == range_name
+    assert result['voltage_v'] == voltage
+    assert control.execute('input-on', mode='simulate', simulator=sim,
+                           confirmed=True)['input_state'] == 'ON'
+    assert control.execute('input-off', mode='simulate',
+                           simulator=sim)['input_state'] == 'OFF'
+
+
+@pytest.mark.parametrize('voltage,range_name,code', [
+    (0, 'low', 'voltage_out_of_range'),
+    (18.001, 'low', 'voltage_out_of_range'),
+    (120.01, 'high', 'voltage_out_of_range'),
+    (1.2345, 'low', 'invalid_voltage_resolution'),
+    (1.234, 'high', 'invalid_voltage_resolution'),
+    (float('nan'), 'low', 'invalid_voltage'),
+    (True, 'low', 'invalid_voltage'),
+    (1, 'medium', 'invalid_range'),
+])
+def test_cv_invalid_settings_fail_without_hardware(voltage, range_name, code):
+    with pytest.raises(LoadError) as err:
+        control.execute('set-cv', mode='dry-run', voltage=voltage,
+                        range_name=range_name)
+    assert err.value.code == code
+
+
+def test_cv_live_stays_blocked_without_range_hardware_evidence(monkeypatch):
+    def forbidden_open(_resource):
+        raise AssertionError('CV attempted real VISA')
+
+    monkeypatch.setattr(control, 'open_session', forbidden_open)
+    with pytest.raises(LoadError) as err:
+        control.execute('set-cv', resource=RESOURCE, voltage=5, range_name='low')
+    assert err.value.code == 'unsupported_live_scope'
+
+    fake = Fake()
+    fake.function = 'VOLT'
+    session(fake, monkeypatch)
+    with pytest.raises(LoadError) as err:
+        control.execute('input-on', resource=RESOURCE, confirmed=True)
+    assert err.value.code == 'unsupported_live_scope'
+    assert 'SYST:REM' not in fake.calls and 'INP ON' not in fake.calls

@@ -40,7 +40,7 @@ def main(argv: list[str] | None = None) -> int:
     command = argv[0] if argv and argv[0] in command_names else None
     parser = _Parser(
         prog="electronicload-tool",
-        description="Electronic Load Tool: read-only diagnostics, fixed CC control and Worker v3.",
+        description="Electronic Load Tool: read-only diagnostics, fixed CC, offline CV preview and Worker v3.",
         allow_abbrev=False,
     )
     parser.json_errors = json_output
@@ -72,7 +72,6 @@ def main(argv: list[str] | None = None) -> int:
             sub.add_argument("--mode", choices=("simulate", "live"), default="simulate")
             sub.add_argument("--resource")
             sub.add_argument("--backend", default="system")
-            sub.add_argument("--safety-config")
             sub.add_argument("--allow-input-on", action="store_true")
             sub.add_argument("--control-port", type=int, default=0)
             continue
@@ -88,10 +87,11 @@ def main(argv: list[str] | None = None) -> int:
         if name == "set-cc":
             sub.add_argument("--current", required=True, type=float)
             sub.add_argument("--range", required=True, choices=("low", "high"))
-            sub.add_argument("--safety-config")
+        elif name == "set-cv":
+            sub.add_argument("--voltage", required=True, type=float)
+            sub.add_argument("--range", required=True, choices=("low", "high"))
         elif name == "input-on":
             sub.add_argument("--confirm", action="store_true")
-            sub.add_argument("--safety-config")
     try:
         if json_output and any(flag in argv for flag in ("--help", "-h", "--version")):
             raise LoadError("argument_error", "Request help or version separately from --json.")
@@ -106,7 +106,7 @@ def main(argv: list[str] | None = None) -> int:
             if not 0 <= args.control_port <= 65535:
                 raise LoadError("argument_error", "Worker port must be 0-65535.")
             return run_worker(mode=args.mode, resource=args.resource,
-                              backend=args.backend, safety_config=args.safety_config,
+                              backend=args.backend,
                               allow_input_on=args.allow_input_on,
                               port=args.control_port)
         if args.command in ("send-command", "status", "stop", "wait-ready"):
@@ -139,8 +139,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command in CONTROL_COMMANDS:
             result = control_execute(
                 args.command, mode=mode, resource=args.resource, backend=args.backend,
-                model_id=args.model, safety_config=getattr(args, "safety_config", None),
+                model_id=args.model,
                 current=getattr(args, "current", None),
+                voltage=getattr(args, "voltage", None),
                 range_name=getattr(args, "range", None),
                 confirmed=getattr(args, "confirm", False),
                 validation=args.validation_allow_pending_live_support,
