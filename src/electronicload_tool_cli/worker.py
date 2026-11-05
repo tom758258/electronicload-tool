@@ -8,11 +8,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
 from electronicload_tool_core.control import (CONTROL_COMMANDS, execute as control_execute,
-                                              validate_current)
+                                              validate_current, validate_voltage)
 from electronicload_tool_core.errors import LoadError
 from electronicload_tool_core.identity import MODEL_ID
 from electronicload_tool_core.readonly import COMMANDS as READ_COMMANDS, _read
-from electronicload_tool_core.safety import SafetyLimits, load_safety_config
 from electronicload_tool_core.simulator import ControlSimulator
 from electronicload_tool_core.visa import open_session, validate_connection
 
@@ -38,12 +37,11 @@ def manifest(version: str) -> dict:
 
 
 class Runtime:
-    def __init__(self, *, mode, resource=None, backend="system", limits=None,
+    def __init__(self, *, mode, resource=None, backend="system",
                  allow_input_on=False, port=0):
         self.mode = mode
         self.resource = resource
         self.backend = backend
-        self.limits = limits
         self.allow_input_on = allow_input_on
         self.run_id = uuid.uuid4().hex
         self.stop = threading.Event()
@@ -89,7 +87,7 @@ class Runtime:
             return control_execute(
                 command, mode=context["mode"], resource=self.resource,
                 backend=self.backend, model_id=MODEL_ID,
-                limits=self.limits, current=arguments.get("current"),
+                current=arguments.get("current"), voltage=arguments.get("voltage"),
                 range_name=arguments.get("range"),
                 confirmed=arguments.get("confirm_input_on", False),
                 stop=self.stop, simulator=self.simulator,
@@ -164,6 +162,7 @@ def _arguments(command, raw, runtime):
     if not isinstance(raw, dict):
         raise LoadError("argument_error", "Arguments must be an object.")
     permitted = ({"current", "range"} if command == "set-cc" else
+                 {"voltage", "range"} if command == "set-cv" else
                  {"confirm_input_on"} if command == "input-on" else set())
     if set(raw) - permitted:
         raise LoadError("argument_error", "Unsupported command arguments.")
@@ -171,7 +170,12 @@ def _arguments(command, raw, runtime):
         if (set(raw) != permitted or not isinstance(raw["range"], str)
                 or type(raw["current"]) not in (int, float)):
             raise LoadError("argument_error", "CC requires current and range.")
-        validate_current(raw["current"], raw["range"], runtime.limits)
+        validate_current(raw["current"], raw["range"])
+    if command == "set-cv":
+        if (set(raw) != permitted or not isinstance(raw["range"], str)
+                or type(raw["voltage"]) not in (int, float)):
+            raise LoadError("argument_error", "CV requires voltage and range.")
+        validate_voltage(raw["voltage"], raw["range"])
     if command == "input-on" and "confirm_input_on" in raw:
         if type(raw["confirm_input_on"]) is not bool:
             raise LoadError("argument_error", "confirm_input_on must be boolean.")
@@ -278,13 +282,12 @@ def _handler(runtime):
     return Handler
 
 
-def run_worker(*, mode="simulate", resource=None, backend="system", safety_config=None,
+def run_worker(*, mode="simulate", resource=None, backend="system",
                allow_input_on=False, port=0):
     if mode not in {"simulate", "live"}:
         raise LoadError("invalid_mode", "Worker requires live or simulate mode.")
     validate_connection(resource, backend, required=mode == "live")
-    limits = (load_safety_config(safety_config) if safety_config is not None else None) if mode == "live" else SafetyLimits(60)
-    runtime = Runtime(mode=mode, resource=resource, backend=backend, limits=limits,
+    runtime = Runtime(mode=mode, resource=resource, backend=backend,
                       allow_input_on=allow_input_on, port=port)
     try:
         with ThreadingHTTPServer((runtime.host, port), _handler(runtime)) as server:

@@ -1,15 +1,14 @@
 # Electronic Load Tool
 
 Electronic Load Tool provides read-only identification and measurements,
-plus fixed-CC configuration and deliberate Input ON/OFF through a shared Core,
+plus fixed-CC configuration, offline-only CV preview and deliberate Input ON/OFF through a shared Core,
 Standalone CLI and bundled Common v3 Worker. The initial registered model is
 ITECH IT8812C (`itech-it8812c`).
 
 Product LIVE supports `identify`, `input-state`, `measure`, `set-cc`,
 `input-on` and `input-off` only for the exact IT8812C identity with an
 operator-supplied USB INSTR Resource and System VISA (target: Keysight IO
-Libraries Suite). A Safety Config is optional for load control; when supplied,
-it adds a current ceiling to the model/range limits. Input ON still requires
+Libraries Suite). Core enforces model/range limits without any optional Safety Config. Input ON still requires
 deliberate confirmation. Simulation and dry-run never grant hardware authorization.
 
 ## Development environment
@@ -185,7 +184,7 @@ Core owns profiles, identity, support policy, queries, parsing, VISA lifetime,
 and simulation. CLI handles arguments and presentation. Core must not import
 CLI. WebUI is not implemented. The bundled Worker is part of the CLI package and uses the same Core.
 
-## Fixed CC, Input and Common v3 Worker
+## Fixed CC, offline Fixed CV, Input and Common v3 Worker
 
 Fixed CC uses a complete `set-cc` request with amperes and an explicit
 `low` (0–6 A) or `high` (0–60 A) range. Before LIVE configuration, Core
@@ -200,22 +199,9 @@ does not prove that a requested nonzero current was applied: `CURR?` must
 also agree with the requested setpoint. Mismatches include safe numeric
 readback evidence in the error result without assuming success.
 
-Optionally create a local Safety Config to impose a stricter current ceiling,
-for example:
-
-```toml
-[safety]
-max_current = 2.0
-```
-
-LIVE `set-cc` and `input-on` do not require a Safety Config. Without one,
-Core enforces the selected IT8812C 6 A/60 A CC range; `set-cc` also
-checks programming resolution. `input-on` checks the physical CC setting
-against its range.
-When supplied, `max_current` further restricts the allowed maximum; a missing
-or invalid supplied file is rejected. The CLI reloads the file per invocation;
-a Worker loads it once at startup. Range/current checks do not guarantee DUT
-safety or enforce a complete voltage/power operating envelope. The standalone
+Core enforces the IT8812C 6 A/60 A CC range and programming resolution.
+No user-defined Safety Config or DUT current ceiling is imposed. Range checks
+do not guarantee DUT safety or the entire voltage/power operating envelope. The standalone
 LIVE Input ON command additionally requires `--confirm`, and the live Worker additionally requires the
 startup `--allow-input-on` and per-request `confirm_input_on: true`.
 Core checks the current **physical** fixed CC, current/range, Transient/Short
@@ -228,8 +214,19 @@ There is no automatic `SYST:LOC` or `SYST:RWL` command; closing VISA never
 implies Input OFF or returning to local. An ON readback failure is UNKNOWN;
 it is never claimed to be OFF or retried automatically.
 
+Fixed CV is available for **dry-run and simulation only** until exact
+IT8812C voltage-range programming/readback is confirmed on physical hardware.
+Use `set-cv --voltage <V> --range low|high` (Low 0.1–18 V, 1 mV;
+High 0.1–120 V, 10 mV). Invalid values and unrepresentable resolutions
+are rejected without rounding. The simulator supports CV configuration and
+confirmed simulated Input ON/OFF; physical CV Input ON is blocked even when
+the operator supplies an ON confirmation. No CV range SCPI is currently sent
+to real instruments. Fixed CC and all previously supported LIVE commands
+remain unchanged.
+
 ```powershell
 .\.venv\Scripts\electronicload-tool.exe set-cc --simulate --current 1.5 --range low --json
+.\.venv\Scripts\electronicload-tool.exe set-cv --simulate --voltage 5 --range low --json
 .\.venv\Scripts\electronicload-tool.exe input-on --simulate --confirm --json
 .\.venv\Scripts\electronicload-tool.exe input-off --simulate --json
 .\.venv\Scripts\electronicload-tool.exe manifest --json
@@ -289,23 +286,20 @@ command and not automatic Product LIVE promotion.
 Preview the same full command plan without opening VISA or touching hardware:
 
 ```powershell
-.\scripts\live-cli-check.ps1 -Target itech-it8812c -Connection usb -Resource '<USB_RESOURCE>' -Backend system -SafetyConfig '.\limits.toml' -Current 0.1 -PlanOnly
+.\scripts\live-cli-check.ps1 -Target itech-it8812c -Connection usb -Resource '<USB_RESOURCE>' -Backend system -Current 0.1 -PlanOnly
 ```
 
 For a separately approved, safe IT8812C + bounded source/DUT setup, run once
 in an interactive Windows console:
 
 ```powershell
-.\scripts\live-cli-check.ps1 -Target itech-it8812c -Connection usb -Resource '<USB_RESOURCE>' -Backend system -SafetyConfig '.\limits.toml' -Current 0.1 -ConfirmWrites -EnableInputOn
+.\scripts\live-cli-check.ps1 -Target itech-it8812c -Connection usb -Resource '<USB_RESOURCE>' -Backend system -Current 0.1 -ConfirmWrites -EnableInputOn
 ```
 
-`-SafetyConfig` is optional: the bundled `examples/safety-config.toml`
-is used otherwise. That **example permits 2.0 A** and must be reviewed for
-the actual setup; passing a smaller operator-defined maximum is preferred
-where appropriate. Both requested low/high configurations must be within
-the configured limit and each range's programming resolution. The single
-`-Current` is used for both ranges, and the low range is selected last for
-the bounded Input ON trial. No automatic range choice is made in Core.
+The validation script defaults to 0.1 A, with a script-only maximum of 2 A.
+Both low/high configurations must satisfy the model range and programming resolution.
+The single `-Current` applies to both ranges; low is selected last for the
+bounded ON/OFF trial. These limits do not alter normal product CC support.
 
 The complete LIVE validation requires **both** `-ConfirmWrites` and
 `-EnableInputOn`, a user-supplied explicit USB INSTR Resource, interactive
@@ -331,8 +325,8 @@ All six implemented CLI commands use normal Product LIVE permissions,
 including fixed CC and deliberate Input ON/OFF. The unified validation script
 runs the actual public CLI path and does not require the hidden contributor
 validation override. Exact identity/USB/System VISA and Input ON
-confirmation requirements remain unchanged; Safety Config is still supplied by this bounded validation script,
-not required by ordinary LIVE Core operations. System VISA library/manufacturer
+confirmation requirements remain unchanged; the 2 A bound is only for
+the controlled validation script. System VISA library/manufacturer
 is reported for diagnostics and cross-command consistency, not independent
 operator verification. The script does not validate Worker LIVE lifecycle or
 nonzero-load current/power accuracy.

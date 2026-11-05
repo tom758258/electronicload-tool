@@ -8,7 +8,6 @@ param(
     [ValidateSet('usb')][string]$Connection = 'usb',
     [string]$Resource,
     [ValidateSet('system')][string]$Backend = 'system',
-    [string]$SafetyConfig,
     [double]$Current = 0.1,
     [switch]$PlanOnly,
     [switch]$ConfirmWrites,
@@ -23,6 +22,7 @@ $cli = Join-Path $repo '.venv/Scripts/electronicload-tool.exe'
 $perCommandDeadlineMs = 30000
 $totalDeadlineMs = 240000
 $currentText = $Current.ToString([Globalization.CultureInfo]::InvariantCulture)
+$scriptCurrentCeilingA = 2.0
 $reportDirectory = $null
 $watch = $null
 $phase = 'plan'
@@ -39,14 +39,14 @@ $report = [ordered]@{
     prechecks = [ordered]@{
         plan = 'NOT RUN'; preflight = 'NOT RUN'; identify = 'NOT RUN'
         runtime = 'NOT RUN'; runtime_manufacturer = $null
-        safety = 'NOT RUN'; input_off = 'NOT RUN'
+        current = 'NOT RUN'; input_off = 'NOT RUN'
     }
     artifact_mode = $(if ($DebugArtifacts) { 'debug' } else { 'minimal' })
     validation_mode = $(if ($PlanOnly) { 'plan-only' } else { 'live' })
     product_live = 'IT8812C USB/System VISA read-only and fixed CC/Input LIVE open'
     per_command_deadline_ms = $perCommandDeadlineMs
     total_deadline_ms = $totalDeadlineMs
-    safety_max_current_a = $null
+    script_current_ceiling_a = $null
     plans = @()
     results = @(
         [ordered]@{ name = 'identify'; command = 'identify'; status = 'NOT RUN' },
@@ -115,7 +115,7 @@ function Save-Report {
         per_command_deadline_ms = $script:perCommandDeadlineMs
         total_deadline_ms = $script:totalDeadlineMs
         product_live = $script:report.product_live
-        safety_max_current_a = $script:report.safety_max_current_a
+        script_current_ceiling_a = $script:report.script_current_ceiling_a
         prechecks = $script:report.prechecks
         cases = $cases
         summary_counts = $counts
@@ -270,22 +270,18 @@ try {
     if (-not (Test-Path -LiteralPath $python) -or -not (Test-Path -LiteralPath $cli)) {
         throw 'Sync the repository .venv with uv before running validation.'
     }
-    if ([string]::IsNullOrWhiteSpace($SafetyConfig)) {
-        $SafetyConfig = Join-Path $repo 'examples/safety-config.toml'
+    if ([double]::IsNaN($Current) -or [double]::IsInfinity($Current) -or
+        $Current -le 0 -or $Current -gt $scriptCurrentCeilingA) {
+        throw 'Current must be positive and at most 2 A for this controlled test.'
     }
-    if (-not (Test-Path -LiteralPath $SafetyConfig)) {
-        throw 'Safety Config file does not exist.'
-    }
-    $SafetyConfig = (Resolve-Path -LiteralPath $SafetyConfig).Path
-    $limitOutput = & $python -c 'from electronicload_tool_core.safety import load_safety_config; from electronicload_tool_core.control import validate_current; import sys; s=load_safety_config(sys.argv[1]); validate_current(sys.argv[2],sys.argv[3],s); validate_current(sys.argv[2],sys.argv[4],s); print(s.max_current)' $SafetyConfig $currentText low high
-    if ($LASTEXITCODE -ne 0) { throw 'Safety Config verification failed.' }
-    $report.safety_max_current_a = [double]::Parse(
-        [string]$limitOutput, [Globalization.CultureInfo]::InvariantCulture)
-    $report.prechecks.safety = 'PASS'
+    & $python -c 'from electronicload_tool_core.control import validate_current; import sys; validate_current(sys.argv[1], "low"); validate_current(sys.argv[1], "high")' $currentText
+    if ($LASTEXITCODE -ne 0) { throw 'Test current is invalid for both CC ranges.' }
+    $report.script_current_ceiling_a = $scriptCurrentCeilingA
+    $report.prechecks.current = 'PASS'
 
-    $highArgs = @('--current', $currentText, '--range', 'high', '--safety-config', $SafetyConfig)
-    $lowArgs = @('--current', $currentText, '--range', 'low', '--safety-config', $SafetyConfig)
-    $onArgs = @('--safety-config', $SafetyConfig, '--confirm')
+    $highArgs = @('--current', $currentText, '--range', 'high')
+    $lowArgs = @('--current', $currentText, '--range', 'low')
+    $onArgs = @('--confirm')
     $planned = @(
         @{command='identify';args=@()},
         @{command='input-state';args=@()},
@@ -314,7 +310,7 @@ try {
     $reportDirectory = Join-Path $repo ".tmp_tests/$name"
     [void][IO.Directory]::CreateDirectory($reportDirectory)
     Write-Host 'Plan: Identify, Input State, Measure, CC High/Low, Input ON, Measure, Input OFF, final Input State.'
-    Write-Host "Current=$currentText A; Safety maximum=$($report.safety_max_current_a) A; USB System VISA."
+    Write-Host "Current=$currentText A; Script ceiling=$($report.script_current_ceiling_a) A; USB System VISA."
     Write-Host 'No reset, SYST:ERR? consumption, automatic local switch, or implicit Input ON.'
     Write-Host 'An Input ON attempt requires an explicit OFF cleanup; session close does not turn Input OFF.'
     Write-Host 'V/I/P measure queries are separate; power freshness is not guaranteed.'

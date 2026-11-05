@@ -12,7 +12,6 @@ license = "MIT"
 license-files = ["LICENSE"]
 dependencies = [
     "pyvisa>=1.14",
-    "tomli>=2; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]

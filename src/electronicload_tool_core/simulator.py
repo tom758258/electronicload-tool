@@ -13,7 +13,7 @@ class Simulator:
 
 
 class ControlSimulator:
-    """Only the minimum mutable state required for fixed-CC command simulation."""
+    """Minimal mutable state for fixed CC and offline-only fixed CV simulation."""
 
     def __init__(self):
         self.input_on = False
@@ -21,6 +21,8 @@ class ControlSimulator:
         self.mode = "FIX"
         self.range_a = 60.0
         self.current_a = 0.0
+        self.cv_range = 'high'
+        self.voltage_v = 0.1
         self.remote = False
 
     def query(self, command: str) -> str:
@@ -31,12 +33,24 @@ class ControlSimulator:
             "FUNC:MODE?": self.mode,
             "CURR:RANG?": str(self.range_a),
             "CURR?": str(self.current_a),
+            "VOLT:RANG?": str(18.0 if self.cv_range == "low" else 120.0),
+            "VOLT?": str(self.voltage_v),
             "TRAN?": "0",
             "INP:SHOR:STAT?": "0",
             "MEAS:VOLT?": "12.0",
             "MEAS:CURR?": str(self.current_a if self.input_on else 0),
             "FETC:POW?": str(12.0 * self.current_a if self.input_on else 0),
         }[command]
+
+    def configure_cv(self, voltage, range_name: str) -> None:
+        """Offline model only; do not infer real IT8812C VOLT:RANG syntax."""
+        if self.input_on:
+            raise ValueError("Input must be OFF")
+        self.remote = True
+        self.mode = "FIX"
+        self.function = "VOLT"
+        self.cv_range = range_name
+        self.voltage_v = float(voltage)
 
     def write(self, command: str) -> None:
         if command == "SYST:REM":
