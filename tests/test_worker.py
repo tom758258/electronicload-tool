@@ -300,3 +300,23 @@ def test_cv_worker_simulated_job_and_invalid_arguments(worker):
                                                {'confirm_input_on': True}))
     assert code == 202
     assert wait_finished(out, accepted['worker_job_id'])['result']['input_state'] == 'ON'
+
+
+def test_control_worker_dry_run_returns_plan_without_hardware(worker):
+    """Common v3 dry_run must reach Core as dry-run for every control command."""
+    _, out, ready = worker
+    cases = [
+        ('set-cc', {'current': 1.5, 'range': 'low'}),
+        ('set-cv', {'voltage': 5, 'range': 'low'}),
+        ('input-on', {}),
+        ('input-off', {}),
+    ]
+    for command, arguments in cases:
+        payload = request(command, arguments)
+        payload['context']['mode'] = 'dry_run'
+        code, accepted = http(ready['command_url'], payload)
+        assert code == 202 and accepted['kind'] == 'async_job'
+        finished = wait_finished(out, accepted['worker_job_id'])
+        assert finished['state'] == 'succeeded' and finished['ok'] is True
+        assert finished['result']['command'] == command
+        assert finished['result']['hardware_access'] is False
