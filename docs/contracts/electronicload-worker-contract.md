@@ -281,3 +281,16 @@ to be hardware-validated by CLI acceptance. The hidden contributor-validation
 CLI option remains for compatibility, is not used by the Worker, and cannot
 bypass identity or connection restrictions. Dry-run/simulation do not certify
 real hardware behavior.
+
+
+## Separate CLI hardware validation
+
+The standalone CLI offers an explicit `--hardware-validation` option for
+controlled contributor CV/CR/CW/Transient trials. It is not a Worker command,
+argument, context, feature, or LIVE promotion. The Worker does not forward this
+option or its `validation_settings` and continues to reject extra arguments.
+All LIVE refusal and admission/terminal behavior described above remains in
+force, including for the legacy contributor override. The dedicated CLI path
+requires complete expected settings for Enable, Input ON and Trigger and
+compares physical readback; its status describes control state, not waveform
+completion. See the README's controlled instrument validation procedure.

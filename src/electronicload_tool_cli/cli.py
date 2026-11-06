@@ -3,6 +3,7 @@
 import argparse
 import json
 import sys
+from decimal import Decimal
 from importlib.metadata import version
 
 from electronicload_tool_core.discovery import discover_resources
@@ -85,11 +86,16 @@ def main(argv: list[str] | None = None) -> int:
         sub.add_argument("--json", action="store_true")
         sub.add_argument("--validation-allow-pending-live-support", action="store_true",
                          help=argparse.SUPPRESS)
+        if name in CONTROL_COMMANDS:
+            sub.add_argument("--hardware-validation", choices=("cv", "cr", "cw", "transient-cc"),
+                             help="Explicit contributor hardware-validation scope; not Product LIVE.")
+            sub.add_argument("--validation-settings-json",
+                             help="Expected complete setup for validation enable, ON and trigger.")
         if name == "set-cc":
             sub.add_argument("--current", required=True, type=float)
             sub.add_argument("--range", required=True, choices=("low", "high"))
         elif name == "set-cv":
-            sub.add_argument("--voltage", required=True, type=float)
+            sub.add_argument("--voltage", required=True)
             sub.add_argument("--range", required=True, choices=("low", "high"))
         elif name == "set-cr":
             sub.add_argument("--resistance", required=True, help="Resistance in ohms (offline only).")
@@ -163,6 +169,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "list-resources":
             result = discover_resources(live_only=args.live_only)
         elif args.command in CONTROL_COMMANDS:
+            validation_settings = None
+            if args.validation_settings_json is not None:
+                try:
+                    validation_settings = json.loads(args.validation_settings_json,
+                                                     parse_float=Decimal)
+                except (ValueError, UnicodeError) as exc:
+                    raise LoadError("argument_error", "Validation settings JSON is invalid.") from exc
+                if not isinstance(validation_settings, dict):
+                    raise LoadError("argument_error", "Validation settings must be an object.")
             result = control_execute(
                 args.command, mode=mode, resource=args.resource, backend=args.backend,
                 model_id=args.model,
@@ -174,6 +189,8 @@ def main(argv: list[str] | None = None) -> int:
                             else getattr(args, "range", None)),
                 confirmed=getattr(args, "confirm", False),
                 validation=args.validation_allow_pending_live_support,
+                hardware_validation=args.hardware_validation,
+                validation_settings=validation_settings,
                 transient={key: value for key, value in vars(args).items()
                            if key in TRANSIENT_FIELDS} if args.command == "set-transient-cc" else None,
             )

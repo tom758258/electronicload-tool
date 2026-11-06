@@ -1,8 +1,9 @@
 <#
-Single, bounded IT8812C CLI hardware validation: read-only, fixed CC and explicit Input ON/OFF.
-Requires approved safe hardware setup, explicit write/ON gates and one interactive Enter confirmation.
-Fixed CV/CR/CW remain offline-only; preflight-cli.ps1 covers their offline CLI paths.
-These modes are not included in this script's physical command sequence or hardware claims.
+Single, bounded IT8812C CLI hardware validation.
+Default: supported read-only and CC/Input commands.
+-IncludeValidationModes: explicit validation-only CV/CR/CW and Transient CC trials.
+Requires approved source/DUT limits, write/ON gates and interactive confirmation.
+-PlanOnly validates every planned CLI request without VISA or hardware access.
 #>
 [CmdletBinding()]
 param(
@@ -11,6 +12,20 @@ param(
     [string]$Resource,
     [ValidateSet('system')][string]$Backend = 'system',
     [double]$Current = 0.1,
+    [switch]$IncludeValidationModes,
+    [double]$SourceCurrentLimitA,
+    [double]$SourceVoltageLimitV,
+    [string]$Voltage = '5',
+    [string]$ResistanceLow = '10',
+    [string]$ResistanceHigh = '1000',
+    [string]$Power = '1',
+    [string]$LevelA = '0.1',
+    [string]$LevelB = '0.2',
+    [string]$RiseSlew = '0.1',
+    [string]$FallSlew = '0.1',
+    [string]$WidthA = '0.001',
+    [string]$WidthB = '0.002',
+    [string]$PulseWidth = '0.001',
     [switch]$PlanOnly,
     [switch]$ConfirmWrites,
     [switch]$EnableInputOn,
@@ -21,14 +36,19 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $python = Join-Path $repo '.venv/Scripts/python.exe'
 $cli = Join-Path $repo '.venv/Scripts/electronicload-tool.exe'
+if (-not (Test-Path -LiteralPath $python)) {
+    $python = Join-Path $repo '.venv/bin/python'
+    $cli = Join-Path $repo '.venv/bin/electronicload-tool'
+}
 $perCommandDeadlineMs = 30000
-$totalDeadlineMs = 240000
+$totalDeadlineMs = $(if ($IncludeValidationModes) { 900000 } else { 240000 })
 $currentText = $Current.ToString([Globalization.CultureInfo]::InvariantCulture)
 $scriptCurrentCeilingA = 2.0
 $reportDirectory = $null
 $watch = $null
 $phase = 'plan'
 $inputOnAttempted = $false
+$transientEnableAttempted = $false
 $commandIndex = 0
 $report = [ordered]@{
     status = 'NOT RUN'
@@ -49,18 +69,10 @@ $report = [ordered]@{
     per_command_deadline_ms = $perCommandDeadlineMs
     total_deadline_ms = $totalDeadlineMs
     script_current_ceiling_a = $null
+    includes_validation_modes = [bool]$IncludeValidationModes
+    declared_source_limits = $null
     plans = @()
-    results = @(
-        [ordered]@{ name = 'identify'; command = 'identify'; status = 'NOT RUN' },
-        [ordered]@{ name = 'input-state'; command = 'input-state'; status = 'NOT RUN' },
-        [ordered]@{ name = 'measure-off'; command = 'measure'; status = 'NOT RUN' },
-        [ordered]@{ name = 'set-cc-high'; command = 'set-cc'; status = 'NOT RUN' },
-        [ordered]@{ name = 'set-cc-low'; command = 'set-cc'; status = 'NOT RUN' },
-        [ordered]@{ name = 'input-on'; command = 'input-on'; status = 'NOT RUN' },
-        [ordered]@{ name = 'measure-on'; command = 'measure'; status = 'NOT RUN' },
-        [ordered]@{ name = 'input-off'; command = 'input-off'; status = 'NOT RUN' },
-        [ordered]@{ name = 'final-input-state'; command = 'input-state'; status = 'NOT RUN' }
-    )
+    results = @()
 }
 
 function Save-Report {
@@ -75,6 +87,7 @@ function Save-Report {
             command = $entry.command
             status = $entry.status
         }
+        if ($entry.Contains('arguments')) { $case.arguments = $entry.arguments }
         if ($entry.Contains('error_code')) { $case.error_code = $entry.error_code }
         if ($entry.status -eq 'PASS') {
             if ($entry.command -eq 'input-state' -or $entry.command -eq 'input-on' -or
@@ -84,6 +97,12 @@ function Save-Report {
             if ($entry.command -eq 'set-cc') {
                 $case.range = $entry.response.result.range
                 $case.current_a = $entry.response.result.current_a
+            }
+            foreach ($field in @('configuration', 'enabled', 'validation_only', 'validation_scope',
+                                  'trigger_dispatched_at_utc', 'waveform_completion_known')) {
+                if ($null -ne $entry.response.result.$field) {
+                    $case[$field] = $entry.response.result.$field
+                }
             }
             if ($entry.command -eq 'measure') {
                 $case.values = [ordered]@{
@@ -117,6 +136,8 @@ function Save-Report {
         per_command_deadline_ms = $script:perCommandDeadlineMs
         total_deadline_ms = $script:totalDeadlineMs
         product_live = $script:report.product_live
+        includes_validation_modes = $script:report.includes_validation_modes
+        declared_source_limits = $script:report.declared_source_limits
         script_current_ceiling_a = $script:report.script_current_ceiling_a
         prechecks = $script:report.prechecks
         cases = $cases
@@ -147,6 +168,48 @@ function Show-Summary {
     Write-Host "Overall: $($script:report.status)"
 }
 
+function New-CliProcessInfo([string[]]$Arguments) {
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $python
+    $start.Arguments = ($arguments | ForEach-Object { '"' + ($_ -replace '"','\"') + '"' }) -join ' '
+    $start.WorkingDirectory = $repo
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    return $start
+}
+
+function Invoke-PlanCommand([string]$Command, [string[]]$ExtraArgs) {
+    $arguments = @('-c', 'from electronicload_tool_cli.cli import main; raise SystemExit(main())',
+        $Command, '--resource', $Resource, '--backend', $Backend, '--model', $Target,
+        '--dry-run', '--json') + $ExtraArgs
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = New-CliProcessInfo $arguments
+    $started = $false
+    try {
+        [void]$process.Start()
+        $started = $true
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($script:perCommandDeadlineMs)) { throw 'Offline CLI plan timed out.' }
+        $output = $stdout.GetAwaiter().GetResult()
+        [void]$stderr.GetAwaiter().GetResult()
+        $plan = $output | ConvertFrom-Json -ErrorAction Stop
+        if ($process.ExitCode -ne 0 -or $plan.ok -ne $true) {
+            throw "Offline plan failed for $Command ($($plan.error.code))."
+        }
+        return $plan
+    } finally {
+        if ($started -and -not $process.HasExited) {
+            $process.Kill()
+            [void]$process.WaitForExit(5000)
+        }
+        $process.Dispose()
+    }
+}
+
 function Invoke-LiveCommand([string]$Command, [string]$CaseName,
                             [string[]]$ExtraArgs = @(),
                             [switch]$Cleanup) {
@@ -158,15 +221,7 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
     $arguments = @('-c', 'from electronicload_tool_cli.cli import main; raise SystemExit(main())',
         $Command, '--resource', $Resource, '--backend', $Backend, '--model', $Target,
         '--json') + $ExtraArgs
-    $start = [Diagnostics.ProcessStartInfo]::new()
-    $start.FileName = $python
-    $start.Arguments = ($arguments | ForEach-Object { '"' + ($_ -replace '"','\"') + '"' }) -join ' '
-    $start.WorkingDirectory = $repo
-    $start.UseShellExecute = $false
-    $start.CreateNoWindow = $true
-    $start.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
-    $start.RedirectStandardOutput = $true
-    $start.RedirectStandardError = $true
+    $start = New-CliProcessInfo $arguments
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = $start
     $script:commandIndex++
@@ -281,29 +336,93 @@ try {
     $report.script_current_ceiling_a = $scriptCurrentCeilingA
     $report.prechecks.current = 'PASS'
 
+    if ($IncludeValidationModes) {
+        # Script-only operator envelope, not a substitute for source current limiting.
+        if ([double]::IsNaN($SourceCurrentLimitA) -or [double]::IsInfinity($SourceCurrentLimitA) -or
+            [double]::IsNaN($SourceVoltageLimitV) -or [double]::IsInfinity($SourceVoltageLimitV) -or
+            $SourceCurrentLimitA -le 0 -or $SourceCurrentLimitA -gt 2 -or
+            $SourceVoltageLimitV -le 0 -or $SourceVoltageLimitV -gt 18) {
+            throw 'Extended validation requires declared source limits: >0 to 2 A and >0 to 18 V.'
+        }
+        & $python -c 'from decimal import Decimal; import sys; a,b=map(Decimal,sys.argv[1:]); assert 0 <= a <= 2 and 0 <= b <= 2' $LevelA $LevelB
+        if ($LASTEXITCODE -ne 0) { throw 'Transient levels must be within the script ceiling of 2 A.' }
+        $report.declared_source_limits = [ordered]@{
+            current_a = $SourceCurrentLimitA; voltage_v = $SourceVoltageLimitV
+            verification = 'operator-declared; script does not configure or verify the source'
+        }
+    }
     $highArgs = @('--current', $currentText, '--range', 'high')
     $lowArgs = @('--current', $currentText, '--range', 'low')
     $onArgs = @('--confirm')
     $planned = @(
-        @{command='identify';args=@()},
-        @{command='input-state';args=@()},
-        @{command='measure';args=@()},
-        @{command='set-cc';args=$highArgs},
-        @{command='set-cc';args=$lowArgs},
-        @{command='input-on';args=$onArgs},
-        @{command='measure';args=@()},
-        @{command='input-off';args=@()},
-        @{command='input-state';args=@()}
+        @{name='identify';command='identify';args=@()},
+        @{name='input-state';command='input-state';args=@()},
+        @{name='measure-off';command='measure';args=@()},
+        @{name='set-cc-high';command='set-cc';args=$highArgs},
+        @{name='set-cc-low';command='set-cc';args=$lowArgs},
+        @{name='input-on';command='input-on';args=$onArgs},
+        @{name='measure-on';command='measure';args=@()},
+        @{name='input-off';command='input-off';args=@()},
+        @{name='final-input-state';command='input-state';args=@()}
     )
+    if ($IncludeValidationModes) {
+        $trials = @(
+            @{name='cv-low';scope='cv';settings=@{voltage=$Voltage;range='low'}},
+            @{name='cv-high';scope='cv';settings=@{voltage=$Voltage;range='high'}},
+            @{name='cr-low';scope='cr';settings=@{resistance=$ResistanceLow;range='low'}},
+            @{name='cr-high';scope='cr';settings=@{resistance=$ResistanceHigh;range='high'}},
+            @{name='cw';scope='cw';settings=@{power=$Power}}
+        )
+        foreach ($item in @(@('continuous','auto'), @('pulse','low'), @('toggle','high'),
+                             @('continuous','high'), @('pulse','auto-high'))) {
+            $configuration = @{
+                transient_mode=$item[0]; range=$item[1]; level_a=$LevelA; level_b=$LevelB
+                rise_slew=$RiseSlew; fall_slew=$FallSlew
+            }
+            if ($item[1] -eq 'auto-high') {
+                # Explicit extra trial: 0.5 A/us requires High while levels stay bounded.
+                $configuration.range = 'auto'
+                $configuration.rise_slew = '0.5'
+                $configuration.fall_slew = '0.5'
+            }
+            if ($item[0] -eq 'continuous') { $configuration.width_a=$WidthA; $configuration.width_b=$WidthB }
+            if ($item[0] -eq 'pulse') { $configuration.pulse_width=$PulseWidth }
+            $trials += @{name="transient-$($item[0])-$($item[1])";scope='transient-cc';settings=$configuration}
+        }
+        foreach ($trial in $trials) {
+            $prefix = $trial.name
+            $scopeArgs = @('--hardware-validation', $trial.scope)
+            $setupArgs = @($scopeArgs)
+            foreach ($key in ($trial.settings.Keys | Sort-Object)) {
+                $setupArgs += @(('--' + ($key -replace '_','-')), ([string]$trial.settings[$key]))
+            }
+            $expectedArgs = $scopeArgs + @('--validation-settings-json',
+                ($trial.settings | ConvertTo-Json -Compress))
+            $planned += @{name="$prefix-setup";command="set-$($trial.scope)";args=$setupArgs}
+            if ($trial.scope -eq 'transient-cc') {
+                $planned += @{name="$prefix-enable";command='transient-enable';args=$expectedArgs}
+            }
+            $planned += @{name="$prefix-on";command='input-on';args=($expectedArgs + @('--confirm'))}
+            if ($trial.scope -eq 'transient-cc') {
+                $planned += @{name="$prefix-trigger-1";command='transient-trigger';args=$expectedArgs}
+                $planned += @{name="$prefix-trigger-2";command='transient-trigger';args=$expectedArgs}
+                $planned += @{name="$prefix-status-on";command='transient-status';args=$scopeArgs}
+            }
+            $planned += @{name="$prefix-measure";command='measure';args=@()}
+            $planned += @{name="$prefix-off";command='input-off';args=@()}
+            if ($trial.scope -eq 'transient-cc') {
+                $planned += @{name="$prefix-disable";command='transient-disable';args=$scopeArgs}
+                $planned += @{name="$prefix-status-off";command='transient-status';args=$scopeArgs}
+            }
+            $planned += @{name="$prefix-final-state";command='input-state';args=@()}
+        }
+    }
+    $report.results = @($planned | ForEach-Object {
+        [ordered]@{name=$_.name;command=$_.command;arguments=$_.args;status='NOT RUN'}
+    })
     foreach ($step in $planned) {
         $extras = @($step.args)
-        $output = & $cli $step.command --model $Target --resource $Resource --backend $Backend @extras --dry-run --json
-        $exitCode = $LASTEXITCODE
-        $plan = ($output -join "`n") | ConvertFrom-Json
-        if ($exitCode -ne 0 -or $plan.ok -ne $true) {
-            Write-Host "BLOCKED: offline plan failed for $($step.command)."
-            exit 2
-        }
+        $plan = Invoke-PlanCommand $step.command $extras
         $report.plans += $plan
     }
     $report.prechecks.plan = 'PASS'
@@ -311,7 +430,14 @@ try {
         [Guid]::NewGuid().ToString('N').Substring(0, 8)
     $reportDirectory = Join-Path $repo ".tmp_tests/$name"
     [void][IO.Directory]::CreateDirectory($reportDirectory)
-    Write-Host 'Plan: Identify, Input State, Measure, CC High/Low, Input ON, Measure, Input OFF, final Input State.'
+    Write-Host 'Plan: Identify, Input State, Measure, CC High/Low and explicit ON/OFF.'
+    if ($IncludeValidationModes) {
+        Write-Host 'Additional validation: CV Low/High, CR Low/High, CW, Transient Continuous/Pulse/Toggle, Low/High/Auto.'
+        Write-Host 'Every trial includes explicit ON/OFF; Transient trials include repeated triggers and control status.'
+        Write-Host 'Trigger/status/measure do not establish waveform shape, timing or completion.'
+        Write-Host "Declared source limits: $SourceCurrentLimitA A / $SourceVoltageLimitV V; configure these on the source first."
+    }
+    foreach ($step in $planned) { Write-Host ("  {0}: {1} {2}" -f $step.name, $step.command, ($step.args -join ' ')) }
     Write-Host "Current=$currentText A; Script ceiling=$($report.script_current_ceiling_a) A; USB System VISA."
     Write-Host 'No reset, SYST:ERR? consumption, automatic local switch, or implicit Input ON.'
     Write-Host 'An Input ON attempt requires an explicit OFF cleanup; session close does not turn Input OFF.'
@@ -345,7 +471,7 @@ try {
     $report.prechecks.preflight = 'PASS'
     Write-Host "Target: $Target; resource: $Resource; backend: $Backend"
     Write-Host 'Confirm safe, bounded source/DUT, current limit and a manual Input OFF contingency.'
-    Write-Host 'This one run deliberately tests Input ON and then explicitly commands/verifies OFF.'
+    Write-Host 'Each trial deliberately tests Input ON and explicitly commands/verifies OFF; source/DUT must tolerate every printed setting.'
     $ack = Read-Host 'With approved hardware setup, press Enter to run all CLI cases (Ctrl+C to cancel)'
     if ($ack -cne '') {
         $report.status = 'BLOCKED'
@@ -378,64 +504,36 @@ try {
     Write-Host "PASS Identify; VISA runtime manufacturer: $expectedManufacturer"
 
     $phase = 'cases'
-    Write-Host 'Running Input State precheck...'
-    $state = Invoke-LiveCommand -Command 'input-state' -CaseName 'input-state'
-    Assert-Runtime $state 'input-state'
-    if ($state.result.input_state -cne 'OFF') {
-        $report.prechecks.input_off = 'BLOCKED'
-        $report.status = 'BLOCKED'
-        Fail-Case 'input-state' 'input_not_off' 'Input is not OFF; configuration and Input ON are blocked.'
+    foreach ($step in ($planned | Select-Object -Skip 1)) {
+        Write-Host "Running $($step.name)..."
+        # Mark uncertainty before dispatch, including subprocess/JSON/runtime failures.
+        if ($step.command -eq 'input-on') { $inputOnAttempted = $true }
+        if ($step.command -eq 'transient-enable') { $transientEnableAttempted = $true }
+        $result = Invoke-LiveCommand -Command $step.command -CaseName $step.name -ExtraArgs $step.args
+        Assert-Runtime $result $step.name
+        if ($step.name -eq 'input-state' -and $result.result.input_state -cne 'OFF') {
+            $report.prechecks.input_off = 'BLOCKED'
+            $report.status = 'BLOCKED'
+        }
+        if ($step.command -in @('input-state', 'input-off', 'set-cc', 'set-cv', 'set-cr', 'set-cw',
+                               'set-transient-cc', 'transient-enable', 'transient-disable')) {
+            Assert-InputOff $result $step.name
+        }
+        if ($step.command -eq 'input-on' -and $result.result.input_state -cne 'ON') {
+            Fail-Case $step.name 'input_on_not_confirmed' 'Input ON was not confirmed.'
+        }
+        if ($step.command -eq 'transient-status') {
+            $expectedOn = $step.name.EndsWith('-status-on')
+            $expectedState = $(if ($expectedOn) { 'ON' } else { 'OFF' })
+            if ($result.result.enabled -ne $expectedOn -or $result.result.input_state -cne $expectedState) {
+                Fail-Case $step.name 'readback_mismatch' 'Transient/Input control status did not match.'
+            }
+        }
+        if ($step.command -eq 'input-off') { $inputOnAttempted = $false }
+        if ($step.command -eq 'transient-disable') { $transientEnableAttempted = $false }
+        if ($step.name -eq 'input-state') { $report.prechecks.input_off = 'PASS' }
+        Write-Host "PASS $($step.name)"
     }
-    $report.prechecks.input_off = 'PASS'
-    Write-Host 'PASS Input State: OFF'
-
-    Write-Host 'Running Measurement with Input OFF...'
-    $measureOff = Invoke-LiveCommand -Command 'measure' -CaseName 'measure-off'
-    Assert-Runtime $measureOff 'measure-off'
-    Write-Host 'PASS Measurement (Input OFF)'
-
-    Write-Host 'Running CC High-range configuration with Input OFF...'
-    $high = Invoke-LiveCommand -Command 'set-cc' -CaseName 'set-cc-high' -ExtraArgs $highArgs
-    Assert-Runtime $high 'set-cc-high'
-    if ($high.result.range -cne 'high' -or $high.result.input_state -cne 'OFF') {
-        Fail-Case 'set-cc-high' 'readback_mismatch' 'High-range CC setting or Input OFF readback did not match.'
-    }
-    Write-Host 'PASS Set CC: High range'
-
-    Write-Host 'Running CC Low-range configuration with Input OFF...'
-    $low = Invoke-LiveCommand -Command 'set-cc' -CaseName 'set-cc-low' -ExtraArgs $lowArgs
-    Assert-Runtime $low 'set-cc-low'
-    if ($low.result.range -cne 'low' -or $low.result.input_state -cne 'OFF') {
-        Fail-Case 'set-cc-low' 'readback_mismatch' 'Low-range CC setting or Input OFF readback did not match.'
-    }
-    Write-Host 'PASS Set CC: Low range'
-
-    # Treat even an uncertain ON write as an attempted ON. The cleanup path
-    # must not assume an exception means the physical Input remains OFF.
-    $inputOnAttempted = $true
-    Write-Host 'Running explicitly authorized Input ON...'
-    $on = Invoke-LiveCommand -Command 'input-on' -CaseName 'input-on' -ExtraArgs $onArgs
-    Assert-Runtime $on 'input-on'
-    if ($on.result.input_state -cne 'ON') { Fail-Case 'input-on' 'input_on_not_confirmed' 'Input ON was not confirmed.' }
-    Write-Host 'PASS Input ON'
-
-    Write-Host 'Running Measurement with Input ON...'
-    $measureOn = Invoke-LiveCommand -Command 'measure' -CaseName 'measure-on'
-    Assert-Runtime $measureOn 'measure-on'
-    Write-Host 'PASS Measurement (Input ON)'
-
-    Write-Host 'Running explicit Input OFF...'
-    $off = Invoke-LiveCommand -Command 'input-off' -CaseName 'input-off'
-    Assert-Runtime $off 'input-off'
-    Assert-InputOff $off 'input-off'
-    $inputOnAttempted = $false
-    Write-Host 'PASS Input OFF'
-
-    Write-Host 'Running final independent Input State check...'
-    $final = Invoke-LiveCommand -Command 'input-state' -CaseName 'final-input-state'
-    Assert-Runtime $final 'final-input-state'
-    Assert-InputOff $final 'final-input-state'
-    Write-Host 'PASS Final Input State: OFF'
 
     $report.status = 'PASS'
     Save-Report
@@ -461,12 +559,32 @@ try {
         try {
             Write-Host 'Input ON was attempted: explicitly commanding OFF cleanup...'
             $cleanup = Invoke-LiveCommand -Command 'input-off' -CaseName 'cleanup-input-off' -Cleanup
+            Assert-Runtime $cleanup 'cleanup-input-off'
             Assert-InputOff $cleanup 'cleanup-input-off'
             $inputOnAttempted = $false
             Write-Host 'PASS Explicit Input OFF cleanup'
         } catch {
             $report.status = 'FAIL'
             Write-Host 'WARNING: physical Input OFF was not confirmed. Immediate operator action is required.'
+        }
+        if ($report.status -eq 'PASS') { $report.status = 'FAIL' }
+    }
+    if ($transientEnableAttempted) {
+        # Disable is separate from OFF. Never attempt it with unconfirmed Input state.
+        $report.results += [ordered]@{name='cleanup-input-state';command='input-state';status='NOT RUN'}
+        $report.results += [ordered]@{name='cleanup-transient-disable';command='transient-disable';status='NOT RUN'}
+        try {
+            $state = Invoke-LiveCommand -Command 'input-state' -CaseName 'cleanup-input-state' -Cleanup
+            Assert-Runtime $state 'cleanup-input-state'
+            Assert-InputOff $state 'cleanup-input-state'
+            $disabled = Invoke-LiveCommand -Command 'transient-disable' -CaseName 'cleanup-transient-disable' `
+                -ExtraArgs @('--hardware-validation','transient-cc') -Cleanup
+            Assert-Runtime $disabled 'cleanup-transient-disable'
+            Assert-InputOff $disabled 'cleanup-transient-disable'
+            Write-Host 'PASS Explicit Transient Disable cleanup after confirmed OFF'
+        } catch {
+            $report.status = 'FAIL'
+            Write-Host 'WARNING: Transient disable cleanup was not confirmed. Operator action is required.'
         }
         if ($report.status -eq 'PASS') { $report.status = 'FAIL' }
     }

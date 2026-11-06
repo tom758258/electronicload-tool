@@ -524,12 +524,23 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
             range_name: str | None = None,
             confirmed: bool = False, validation: bool = False,
             stop: Event | None = None, simulator: ControlSimulator | None = None,
-            transient: dict | None = None) -> dict:
+            transient: dict | None = None, hardware_validation: str | None = None,
+            validation_settings: dict | None = None) -> dict:
     if command not in CONTROL_COMMANDS or mode not in {"live", "simulate", "dry-run"}:
         raise LoadError("argument_error", "Unknown control command or mode.")
     if model_id != MODEL_ID:
         raise LoadError("unsupported_model", "The requested profile is not registered.")
     validate_connection(resource, backend, required=mode == "live")
+    if hardware_validation is not None:
+        from .hardware_validation import execute as validate_hardware
+
+        return validate_hardware(command, scope=hardware_validation, mode=mode,
+                                 resource=resource, current=current, voltage=voltage,
+                                 resistance=resistance, power=power, range_name=range_name,
+                                 transient=transient, expected=validation_settings,
+                                 confirmed=confirmed, stop=stop)
+    if validation_settings is not None:
+        raise LoadError("argument_error", "Validation settings require --hardware-validation.")
     if command in TRANSIENT_COMMANDS:
         if any(value is not None for value in (current, voltage, resistance, power)):
             raise LoadError("argument_error", "Fixed setpoints do not apply to Transient commands.")
