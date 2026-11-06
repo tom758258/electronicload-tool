@@ -484,3 +484,136 @@ def test_cw_live_worker_job_fails_without_visa(monkeypatch, capsys):
     events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert events[-1]['event'] == 'job_finished'
     assert events[-1]['error'] == terminal['error']
+
+
+def transient_arguments(mode='toggle'):
+    arguments = {'transient_mode': mode, 'range': 'auto', 'level_a': 1, 'level_b': 2,
+                 'rise_slew': .1, 'fall_slew': .1}
+    if mode == 'continuous':
+        arguments.update(width_a=.001, width_b=.002)
+    elif mode == 'pulse':
+        arguments['pulse_width'] = .001
+    return arguments
+
+
+@pytest.mark.parametrize('mode', ['continuous', 'pulse', 'toggle'])
+def test_transient_worker_control_flow_and_status(worker, mode):
+    _, out, ready = worker
+    status_keys = set(http(ready['status_url'])[1])
+
+    def execute(command, arguments=None, dry_run=False):
+        payload = request(command, arguments)
+        if dry_run:
+            payload['context']['mode'] = 'dry_run'
+        code, accepted = http(ready['command_url'], payload)
+        assert code == 202 and accepted['kind'] == 'async_job'
+        terminal = wait_finished(out, accepted['worker_job_id'])
+        assert terminal['ok'], terminal
+        assert http(ready['status_url'])[1]['last_job']['result'] == terminal['result']
+        return terminal['result']
+
+    setup = execute('set-transient-cc', transient_arguments(mode))
+    assert setup['range'] == 'low' and setup['mode'] == mode
+    assert execute('input-state')['input_state'] == 'OFF'
+    assert execute('transient-enable')['enabled']
+    assert execute('input-on', {'confirm_input_on': True})['input_state'] == 'ON'
+    for count in (1, 2):
+        triggered = execute('transient-trigger')
+        assert triggered['last_trigger']['sequence'] == count
+        assert execute('transient-status') == triggered
+        assert execute('input-state')['input_state'] == 'ON'
+    # Every dry-run command is a plan and leaves ongoing control state alone.
+    for command in ('set-transient-cc', 'transient-enable', 'transient-trigger',
+                    'transient-disable', 'transient-status'):
+        arguments = transient_arguments('pulse') if command == 'set-transient-cc' else {}
+        assert execute(command, arguments, dry_run=True)['hardware_access'] is False
+    assert execute('transient-status') == triggered
+    assert execute('input-off')['input_state'] == 'OFF'
+    assert execute('transient-status')['enabled']
+    assert not execute('transient-disable')['enabled']
+    execute('set-cc', {'range': 'low', 'current': .1})
+    assert not execute('transient-status')['configured']
+    assert set(http(ready['status_url'])[1]) == status_keys
+
+
+def test_transient_worker_invalid_arguments_do_not_create_job(worker):
+    _, _, ready = worker
+    for changes in ({'level_a': True}, {'level_b': '2'}, {'rise_slew': None},
+                    {'transient_mode': []}, {'range': {}}, {'width_a': .001},
+                    {'level_b': 61}, {'transient_mode': 'pulse'}):
+        payload = request('set-transient-cc', {**transient_arguments(), **changes})
+        code, rejected = http(ready['command_url'], payload)
+        assert code == 400 and rejected['worker_job_id'] is None
+    assert http(ready['command_url'], request('transient-trigger', {'extra': 1}))[0] == 400
+    assert http(ready['status_url'])[1]['last_job'] is None
+
+
+@pytest.mark.parametrize('field,token', [('level_a', '1.0000000000000000001'),
+                                        ('fall_slew', '2.500000000000000001')])
+def test_transient_worker_and_cli_forward_exact_number_refusal(worker, field, token, capsys):
+    from electronicload_tool_cli.cli import main
+    _, _, ready = worker
+    arguments = json.dumps(transient_arguments()).replace(
+        f'"{field}": {transient_arguments()[field]}', f'"{field}": {token}')
+    assert main(['send-command', '--url', ready['command_url'],
+                 '--worker-command', 'set-transient-cc', '--arguments-json', arguments,
+                 '--context-json', json.dumps(request('input-state')['context']), '--json']) == 2
+    rejected = json.loads(capsys.readouterr().out)
+    assert rejected['error']['code'] == 'no_matching_range'
+    assert rejected['worker_job_id'] is None
+    assert http(ready['status_url'])[1]['last_job'] is None
+
+
+def test_transient_worker_failed_trigger_terminal_and_stop_leave_input_on(worker):
+    p, out, ready = worker
+    code, accepted = http(ready['command_url'], request('transient-trigger'))
+    assert code == 202
+    failed = wait_finished(out, accepted['worker_job_id'])
+    assert failed['state'] == 'failed' and failed['error']['code'] == 'transient_not_enabled'
+    # Stop state itself must not alter simulator control or input state.
+    from electronicload_tool_cli.worker import Runtime
+    from electronicload_tool_core.errors import LoadError
+    runtime = Runtime(mode='simulate')
+    context = request('input-state')['context']
+    runtime._execute('set-transient-cc', transient_arguments(), context)
+    runtime._execute('transient-enable', {}, context)
+    runtime._execute('input-on', {'confirm_input_on': True}, context)
+    runtime.stop.set()
+    assert runtime.simulator.input_on and runtime.simulator.transient_enabled
+    with pytest.raises(LoadError) as error:
+        runtime._execute('transient-trigger', {}, context)
+    assert error.value.code == 'stopping'
+    assert runtime.simulator.input_on and runtime.simulator.transient_enabled
+    assert http(ready['stop_url'], {'schema_version': 3})[0] == 202
+    assert p.wait(timeout=5) == 0
+
+
+def test_transient_worker_preserves_accepted_slew_through_cli_and_jsonl(worker, capsys):
+    from electronicload_tool_cli.cli import main
+    _, out, ready = worker
+    slew = '0.12345678901234567890123456789'
+    arguments = json.dumps(transient_arguments()).replace('"rise_slew": 0.1',
+                                                           f'"rise_slew": {slew}')
+    assert main(['send-command', '--url', ready['command_url'],
+                 '--worker-command', 'set-transient-cc', '--arguments-json', arguments,
+                 '--context-json', json.dumps(request('input-state')['context']), '--json']) == 0
+    accepted = json.loads(capsys.readouterr().out)
+    terminal = wait_finished(out, accepted['worker_job_id'])
+    assert terminal['ok']
+    assert terminal['result']['configuration']['rise_slew_a_per_us'] == slew
+    assert http(ready['status_url'])[1]['last_job']['result'] == terminal['result']
+
+
+@pytest.mark.parametrize('command', ['set-transient-cc', 'transient-enable',
+                                     'transient-trigger', 'transient-disable', 'transient-status'])
+def test_transient_live_worker_terminal_refuses_before_visa(command, monkeypatch, capsys):
+    from electronicload_tool_cli.worker import Runtime
+    from electronicload_tool_core import control
+    monkeypatch.setattr(control, 'open_session', lambda *_: pytest.fail('VISA opened'))
+    runtime = Runtime(mode='live', resource='USB0::0xFFFF::0x0001::SYNTHETIC::INSTR')
+    job = {'worker_job_id': 'synthetic', 'job_id': None, 'command': command}
+    arguments = transient_arguments() if command == 'set-transient-cc' else {}
+    runtime.run_job(job, arguments, {'mode': 'live'})
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert events[-1]['event'] == 'job_finished' and not events[-1]['ok']
+    assert events[-1]['error']['code'] == 'unsupported_live_scope'

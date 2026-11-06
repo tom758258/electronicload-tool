@@ -29,10 +29,13 @@ def _url(url: str, path: str) -> str:
     return url
 
 
-def request(url: str, path: str, payload: dict | None = None, *, timeout: float = 5.0) -> tuple[int, dict]:
+def request(url: str, path: str, payload: dict | bytes | None = None,
+            *, timeout: float = 5.0) -> tuple[int, dict]:
     _url(url, path)
     opener = build_opener(ProxyHandler({}), _NoRedirect())
-    req = Request(url, data=json.dumps(payload).encode() if payload is not None else None,
+    body = payload if isinstance(payload, bytes) else (
+        json.dumps(payload).encode() if payload is not None else None)
+    req = Request(url, data=body,
                   headers={"Content-Type": "application/json"} if payload is not None else {})
     try:
         with opener.open(req, timeout=timeout) as response:

@@ -48,6 +48,11 @@ Common contracts remain authoritative for the HTTP and JSONL envelopes.
 | `set-cv` | `{"voltage": <number>, "range": "low"\|"high"}` | Offline-only CV setpoint simulation; LIVE refused |
 | `set-cr` | `{"resistance": <number>, "range": "low"\|"high"}` | Offline-only CR setpoint/range simulation; LIVE refused |
 | `set-cw` | `{"power": <number>}` | Offline-only Fixed CW setpoint simulation; LIVE refused |
+| `set-transient-cc` | Complete mode-specific configuration below | Offline Transient control status |
+| `transient-enable` | `{}` | Offline Transient control status |
+| `transient-disable` | `{}` | Offline Transient control status |
+| `transient-trigger` | `{}` | Status with latest accepted software trigger |
+| `transient-status` | `{}` | Offline Transient control status |
 | `input-on` | `{"confirm_input_on": true}` | Confirmed `input_state: "ON"` or failure/UNKNOWN |
 | `input-off` | `{}` | Confirmed `input_state: "OFF"` or failure/UNKNOWN |
 
@@ -61,6 +66,107 @@ A live request uses `context: {"mode": "live"}` with optional matching
 `expected_model_id`. Simulation/dry-run uses the canonical
 `planning_model_id: "itech-it8812c"`; the Worker startup mode constrains the
 request mode. Worker does **not** allow the contributor-validation override.
+
+## Offline Transient CC
+
+`set-transient-cc` requires `transient_mode` (`continuous`, `pulse`, `toggle`),
+`range` (`auto`, `low`, `high`), `level_a`, `level_b` in A, and `rise_slew`,
+`fall_slew` in A/μs. Continuous additionally requires `width_a` and `width_b`;
+Pulse requires `pulse_width` (Level A duration); Toggle accepts no width fields.
+Widths are in seconds. Every numeric argument must be a finite JSON number,
+not a boolean or numeric string. Missing, unknown or inapplicable fields are
+rejected with HTTP 400 before job creation.
+
+For example, submit this request to one simulated Worker's `POST /command`:
+
+```json
+{
+  "schema_version": 3,
+  "command": "set-transient-cc",
+  "arguments": {
+    "transient_mode": "continuous", "range": "auto",
+    "level_a": 1, "level_b": 2,
+    "width_a": 0.001, "width_b": 0.002,
+    "rise_slew": 0.1, "fall_slew": 0.1
+  },
+  "context": {"mode": "simulate", "planning_model_id": "itech-it8812c"}
+}
+```
+
+Core validates the complete request before mutation. Low permits 0–6 A in
+0.0001 A steps and slew 0.0001–0.25 A/μs. High permits 0–60 A in 0.001 A
+steps and slew 0.001–2.5 A/μs. Widths permit 0.00002–3600 s in 0.000001 s
+steps. Auto tries Low, then High, considering both current levels, their
+resolution and both slew values together. Explicit ranges are never changed.
+No rounding, clamping or undocumented slew step is applied. The HTTP parser and
+`send-command --arguments-json` preserve decimal numeric tokens for validation.
+See the [source manuals and CLI usage](../../README.md#offline-transient-cc-dynamic-mode).
+
+| Operation | Preconditions and effects |
+| --- | --- |
+| Setup | Input OFF, Transient disabled; replace the complete configuration and clear the last trigger |
+| Enable | Configured and Input OFF; enable Transient without changing Input |
+| Input ON | Existing per-request confirmation, valid enabled Transient configuration, Input OFF, Short OFF and Worker not stopping |
+| Trigger | Configured, enabled, Input ON and Worker not stopping; record a software trigger |
+| Input OFF | Existing explicit operation; leaves Transient enabled |
+| Disable | Input OFF; clear enabled only, retaining configuration and last trigger |
+| Fixed setup | Explicitly disable Transient first; successful Fixed setup invalidates Transient configuration and trigger history |
+
+State-precondition failures occur during the accepted job and produce a failed
+`job_finished`; admission alone is not execution. Trigger completion means the
+software trigger was executed, not that any waveform ended. Repeated requests
+are accepted whenever the same prerequisites hold. No timer, waveform, restart,
+phase alignment or physical activity/completion state is inferred. No command
+implicitly enables/disables Input or performs rollback. Stop remains a signal,
+never an implicit Input OFF; it blocks new Transient mutations and Input ON.
+
+All five commands return the same simulated domain status shape:
+
+```json
+{
+  "configured": true,
+  "mode": "continuous",
+  "range": "low",
+  "enabled": true,
+  "last_trigger": {
+    "sequence": 1,
+    "accepted_at_utc": "2026-01-01T00:00:00+00:00",
+    "source": "software"
+  },
+  "configuration": {
+    "transient_mode": "continuous", "range": "low",
+    "level_a_a": 1, "level_b_a": 2,
+    "width_a_s": 0.001, "width_b_s": 0.002,
+    "rise_slew_a_per_us": "0.1", "fall_slew_a_per_us": "0.1"
+  }
+}
+```
+
+`configuration` includes only the selected mode's width fields (`pulse_width_s`
+for Pulse, none for Toggle). Levels and widths are JSON numbers; slew fields
+are decimal strings so unrestricted decimal precision is retained. Range is
+always resolved to `low` or `high`. Before setup, `configured` and `enabled`
+are false, and `mode`, `range`, `configuration`, `last_trigger` are null.
+Before a trigger, `last_trigger` is null; its sequence starts at 1 after setup.
+Status queries and later triggers do not mutate earlier result snapshots.
+
+`transient-status` is an ordinary async domain command. `GET /status` keeps its
+existing Worker/runtime/job shape and makes no instrument queries. Use the
+separate `input-state` command for Input. All state lives in the simulated Worker;
+standalone CLI simulation is fresh for each invocation.
+
+Common `context.mode: "dry_run"` maps to Core `dry-run`: results contain
+`command` and `hardware_access: false`, plus the validated configuration fields
+at the top level for setup. A plan neither inspects nor mutates simulator state.
+A valid LIVE request keeps existing HTTP 202 admission, then terminates with
+`unsupported_live_scope` before VISA access. The CLI contributor override cannot
+enable physical Transient support. Existing physical Fixed CC/Input behavior
+and Common v3 envelopes, lifecycle and single-job admission remain unchanged.
+
+At normal workflow completion, the Orchestrator must explicitly attempt
+`input-off` and confirm a successful OFF result before requesting Worker Stop.
+Trigger completion, Transient Disable, Stop acknowledgement, process exit and
+VISA close are not Input OFF confirmation.
 
 ## Safety
 

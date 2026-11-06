@@ -10,7 +10,8 @@ from urllib.parse import urlsplit
 
 from electronicload_tool_core.control import (CONTROL_COMMANDS, execute as control_execute,
                                               validate_current, validate_voltage,
-                                              validate_resistance, validate_power)
+                                              validate_resistance, validate_power,
+                                              TRANSIENT_FIELDS, validate_transient_cc)
 from electronicload_tool_core.errors import LoadError
 from electronicload_tool_core.identity import MODEL_ID
 from electronicload_tool_core.readonly import COMMANDS as READ_COMMANDS, _read
@@ -94,9 +95,10 @@ class Runtime:
                 current=arguments.get("current"), voltage=arguments.get("voltage"),
                 resistance=arguments.get("resistance"),
                 power=arguments.get("power"),
-                range_name=arguments.get("range"),
+                range_name=None if command == "set-transient-cc" else arguments.get("range"),
                 confirmed=arguments.get("confirm_input_on", False),
                 stop=self.stop, simulator=self.simulator,
+                transient=arguments if command == "set-transient-cc" else None,
             )
         if context["mode"] == "simulate":
             return _read(self.simulator, command)
@@ -171,9 +173,15 @@ def _arguments(command, raw, runtime):
                  {"voltage", "range"} if command == "set-cv" else
                  {"resistance", "range"} if command == "set-cr" else
                  {"power"} if command == "set-cw" else
+                 TRANSIENT_FIELDS if command == "set-transient-cc" else
                  {"confirm_input_on"} if command == "input-on" else set())
     if set(raw) - permitted:
         raise LoadError("argument_error", "Unsupported command arguments.")
+    if command == "set-transient-cc":
+        for key, value in raw.items():
+            if key not in {"transient_mode", "range"} and type(value) not in (int, float, Decimal):
+                raise LoadError("argument_error", "Transient values must be JSON numbers.")
+        validate_transient_cc(raw)
     if command == "set-cc":
         if (set(raw) != permitted or not isinstance(raw["range"], str)
                 or type(raw["current"]) not in (int, float)):
@@ -227,6 +235,9 @@ def _handler(runtime):
                     if type(value["arguments"].get("power")) is float:
                         value["arguments"]["power"] = json.loads(
                             body, parse_float=Decimal)["arguments"]["power"]
+                if (value.get("command") == "set-transient-cc"
+                        and isinstance(value.get("arguments"), dict)):
+                    value["arguments"] = json.loads(body, parse_float=Decimal)["arguments"]
                 return value
             except (ValueError, UnicodeError, json.JSONDecodeError, InvalidOperation) as exc:
                 raise LoadError("invalid_request", "Invalid JSON request.") from exc

@@ -10,7 +10,7 @@ owning layer. Permanent tests cover CLI help/version, read-only Core policy,
 identity, query parsing, session cleanup, and CLI output/exit integration.
 Default tests replace VISA with a recording fake; an autouse fixture blocks
 accidental creation of a real resource manager. Add focused tests for implemented
-fixed-CC/Input switching, offline CV/CR preview, and Common v3 Worker behavior. Do not add tests for
+fixed-CC/Input switching, offline CV/CR/CW/Transient CC, and Common v3 Worker behavior. Do not add tests for
 unimplemented WebUI or unsupported modes.
 
 Avoid tests tied to private helpers, source text, exact help prose, or document
@@ -89,6 +89,30 @@ not rerun release packaging or unrelated pytest.
 Dependency/lockfile changes require the focused packaging checks below.
 Report unavailable PowerShell, Ruff, dependencies and hardware as BLOCKED
 or NOT RUN, not PASS.
+
+For offline Transient CC, run only its Core/CLI tests and selected Worker cases:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q tests/test_transient_core.py tests/test_transient_cli.py tests/test_worker.py -k transient
+.\scripts\preflight-cli.ps1 -TransientOnly
+```
+
+Cover complete mode-specific setup, both levels/slew rates, exact resolution,
+Auto Low preference and High fallback, no rounding, atomic refusal, state guards,
+repeated software triggers, status snapshots and side-effect-free dry-run.
+Verify one simulated Worker's HTTP/JSONL flow, Manifest entries, decimal-token
+preservation, failed-job terminals, unchanged `GET /status`, and LIVE refusal
+before VISA even with the CLI override. Trigger terminal success never proves
+waveform completion; Stop never changes Input state.
+
+Select existing Input/Fixed CC regression cases only when those shared paths
+change, and existing help/version or client/dispatch cases when those adapters
+change. Run Ruff only on modified Python files. `-TransientOnly` runs the new
+CLI cases and Manifest checks without unrelated preflight suites; the default
+preflight includes all existing cases plus Transient. Use a fictional USB
+resource solely for refusal checks. Do not extend `live-cli-check.ps1` to
+Transient, run full pytest, release/packaging acceptance or hardware validation
+for this offline scope.
 
 For offline Fixed CR changes, start with CR cases in `test_control_core.py`,
 `test_control_cli.py` and `test_worker.py`. Cover explicit Low/High bounds

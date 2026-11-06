@@ -279,6 +279,71 @@ runs one async job at a time, reports completion via `job_finished` and
 history. Stop does **not** imply Input OFF. For domain argument shapes and
 permissions, see [Electronic Load Worker Contract](docs/contracts/electronicload-worker-contract.md).
 
+### Offline Transient CC (Dynamic Mode)
+
+Transient CC supports **Continuous, Pulse and Toggle** in Core, CLI, Simulator
+and the Common v3 Worker through `--simulate` and `--dry-run`. Submit the whole
+configuration with `set-transient-cc`; setup, enable, confirmed Input ON, software
+trigger, Input OFF and disable are separate operations.
+
+| Setting | Accepted values |
+| --- | --- |
+| `--transient-mode` | `continuous`, `pulse`, `toggle` |
+| `--range` | `auto`, `low`, `high` |
+| `--level-a`, `--level-b` | Low: 0–6 A, 0.0001 A steps; High: 0–60 A, 0.001 A steps |
+| `--rise-slew`, `--fall-slew` | Low: 0.0001–0.25 A/μs; High: 0.001–2.5 A/μs |
+| Continuous widths | Required `--width-a` and `--width-b`, in seconds |
+| Pulse width | Required `--pulse-width`, in seconds; corresponds to the Level A pulse width |
+| Toggle widths | No width arguments accepted |
+
+Widths are **0.00002–3600 s**, in **0.000001 s** steps. Core validates every
+parameter before changing state and rejects nonfinite, out-of-range or
+unrepresentable values without rounding or clipping. Auto chooses Low only if
+both levels, their resolution and both slew rates fit; otherwise it tries High.
+An explicit range is never changed. Slew is checked against the documented
+bounds; the manuals do not establish a fixed decimal step. Slew result fields
+are decimal **strings** to preserve every accepted digit in JSON.
+
+These limits follow the IT8812C table in the
+[IT8800 User Manual V2.7](https://media.digikey.com/pdf/Data%20Sheets/ITech%20Elect%20PDFs/IT8800%20User%20Manual.pdf)
+(printed page 40), with mode/width semantics from the
+[IT8800 Programming Guide V2.1](https://assets.testequity.com/te1/Documents/pdf/itech/ITECH_IT8800-Programming-Guide-EN.pdf)
+(printed pages 19–20, 48, 50–51). This offline implementation sends no Transient
+SCPI. Physical software-trigger syntax and behavior require separate validation
+before LIVE support can be added.
+
+```powershell
+.\.venv\Scripts\electronicload-tool.exe set-transient-cc --simulate --transient-mode continuous --range auto --level-a 1 --level-b 2 --width-a 0.001 --width-b 0.002 --rise-slew 0.1 --fall-slew 0.1 --json
+.\.venv\Scripts\electronicload-tool.exe set-transient-cc --dry-run --transient-mode pulse --range low --level-a 2 --level-b 1 --pulse-width 0.001 --rise-slew 0.1 --fall-slew 0.1 --json
+.\.venv\Scripts\electronicload-tool.exe set-transient-cc --dry-run --transient-mode toggle --range auto --level-a 1 --level-b 2 --rise-slew 0.1 --fall-slew 0.1 --json
+```
+
+Each standalone simulated command starts fresh. Use **one simulated Worker**
+for the sequence `set-transient-cc` → `transient-enable` → confirmed `input-on`
+→ `transient-trigger` → optional `transient-status` → `input-off` →
+`transient-disable`. Wait for each successful `job_finished` before submitting
+the next command. A successful Trigger job means the software trigger was
+accepted/executed; **it does not mean a waveform finished**. Repeated triggers
+are allowed while Transient is enabled and Input is ON.
+
+Setup requires Input OFF and disabled Transient. Enable requires setup and
+Input OFF; disable also requires Input OFF. None of these commands sends a
+hidden Input ON/OFF, retry or cleanup. Input OFF leaves Transient enabled;
+disable retains the setup. To return to Fixed operation, explicitly disable
+Transient before Fixed setup; successful Fixed setup invalidates the previous
+Transient configuration.
+
+`transient-status` reports configured, mode, resolved range, enabled, configuration
+and the most recent accepted software trigger. Query `input-state` separately.
+The simulator models control state only, with no waveform, pulse timer, current
+transition, DUT physics or physical-running/completion indication. Worker
+`GET /status` retains its runtime/job meaning. At normal workflow completion,
+the Orchestrator must explicitly attempt and confirm Input OFF before stopping
+the Worker; Stop or process exit never proves Input OFF.
+
+All five Transient commands are blocked for LIVE before opening VISA, including
+with the contributor override. Physical Input ON remains Fixed CC only.
+
 ### Unified CLI instrument validation
 
 Use the single `scripts/live-cli-check.ps1` for the supported LIVE CLI
@@ -288,10 +353,11 @@ The same script retains the existing `-PlanOnly`, `-DebugArtifacts`, report
 privacy, process deadlines and interactive Enter confirmation. There is no
 separate control script or mode/suite selection; see
 [Controlled instrument validation](#controlled-instrument-validation).
-`scripts/preflight-cli.ps1` covers offline CV/CR/CW commands, CR/CW argument and
+`scripts/preflight-cli.ps1` covers offline CV/CR/CW/Transient CC commands, argument and
 LIVE refusal checks, and Worker Manifest exposure. CW checks include 0/250 W,
 0.01 W alignment without rounding, and refusal of a Range option;
-the hardware script does not execute physical CV, CR or CW operations.
+use `-TransientOnly` for the focused Transient checks. The hardware script does
+not execute physical CV, CR, CW or Transient operations.
 
 ## Checks and builds
 
