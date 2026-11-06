@@ -308,6 +308,7 @@ def test_control_worker_dry_run_returns_plan_without_hardware(worker):
     cases = [
         ('set-cc', {'current': 1.5, 'range': 'low'}),
         ('set-cv', {'voltage': 5, 'range': 'low'}),
+        ('set-cr', {'resistance': 123.456789, 'range': 'high'}),
         ('input-on', {}),
         ('input-off', {}),
     ]
@@ -320,3 +321,73 @@ def test_control_worker_dry_run_returns_plan_without_hardware(worker):
         assert finished['state'] == 'succeeded' and finished['ok'] is True
         assert finished['result']['command'] == command
         assert finished['result']['hardware_access'] is False
+        if command == 'set-cr':
+            assert finished['result']['resistance_ohm'] == arguments['resistance']
+            assert finished['result']['range'] == arguments['range']
+
+
+def test_cr_worker_validation_and_confirmed_input_cycle(worker):
+    _, out, ready = worker
+    for arguments in (
+        {}, {'resistance': 5}, {'range': 'low'},
+        {'resistance': '5', 'range': 'low'},
+        {'resistance': True, 'range': 'low'},
+        {'resistance': float('nan'), 'range': 'low'},
+        {'resistance': 5, 'range': []},
+        {'resistance': 5, 'range': 'auto'},
+        {'resistance': 9, 'range': 'high'},
+        {'resistance': 5, 'range': 'low', 'extra': 1},
+    ):
+        code, rejected = http(ready['command_url'], request('set-cr', arguments))
+        assert code == 400
+        assert rejected['worker_job_id'] is None
+        assert rejected['error']['category'] == 'validation'
+    status = http(ready['status_url'])[1]
+    assert status['active_job'] is None and status['last_job'] is None
+
+    cases = [
+        ('set-cr', {'resistance': 1.23456789, 'range': 'low'}, 'OFF'),
+        ('set-cr', {'resistance': 123.456789, 'range': 'high'}, 'OFF'),
+        ('input-on', {}, None),
+        ('input-on', {'confirm_input_on': True}, 'ON'),
+        ('input-off', {}, 'OFF'),
+    ]
+    for index, (command, arguments, state) in enumerate(cases):
+        payload = {**request(command, arguments), 'job_id': f'cr-{index}'}
+        code, accepted = http(ready['command_url'], payload)
+        assert code == 202 and accepted['kind'] == 'async_job'
+        terminal = wait_finished(out, accepted['worker_job_id'])
+        assert terminal['job_id'] == payload['job_id']
+        assert terminal['schema_version'] == 3 and terminal['run_id'] == ready['run_id']
+        if state is None:
+            assert terminal['state'] == 'failed'
+            assert terminal['error']['code'] == 'confirmation_required'
+        else:
+            assert terminal['state'] == 'succeeded'
+            assert terminal['result']['input_state'] == state
+            if command == 'set-cr':
+                assert terminal['result']['resistance_ohm'] == arguments['resistance']
+                assert terminal['result']['range'] == arguments['range']
+        status = http(ready['status_url'])[1]
+        assert status['last_job']['worker_job_id'] == accepted['worker_job_id']
+        assert status['last_job']['result'] == terminal['result']
+        assert status['last_job']['error'] == terminal['error']
+
+
+def test_cr_live_worker_job_fails_without_visa(monkeypatch, capsys):
+    from electronicload_tool_cli.worker import Runtime
+    from electronicload_tool_core import control
+
+    def forbidden_open(_resource):
+        pytest.fail('CR Worker attempted to open VISA')
+
+    monkeypatch.setattr(control, 'open_session', forbidden_open)
+    runtime = Runtime(mode='live', resource='USB0::0xFFFF::0x0001::SYNTHETIC::INSTR')
+    job = {'worker_job_id': 'cr-live', 'job_id': 'request-cr', 'command': 'set-cr'}
+    runtime.run_job(job, {'resistance': 5, 'range': 'low'}, {'mode': 'live'})
+    terminal = runtime.snapshot()['last_job']
+    assert terminal['state'] == 'failed' and terminal['ok'] is False
+    assert terminal['error']['code'] == 'unsupported_live_scope'
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert events[-1]['event'] == 'job_finished'
+    assert events[-1]['error'] == terminal['error']

@@ -1,7 +1,7 @@
 # Electronic Load Tool
 
 Electronic Load Tool provides read-only identification and measurements,
-plus fixed-CC configuration, offline-only CV preview and deliberate Input ON/OFF through a shared Core,
+plus fixed-CC configuration, offline-only CV/CR preview and deliberate Input ON/OFF through a shared Core,
 Standalone CLI and bundled Common v3 Worker. The initial registered model is
 ITECH IT8812C (`itech-it8812c`).
 
@@ -184,7 +184,7 @@ Core owns profiles, identity, support policy, queries, parsing, VISA lifetime,
 and simulation. CLI handles arguments and presentation. Core must not import
 CLI. WebUI is not implemented. The bundled Worker is part of the CLI package and uses the same Core.
 
-## Fixed CC, offline Fixed CV, Input and Common v3 Worker
+## Fixed CC, offline Fixed CV/CR, Input and Common v3 Worker
 
 Fixed CC uses a complete `set-cc` request with amperes and an explicit
 `low` (0–6 A) or `high` (0–60 A) range. Before LIVE configuration, Core
@@ -224,14 +224,36 @@ the operator supplies an ON confirmation. No CV range SCPI is currently sent
 to real instruments. Fixed CC and all previously supported LIVE commands
 remain unchanged.
 
+Fixed CR is also available for **dry-run and simulation only**. Use
+`set-cr --resistance <ohms> --range low|high`: Low **0.05–10 Ω** and
+High **10–7,500 Ω**, including 10 Ω in either explicitly selected range.
+Core accepts finite numeric values within that range, without imposing decimal
+places, a fixed step, automatic range selection or rounding. The published
+16-bit resolution is not interpreted as a decimal step. Offline validation
+does not certify hardware precision or acceptance.
+
+CR setup verifies simulated range/setpoint readback and leaves Input OFF.
+Simulated Input ON requires explicit confirmation; Input OFF remains explicit.
+The simulator provides setting/state behavior, not a circuit or DUT model.
+Physical `set-cr` and CR Input ON are blocked, including with the contributor
+validation override; no CR setting writes are sent to physical instruments.
+Results use `resistance_ohm` and `range`; simulated readback also includes
+`range_readback_ohm` (a simulator convention only).
+
 ```powershell
 .\.venv\Scripts\electronicload-tool.exe set-cc --simulate --current 1.5 --range low --json
 .\.venv\Scripts\electronicload-tool.exe set-cv --simulate --voltage 5 --range low --json
+.\.venv\Scripts\electronicload-tool.exe set-cr --simulate --resistance 5 --range low --json
+.\.venv\Scripts\electronicload-tool.exe set-cr --dry-run --resistance 100 --range high --json
 .\.venv\Scripts\electronicload-tool.exe input-on --simulate --confirm --json
 .\.venv\Scripts\electronicload-tool.exe input-off --simulate --json
 .\.venv\Scripts\electronicload-tool.exe manifest --json
 .\.venv\Scripts\electronicload-tool.exe worker --mode simulate --control-port 0
 ```
+
+Standalone simulation commands each start with fresh state. To exercise a CR
+setup followed by simulated ON/OFF, send the commands to the same simulated
+Worker, with `confirm_input_on: true` on the ON request.
 
 A Worker prints Common v3 JSONL on stdout and offers local `GET /status`,
 `POST /command`, and `POST /stop` on numeric loopback only. The Worker
@@ -242,13 +264,15 @@ permissions, see [Electronic Load Worker Contract](docs/contracts/electronicload
 
 ### Unified CLI instrument validation
 
-Use the single `scripts/live-cli-check.ps1` for all currently implemented CLI
+Use the single `scripts/live-cli-check.ps1` for the supported LIVE CLI
 instrument checks: Identify, Input State, V/I/P, fixed CC (high and low range),
 explicit Input ON, on-state V/I/P, explicit Input OFF, and final Input OFF.
 The same script retains the existing `-PlanOnly`, `-DebugArtifacts`, report
 privacy, process deadlines and interactive Enter confirmation. There is no
 separate control script or mode/suite selection; see
 [Controlled instrument validation](#controlled-instrument-validation).
+`scripts/preflight-cli.ps1` covers offline CV/CR commands and CR refusal checks;
+the hardware script does not execute physical CV or CR operations.
 
 ## Checks and builds
 
@@ -278,7 +302,7 @@ installed-wheel checks. Contributor changes follow [AGENTS.md](AGENTS.md).
 ## Controlled instrument validation
 
 `scripts/live-cli-check.ps1` is the **one** CLI hardware verification entry
-point. It runs every currently implemented CLI function in order, rather than
+point. It runs the supported LIVE CLI functions in order, rather than
 requiring multiple scripts, Suites or Stages. It is an explicit operator-
 approved hardware validation workflow, **not** a general unattended control
 command and not automatic Product LIVE promotion.
@@ -321,7 +345,7 @@ fails or times out, the operator must act; neither process termination nor
 VISA session closure proves Input OFF. No reset, `SYST:LOC`, protection clear,
 SCPI error-queue consumption or automatic reconnect is added.
 
-All six implemented CLI commands use normal Product LIVE permissions,
+All six CLI commands in this hardware sequence use normal Product LIVE permissions,
 including fixed CC and deliberate Input ON/OFF. The unified validation script
 runs the actual public CLI path and does not require the hidden contributor
 validation override. Exact identity/USB/System VISA and Input ON

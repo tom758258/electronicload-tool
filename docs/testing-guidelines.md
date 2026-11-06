@@ -10,7 +10,7 @@ owning layer. Permanent tests cover CLI help/version, read-only Core policy,
 identity, query parsing, session cleanup, and CLI output/exit integration.
 Default tests replace VISA with a recording fake; an autouse fixture blocks
 accidental creation of a real resource manager. Add focused tests for implemented
-fixed-CC/Input switching, offline CV preview, and Common v3 Worker behavior. Do not add tests for
+fixed-CC/Input switching, offline CV/CR preview, and Common v3 Worker behavior. Do not add tests for
 unimplemented WebUI or unsupported modes.
 
 Avoid tests tied to private helpers, source text, exact help prose, or document
@@ -47,7 +47,7 @@ do not by themselves require wheel/release acceptance or tests in other Tool
 repositories. Fake VISA, simulator, dry-run, and plan reports are not evidence
 of instrument support or permission to execute LIVE.
 
-## Fixed-CC/Input/Worker focused checks
+## Fixed-CC/offline-CV/CR/Input/Worker focused checks
 
 Scope these tests to the new Core, CLI and Worker behavior and the directly
 affected CLI parser/help/version and read-only CLI contracts:
@@ -89,6 +89,21 @@ not rerun release packaging or unrelated pytest.
 Dependency/lockfile changes require the focused packaging checks below.
 Report unavailable PowerShell, Ruff, dependencies and hardware as BLOCKED
 or NOT RUN, not PASS.
+
+For offline Fixed CR changes, start with CR cases in `test_control_core.py`,
+`test_control_cli.py` and `test_worker.py`. Cover explicit Low/High bounds
+(including 10 Ω in both), finite values without fixed decimal steps or rounding,
+simulated readback, OFF-before-setup, confirmed simulated ON and explicit OFF.
+Verify CLI JSON/help, Worker argument rejection/async results/`dry_run` dispatch,
+and Manifest exposure. LIVE CR must fail before VISA access; fake physical CR
+Input ON must fail before writes, including with the contributor override.
+Run existing CC/CV/Input cases only where their shared paths are affected.
+
+The offline preflight includes CR Low/High simulation and dry-run, explicit
+range/out-of-range refusal, LIVE refusal using a fictional resource, and Manifest
+checks. `live-cli-check.ps1` remains limited to supported LIVE commands; it must
+not perform CV/CR hardware operations. Offline CR work alone does not warrant
+the full test suite, release acceptance, packaging checks or hardware validation.
 
 ## Packaging checks
 

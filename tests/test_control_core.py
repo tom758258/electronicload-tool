@@ -1,10 +1,12 @@
 from contextlib import contextmanager
+from decimal import Decimal
 from threading import Event
 
 import pytest
 
 from electronicload_tool_core import control
 from electronicload_tool_core.errors import LoadError
+from electronicload_tool_core.simulator import ControlSimulator
 
 RESOURCE = 'USB0::0xFFFF::0x0001::SYNTHETIC::INSTR'
 
@@ -588,3 +590,112 @@ def test_cv_live_stays_blocked_without_range_hardware_evidence(monkeypatch):
         control.execute('input-on', resource=RESOURCE, confirmed=True)
     assert err.value.code == 'unsupported_live_scope'
     assert 'SYST:REM' not in fake.calls and 'INP ON' not in fake.calls
+
+
+@pytest.mark.parametrize('resistance,range_name', [
+    ('0.05', 'low'), ('10', 'low'), ('10', 'high'), ('7500', 'high'),
+    ('1.234567890123456789', 'low'), ('123.4567890123456789', 'high'),
+])
+def test_cr_offline_bounds_and_no_quantization(resistance, range_name):
+    sim = ControlSimulator()
+    requested = Decimal(resistance)
+    assert control.validate_resistance(resistance, range_name) == requested
+    plan = control.execute('set-cr', mode='dry-run', resistance=resistance,
+                           range_name=range_name, simulator=sim)
+    assert plan['hardware_access'] is False
+    assert plan['resistance_ohm'] == float(requested)
+    assert plan['range'] == range_name
+    assert sim.function == 'CURR' and not sim.input_on
+
+    result = control.execute('set-cr', mode='simulate', resistance=resistance,
+                             range_name=range_name, simulator=sim)
+    assert result['function_mode'] == 'FIX' and result['function'] == 'RES'
+    assert result['input_state'] == 'OFF'
+    assert result['range'] == range_name
+    assert result['resistance_ohm'] == float(requested)
+    assert result['range_readback_ohm'] == (10 if range_name == 'low' else 7500)
+    assert Decimal(sim.query('RES?')) == requested
+
+
+@pytest.mark.parametrize('resistance,range_name,code', [
+    (0, 'low', 'resistance_out_of_range'),
+    ('0.049999999999999999', 'low', 'resistance_out_of_range'),
+    ('10.000000000000000001', 'low', 'resistance_out_of_range'),
+    ('9.999999999999999999', 'high', 'resistance_out_of_range'),
+    ('7500.000000000000001', 'high', 'resistance_out_of_range'),
+    (-1, 'low', 'resistance_out_of_range'),
+    (float('nan'), 'low', 'invalid_resistance'),
+    (float('inf'), 'low', 'invalid_resistance'),
+    (float('-inf'), 'high', 'invalid_resistance'),
+    ('text', 'low', 'invalid_resistance'),
+    (True, 'low', 'invalid_resistance'),
+    ([], 'low', 'invalid_resistance'),
+    (1, 'auto', 'invalid_range'),
+    (1, None, 'invalid_range'),
+    (1, [], 'invalid_range'),
+    (None, 'low', 'argument_error'),
+])
+def test_cr_invalid_settings_preserve_simulator(resistance, range_name, code):
+    sim = ControlSimulator()
+    before = vars(sim).copy()
+    with pytest.raises(LoadError) as error:
+        control.execute('set-cr', mode='simulate', resistance=resistance,
+                        range_name=range_name, simulator=sim)
+    assert error.value.code == code
+    assert vars(sim) == before
+
+
+@pytest.mark.parametrize('range_name,resistance', [('low', 5), ('high', 100)])
+def test_cr_simulated_input_requires_confirmation_and_off_before_setup(range_name, resistance):
+    sim = ControlSimulator()
+    control.execute('set-cr', mode='simulate', resistance=resistance,
+                    range_name=range_name, simulator=sim)
+    with pytest.raises(LoadError) as error:
+        control.execute('input-on', mode='simulate', simulator=sim)
+    assert error.value.code == 'confirmation_required'
+    assert sim.input_on is False
+    assert control.execute('input-on', mode='simulate', simulator=sim,
+                           confirmed=True)['input_state'] == 'ON'
+    before = vars(sim).copy()
+    with pytest.raises(LoadError) as error:
+        control.execute('set-cr', mode='simulate', resistance=10,
+                        range_name='low', simulator=sim)
+    assert error.value.code == 'input_not_off'
+    assert vars(sim) == before
+    assert control.execute('input-off', mode='simulate', simulator=sim)['input_state'] == 'OFF'
+
+
+def test_cr_readback_mismatch_fails_without_input_on():
+    class MismatchedSimulator(ControlSimulator):
+        def configure_cr(self, resistance, range_name):
+            super().configure_cr(resistance + Decimal('0.000000000000000001'), range_name)
+
+    sim = MismatchedSimulator()
+    with pytest.raises(LoadError) as error:
+        control.execute('set-cr', mode='simulate', resistance=5, range_name='low', simulator=sim)
+    assert error.value.code == 'readback_mismatch'
+    assert sim.input_on is False
+
+
+@pytest.mark.parametrize('validation', [False, True])
+def test_cr_live_refuses_before_open_even_with_override(monkeypatch, validation):
+    def forbidden_open(_resource):
+        pytest.fail('CR attempted to open VISA')
+
+    monkeypatch.setattr(control, 'open_session', forbidden_open)
+    with pytest.raises(LoadError) as error:
+        control.execute('set-cr', resource=RESOURCE, resistance=5,
+                        range_name='low', validation=validation)
+    assert error.value.code == 'unsupported_live_scope'
+
+
+@pytest.mark.parametrize('function', ['RES', 'RESISTANCE'])
+@pytest.mark.parametrize('validation', [False, True])
+def test_cr_physical_input_on_refuses_without_writes(monkeypatch, function, validation):
+    fake = Fake()
+    fake.function = function
+    session(fake, monkeypatch)
+    with pytest.raises(LoadError) as error:
+        control.execute('input-on', resource=RESOURCE, confirmed=True, validation=validation)
+    assert error.value.code == 'unsupported_live_scope'
+    assert fake.calls == ['*IDN?', 'INP:STAT?', 'FUNC:MODE?', 'FUNC?']

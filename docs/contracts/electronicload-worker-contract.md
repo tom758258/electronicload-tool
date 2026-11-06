@@ -46,6 +46,7 @@ Common contracts remain authoritative for the HTTP and JSONL envelopes.
 | `measure` | `{}` | `voltage_v`, `current_a`, `power_w` |
 | `set-cc` | `{"current": <number>, "range": "low"\|"high"}` | Four confirmed CC settings, physical input stays OFF |
 | `set-cv` | `{"voltage": <number>, "range": "low"\|"high"}` | Offline-only CV setpoint simulation; LIVE refused |
+| `set-cr` | `{"resistance": <number>, "range": "low"\|"high"}` | Offline-only CR setpoint/range simulation; LIVE refused |
 | `input-on` | `{"confirm_input_on": true}` | Confirmed `input_state: "ON"` or failure/UNKNOWN |
 | `input-off` | `{}` | Confirmed `input_state: "OFF"` or failure/UNKNOWN |
 
@@ -73,6 +74,28 @@ selection. Physical CV range SCPI and readback semantics remain unverified.
 LIVE `set-cv` and LIVE CV `input-on` are blocked, including when an
 operator uses the contributor-validation CLI override; the simulated CV
 readback does not certify hardware support.
+
+Fixed CR supports `simulate` and `dry_run` with an explicit Low **0.05–10 Ω**
+or High **10–7,500 Ω** range. Both ranges include 10 Ω. `resistance` must be
+a finite JSON number (not a boolean or numeric string); no decimal-place or
+fixed-step restriction, rounding or automatic range choice is applied. The
+published 16-bit resolution does not define a confirmed decimal step.
+
+The result contains `resistance_ohm` and `range`. Simulation also reports
+`function_mode: "FIX"`, `function: "RES"`, `range_readback_ohm` and
+`input_state: "OFF"`. The numeric range readback is a simulator convention,
+not physical RES/range evidence. Dry-run returns a plan with
+`hardware_access: false` and does not mutate simulated state. The Worker maps
+Common `dry_run` to Core `dry-run` using the same control-command path.
+
+In one simulated Worker, `set-cr` can be followed by `input-on` with
+`confirm_input_on: true`, then an explicit `input-off`. Setup while Input is ON
+is refused. No circuit/DUT model or resistance-derived V/I/P accuracy is claimed.
+LIVE `set-cr` fails in Core before opening VISA, and physical CR Input ON is
+refused before any write, even with the CLI contributor-validation override.
+A valid LIVE `set-cr` request retains the existing async admission behavior:
+HTTP 202 means accepted; its terminal reports `unsupported_live_scope`.
+Invalid CR arguments are rejected with HTTP 400 before creating a job.
 
 LIVE Input ON has two gates: the Worker starts with `--allow-input-on`, and the
 single `input-on` request carries `confirm_input_on: true`. Neither gate

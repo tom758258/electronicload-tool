@@ -40,7 +40,7 @@ def main(argv: list[str] | None = None) -> int:
     command = argv[0] if argv and argv[0] in command_names else None
     parser = _Parser(
         prog="electronicload-tool",
-        description="Electronic Load Tool: read-only diagnostics, fixed CC, offline CV preview and Worker v3.",
+        description="Electronic Load Tool: diagnostics, fixed CC, offline CV/CR preview and Worker v3.",
         allow_abbrev=False,
     )
     parser.json_errors = json_output
@@ -89,6 +89,9 @@ def main(argv: list[str] | None = None) -> int:
             sub.add_argument("--range", required=True, choices=("low", "high"))
         elif name == "set-cv":
             sub.add_argument("--voltage", required=True, type=float)
+            sub.add_argument("--range", required=True, choices=("low", "high"))
+        elif name == "set-cr":
+            sub.add_argument("--resistance", required=True, help="Resistance in ohms (offline only).")
             sub.add_argument("--range", required=True, choices=("low", "high"))
         elif name == "input-on":
             sub.add_argument("--confirm", action="store_true")
@@ -142,6 +145,7 @@ def main(argv: list[str] | None = None) -> int:
                 model_id=args.model,
                 current=getattr(args, "current", None),
                 voltage=getattr(args, "voltage", None),
+                resistance=getattr(args, "resistance", None),
                 range_name=getattr(args, "range", None),
                 confirmed=getattr(args, "confirm", False),
                 validation=args.validation_allow_pending_live_support,

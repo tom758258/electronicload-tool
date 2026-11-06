@@ -1,6 +1,8 @@
 """The CLI must not bypass Core safety or change existing JSON error behavior."""
 import json
 
+import pytest
+
 from electronicload_tool_cli.cli import main
 from electronicload_tool_cli import cli
 
@@ -35,6 +37,7 @@ def test_manifest_static(capsys):
     assert p['worker_protocol']['schema_versions']==[3]
     assert p['execution']=={'model':'multi_job','context_binding':'per_command'}
     assert p['features']=={'common.async_jobs':{'contract_version':1}}
+    assert p['commands']['set-cr'] == {'kind': 'async_job'}
 
 
 def test_normal_live_cli_control_dispatches_without_validation_override(monkeypatch, capsys):
@@ -90,3 +93,56 @@ def test_cv_cli_simulation_and_live_refusal(capsys):
                  'USB0::0xFFFF::0x0001::SYNTHETIC::INSTR',
                  '--voltage', '5', '--range', 'low', '--json']) == 2
     assert json.loads(capsys.readouterr().out)['error']['code'] == 'unsupported_live_scope'
+
+
+@pytest.mark.parametrize('mode', ['simulate', 'dry-run'])
+@pytest.mark.parametrize('range_name,resistance', [('low', '1.23456789'), ('high', '123.456789')])
+def test_cr_cli_offline_json(capsys, mode, range_name, resistance):
+    assert main(['set-cr', f'--{mode}', '--resistance', resistance,
+                 '--range', range_name, '--json']) == 0
+    output = capsys.readouterr()
+    payload = json.loads(output.out)
+    assert output.err == ''
+    assert payload['ok'] is True and payload['command'] == 'set-cr'
+    assert payload['mode'] == mode
+    result = payload['result']
+    assert result['resistance_ohm'] == float(resistance)
+    assert result['range'] == range_name
+    if mode == 'simulate':
+        assert result['input_state'] == 'OFF'
+    else:
+        assert result['hardware_access'] is False
+
+
+@pytest.mark.parametrize('arguments,code', [
+    (['--resistance', '5'], 'argument_error'),
+    (['--range', 'low'], 'argument_error'),
+    (['--resistance', '5', '--range', 'auto'], 'argument_error'),
+    (['--resistance', 'NaN', '--range', 'low'], 'invalid_resistance'),
+    (['--resistance', 'text', '--range', 'low'], 'invalid_resistance'),
+    (['--resistance', '10.000000000000000001', '--range', 'low'], 'resistance_out_of_range'),
+])
+def test_cr_cli_invalid_arguments_are_json_errors(capsys, arguments, code):
+    assert main(['set-cr', '--dry-run', *arguments, '--json']) == 2
+    output = capsys.readouterr()
+    assert json.loads(output.out)['error']['code'] == code
+    assert output.err == ''
+
+
+@pytest.mark.parametrize('override', [[], ['--validation-allow-pending-live-support']])
+def test_cr_cli_live_refusal(capsys, override):
+    assert main(['set-cr', '--resource', 'USB0::0xFFFF::0x0001::SYNTHETIC::INSTR',
+                 '--resistance', '5', '--range', 'low', *override, '--json']) == 2
+    assert json.loads(capsys.readouterr().out)['error']['code'] == 'unsupported_live_scope'
+
+
+def test_cr_cli_text_and_help(capsys):
+    with pytest.raises(SystemExit) as error:
+        main(['set-cr', '--help'])
+    assert error.value.code == 0
+    output = capsys.readouterr().out
+    assert '--resistance' in output and '--range' in output
+    assert main(['set-cr', '--simulate', '--resistance', '5', '--range', 'low']) == 0
+    output = capsys.readouterr()
+    assert 'resistance_ohm: 5.0' in output.out
+    assert output.err == ''

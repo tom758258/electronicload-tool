@@ -8,7 +8,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
 from electronicload_tool_core.control import (CONTROL_COMMANDS, execute as control_execute,
-                                              validate_current, validate_voltage)
+                                              validate_current, validate_voltage,
+                                              validate_resistance)
 from electronicload_tool_core.errors import LoadError
 from electronicload_tool_core.identity import MODEL_ID
 from electronicload_tool_core.readonly import COMMANDS as READ_COMMANDS, _read
@@ -90,6 +91,7 @@ class Runtime:
                 command, mode=core_mode, resource=self.resource,
                 backend=self.backend, model_id=MODEL_ID,
                 current=arguments.get("current"), voltage=arguments.get("voltage"),
+                resistance=arguments.get("resistance"),
                 range_name=arguments.get("range"),
                 confirmed=arguments.get("confirm_input_on", False),
                 stop=self.stop, simulator=self.simulator,
@@ -165,6 +167,7 @@ def _arguments(command, raw, runtime):
         raise LoadError("argument_error", "Arguments must be an object.")
     permitted = ({"current", "range"} if command == "set-cc" else
                  {"voltage", "range"} if command == "set-cv" else
+                 {"resistance", "range"} if command == "set-cr" else
                  {"confirm_input_on"} if command == "input-on" else set())
     if set(raw) - permitted:
         raise LoadError("argument_error", "Unsupported command arguments.")
@@ -178,6 +181,11 @@ def _arguments(command, raw, runtime):
                 or type(raw["voltage"]) not in (int, float)):
             raise LoadError("argument_error", "CV requires voltage and range.")
         validate_voltage(raw["voltage"], raw["range"])
+    if command == "set-cr":
+        if (set(raw) != permitted or not isinstance(raw["range"], str)
+                or type(raw["resistance"]) not in (int, float)):
+            raise LoadError("argument_error", "CR requires resistance and range.")
+        validate_resistance(raw["resistance"], raw["range"])
     if command == "input-on" and "confirm_input_on" in raw:
         if type(raw["confirm_input_on"]) is not bool:
             raise LoadError("argument_error", "confirm_input_on must be boolean.")
