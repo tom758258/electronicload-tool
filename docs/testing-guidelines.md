@@ -59,13 +59,14 @@ affected CLI parser/help/version and read-only CLI contracts:
 ```
 
 Worker integration uses a real local simulated subprocess, HTTP and JSONL,
-but never physical hardware. The **single** `live-cli-check.ps1` plans
-read-only plus CC High/Low and explicit Input ON/OFF by default. Its explicit
-`-IncludeValidationModes` selection additionally prepares CV/CR/CW and
-Transient hardware trials. Test its `-PlanOnly` operation and unattended LIVE refusal
-with a **fictional** USB Resource. Without `-ConfirmWrites` or
+but never physical hardware. The **single** `live-cli-check.ps1` defaults to
+all five modes: CC, CV, CR, CW and Transient CC. `-Modes` selects one or more
+modes while retaining common read-only safety prechecks and each selected
+mode's explicit Input ON/OFF flow. Test its `-PlanOnly` operation and unattended
+LIVE refusal with a **fictional** USB Resource. Without `-ConfirmWrites` or
 `-EnableInputOn`, and in noninteractive LIVE runs, verify it refuses before
-opening any VISA session or sending SCPI. The script defaults to 0.1 A, with a 2 A script-only hard ceiling.
+opening any VISA session or sending SCPI. CC defaults to 0.1 A, with a
+2 A script-only hard ceiling.
 Verify redacted shareable case totals and normal mode's lack of private raw
 logs; `-DebugArtifacts` uses the existing private/raw location without
 changing authorization. No hardware is permitted in automated checks.
@@ -79,7 +80,7 @@ between remote transition and Input ON. Read-only commands must not send
 Run the **single** `live-cli-check.ps1` full LIVE command only with
 separately approved model/Resource, bounded DUT/source, explicit two-layer
 write/Input ON opt-in, and a manual OFF contingency. Check physical Input
-OFF before CC; high and low range are configured with the same bounded current
+OFF before any selected mode; CC high and low range use the same bounded current
 before one authorized ON/OFF trial. Reject further normal tests on any failure.
 After a potentially attempted Input ON, make one explicit bounded OFF cleanup
 attempt; if physical OFF cannot be confirmed, flag operator action. Validation
@@ -169,6 +170,14 @@ real-instrument acceptance; Fake VISA is not physical evidence.
 The script tests run the real PowerShell PlanOnly and noninteractive gates with
 fictional resources and a child-process VISA blocker. PowerShell must be installed;
 unavailable PowerShell is reported as SKIP, not a successful script check.
+For mode-selection changes alone, run only `tests/test_live_validation_script.py`
+and Ruff on that modified Python file. Verify default all-mode, every single
+mode, comma-separated/PowerShell-array selections, invalid-mode refusal,
+unchanged authorization and source-limit gates, selected case totals, and NOT RUN
+for planned cases. Unselected modes must have no cases or PASS counts.
+Keep every existing Transient mode/range, repeated trigger, status and OFF/disable
+step. No unrelated Core/CLI/Worker, local full-suite, release or packaging checks
+are required for this script-only behavior change.
 Exercise failure cleanup with a fake CLI/VISA process as appropriate: failure
 after a possible ON must attempt explicit OFF, an enabled Transient is disabled
 only after verified OFF, and failures retain FAIL with remaining cases NOT RUN.

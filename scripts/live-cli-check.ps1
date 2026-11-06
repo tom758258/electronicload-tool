@@ -1,7 +1,7 @@
 <#
 Single, bounded IT8812C CLI hardware validation.
-Default: supported read-only and CC/Input commands.
--IncludeValidationModes: explicit validation-only CV/CR/CW and Transient CC trials.
+Default: all five modes, with common read-only safety prechecks.
+-Modes selects cc, cv, cr, cw and/or transient-cc (comma-separated or an array).
 Requires approved source/DUT limits, write/ON gates and interactive confirmation.
 -PlanOnly validates every planned CLI request without VISA or hardware access.
 #>
@@ -12,7 +12,7 @@ param(
     [string]$Resource,
     [ValidateSet('system')][string]$Backend = 'system',
     [double]$Current = 0.1,
-    [switch]$IncludeValidationModes,
+    [string[]]$Modes = @('cc', 'cv', 'cr', 'cw', 'transient-cc'),
     [double]$SourceCurrentLimitA,
     [double]$SourceVoltageLimitV,
     [string]$Voltage = '5',
@@ -33,6 +33,12 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$supportedModes = @('cc', 'cv', 'cr', 'cw', 'transient-cc')
+$requestedModes = @($Modes | ForEach-Object { $_ -split ',' } |
+    ForEach-Object { $_.Trim().ToLowerInvariant() })
+# Keep the established trial order and run each selected mode only once.
+$selectedModes = @($supportedModes | Where-Object { $_ -in $requestedModes })
+$hasValidationModes = @($selectedModes | Where-Object { $_ -ne 'cc' }).Count -gt 0
 $repo = Split-Path -Parent $PSScriptRoot
 $python = Join-Path $repo '.venv/Scripts/python.exe'
 $cli = Join-Path $repo '.venv/Scripts/electronicload-tool.exe'
@@ -41,7 +47,7 @@ if (-not (Test-Path -LiteralPath $python)) {
     $cli = Join-Path $repo '.venv/bin/electronicload-tool'
 }
 $perCommandDeadlineMs = 30000
-$totalDeadlineMs = $(if ($IncludeValidationModes) { 900000 } else { 240000 })
+$totalDeadlineMs = $(if ($hasValidationModes) { 900000 } else { 240000 })
 $currentText = $Current.ToString([Globalization.CultureInfo]::InvariantCulture)
 $scriptCurrentCeilingA = 2.0
 $reportDirectory = $null
@@ -69,7 +75,7 @@ $report = [ordered]@{
     per_command_deadline_ms = $perCommandDeadlineMs
     total_deadline_ms = $totalDeadlineMs
     script_current_ceiling_a = $null
-    includes_validation_modes = [bool]$IncludeValidationModes
+    includes_validation_modes = $hasValidationModes
     declared_source_limits = $null
     plans = @()
     results = @()
@@ -320,6 +326,9 @@ function Assert-InputOff([object]$Result, [string]$CaseName) {
 }
 
 try {
+    if ($requestedModes.Count -eq 0 -or @($requestedModes | Where-Object { $_ -notin $supportedModes }).Count -gt 0) {
+        throw 'Modes must contain one or more of: cc, cv, cr, cw, transient-cc.'
+    }
     if (-not $Target -or -not $Resource) {
         Write-Host 'BLOCKED: explicit -Target and -Resource are required.'
         exit 2
@@ -327,29 +336,33 @@ try {
     if (-not (Test-Path -LiteralPath $python) -or -not (Test-Path -LiteralPath $cli)) {
         throw 'Sync the repository .venv with uv before running validation.'
     }
-    if ([double]::IsNaN($Current) -or [double]::IsInfinity($Current) -or
-        $Current -le 0 -or $Current -gt $scriptCurrentCeilingA) {
-        throw 'Current must be positive and at most 2 A for this controlled test.'
+    if ('cc' -in $selectedModes) {
+        if ([double]::IsNaN($Current) -or [double]::IsInfinity($Current) -or
+            $Current -le 0 -or $Current -gt $scriptCurrentCeilingA) {
+            throw 'Current must be positive and at most 2 A for this controlled test.'
+        }
+        & $python -c 'from electronicload_tool_core.control import validate_current; import sys; validate_current(sys.argv[1], "low"); validate_current(sys.argv[1], "high")' $currentText
+        if ($LASTEXITCODE -ne 0) { throw 'Test current is invalid for both CC ranges.' }
+        $report.prechecks.current = 'PASS'
     }
-    & $python -c 'from electronicload_tool_core.control import validate_current; import sys; validate_current(sys.argv[1], "low"); validate_current(sys.argv[1], "high")' $currentText
-    if ($LASTEXITCODE -ne 0) { throw 'Test current is invalid for both CC ranges.' }
     $report.script_current_ceiling_a = $scriptCurrentCeilingA
-    $report.prechecks.current = 'PASS'
 
-    if ($IncludeValidationModes) {
+    if ($hasValidationModes) {
         # Script-only operator envelope, not a substitute for source current limiting.
         if ([double]::IsNaN($SourceCurrentLimitA) -or [double]::IsInfinity($SourceCurrentLimitA) -or
             [double]::IsNaN($SourceVoltageLimitV) -or [double]::IsInfinity($SourceVoltageLimitV) -or
             $SourceCurrentLimitA -le 0 -or $SourceCurrentLimitA -gt 2 -or
             $SourceVoltageLimitV -le 0 -or $SourceVoltageLimitV -gt 18) {
-            throw 'Extended validation requires declared source limits: >0 to 2 A and >0 to 18 V.'
+            throw 'CV/CR/CW/Transient validation requires declared source limits: >0 to 2 A and >0 to 18 V.'
         }
-        & $python -c 'from decimal import Decimal; import sys; a,b=map(Decimal,sys.argv[1:]); assert 0 <= a <= 2 and 0 <= b <= 2' $LevelA $LevelB
-        if ($LASTEXITCODE -ne 0) { throw 'Transient levels must be within the script ceiling of 2 A.' }
         $report.declared_source_limits = [ordered]@{
             current_a = $SourceCurrentLimitA; voltage_v = $SourceVoltageLimitV
             verification = 'operator-declared; script does not configure or verify the source'
         }
+    }
+    if ('transient-cc' -in $selectedModes) {
+        & $python -c 'from decimal import Decimal; import sys; a,b=map(Decimal,sys.argv[1:]); assert 0 <= a <= 2 and 0 <= b <= 2' $LevelA $LevelB
+        if ($LASTEXITCODE -ne 0) { throw 'Transient levels must be within the script ceiling of 2 A.' }
     }
     $highArgs = @('--current', $currentText, '--range', 'high')
     $lowArgs = @('--current', $currentText, '--range', 'low')
@@ -357,15 +370,19 @@ try {
     $planned = @(
         @{name='identify';command='identify';args=@()},
         @{name='input-state';command='input-state';args=@()},
-        @{name='measure-off';command='measure';args=@()},
-        @{name='set-cc-high';command='set-cc';args=$highArgs},
-        @{name='set-cc-low';command='set-cc';args=$lowArgs},
-        @{name='input-on';command='input-on';args=$onArgs},
-        @{name='measure-on';command='measure';args=@()},
-        @{name='input-off';command='input-off';args=@()},
-        @{name='final-input-state';command='input-state';args=@()}
+        @{name='measure-off';command='measure';args=@()}
     )
-    if ($IncludeValidationModes) {
+    if ('cc' -in $selectedModes) {
+        $planned += @(
+            @{name='set-cc-high';command='set-cc';args=$highArgs},
+            @{name='set-cc-low';command='set-cc';args=$lowArgs},
+            @{name='input-on';command='input-on';args=$onArgs},
+            @{name='measure-on';command='measure';args=@()},
+            @{name='input-off';command='input-off';args=@()},
+            @{name='final-input-state';command='input-state';args=@()}
+        )
+    }
+    if ($hasValidationModes) {
         $trials = @(
             @{name='cv-low';scope='cv';settings=@{voltage=$Voltage;range='low'}},
             @{name='cv-high';scope='cv';settings=@{voltage=$Voltage;range='high'}},
@@ -389,7 +406,7 @@ try {
             if ($item[0] -eq 'pulse') { $configuration.pulse_width=$PulseWidth }
             $trials += @{name="transient-$($item[0])-$($item[1])";scope='transient-cc';settings=$configuration}
         }
-        foreach ($trial in $trials) {
+        foreach ($trial in ($trials | Where-Object { $_.scope -in $selectedModes })) {
             $prefix = $trial.name
             $scopeArgs = @('--hardware-validation', $trial.scope)
             $setupArgs = @($scopeArgs)
@@ -430,15 +447,18 @@ try {
         [Guid]::NewGuid().ToString('N').Substring(0, 8)
     $reportDirectory = Join-Path $repo ".tmp_tests/$name"
     [void][IO.Directory]::CreateDirectory($reportDirectory)
-    Write-Host 'Plan: Identify, Input State, Measure, CC High/Low and explicit ON/OFF.'
-    if ($IncludeValidationModes) {
-        Write-Host 'Additional validation: CV Low/High, CR Low/High, CW, Transient Continuous/Pulse/Toggle, Low/High/Auto.'
-        Write-Host 'Every trial includes explicit ON/OFF; Transient trials include repeated triggers and control status.'
+    Write-Host "Plan: Identify, Input State, Measure; selected modes: $($selectedModes -join ', ')."
+    Write-Host 'Every selected mode includes explicit ON/OFF and independent OFF confirmation.'
+    if ('transient-cc' -in $selectedModes) {
+        Write-Host 'Transient: Continuous/Pulse/Toggle, Low/High/Auto, repeated triggers, control status and separate disable.'
         Write-Host 'Trigger/status/measure do not establish waveform shape, timing or completion.'
+    }
+    if ($hasValidationModes) {
         Write-Host "Declared source limits: $SourceCurrentLimitA A / $SourceVoltageLimitV V; configure these on the source first."
     }
     foreach ($step in $planned) { Write-Host ("  {0}: {1} {2}" -f $step.name, $step.command, ($step.args -join ' ')) }
-    Write-Host "Current=$currentText A; Script ceiling=$($report.script_current_ceiling_a) A; USB System VISA."
+    if ('cc' -in $selectedModes) { Write-Host "CC Current=$currentText A." }
+    Write-Host "Script ceiling=$($report.script_current_ceiling_a) A; USB System VISA."
     Write-Host 'No reset, SYST:ERR? consumption, automatic local switch, or implicit Input ON.'
     Write-Host 'An Input ON attempt requires an explicit OFF cleanup; session close does not turn Input OFF.'
     Write-Host 'V/I/P measure queries are separate; power freshness is not guaranteed.'
@@ -472,7 +492,7 @@ try {
     Write-Host "Target: $Target; resource: $Resource; backend: $Backend"
     Write-Host 'Confirm safe, bounded source/DUT, current limit and a manual Input OFF contingency.'
     Write-Host 'Each trial deliberately tests Input ON and explicitly commands/verifies OFF; source/DUT must tolerate every printed setting.'
-    $ack = Read-Host 'With approved hardware setup, press Enter to run all CLI cases (Ctrl+C to cancel)'
+    $ack = Read-Host 'With approved hardware setup, press Enter to run selected CLI cases (Ctrl+C to cancel)'
     if ($ack -cne '') {
         $report.status = 'BLOCKED'
         Save-Report
