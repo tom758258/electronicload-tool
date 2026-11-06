@@ -15,7 +15,7 @@ class Simulator:
 
 
 class ControlSimulator:
-    """Minimal state for fixed CC and offline-only fixed CV/CR simulation."""
+    """Minimal state for fixed CC and offline-only fixed CV/CR/CW simulation."""
 
     def __init__(self):
         self.input_on = False
@@ -27,6 +27,7 @@ class ControlSimulator:
         self.voltage_v = 0.1
         self.cr_range = "high"
         self.resistance_ohm = Decimal("10")
+        self.power_w = Decimal("0")
         self.remote = False
 
     def query(self, command: str) -> str:
@@ -41,6 +42,7 @@ class ControlSimulator:
             "VOLT?": str(self.voltage_v),
             "RES:RANG?": str(10.0 if self.cr_range == "low" else 7500.0),
             "RES?": str(self.resistance_ohm),
+            "POW?": str(self.power_w),
             "TRAN?": "0",
             "INP:SHOR:STAT?": "0",
             "MEAS:VOLT?": "12.0",
@@ -67,6 +69,15 @@ class ControlSimulator:
         self.function = "RES"
         self.cr_range = range_name
         self.resistance_ohm = resistance
+
+    def configure_cw(self, power: Decimal) -> None:
+        """Offline state only; no physical POW/range command semantics implied."""
+        if self.input_on:
+            raise ValueError("Input must be OFF")
+        self.remote = True
+        self.mode = "FIX"
+        self.function = "POW"
+        self.power_w = power
 
     def write(self, command: str) -> None:
         if command == "SYST:REM":

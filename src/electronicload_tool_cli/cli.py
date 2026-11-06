@@ -9,7 +9,8 @@ from electronicload_tool_core.discovery import discover_resources
 from electronicload_tool_core.errors import LoadError
 from electronicload_tool_core.identity import MODEL_ID
 from electronicload_tool_core.readonly import COMMANDS, execute as read_execute
-from electronicload_tool_core.control import CONTROL_COMMANDS, execute as control_execute
+from electronicload_tool_core.control import (CONTROL_COMMANDS, execute as control_execute,
+                                              validate_power)
 from .worker import manifest, run_worker
 from .worker_client import request as worker_request, wait_ready
 
@@ -40,7 +41,7 @@ def main(argv: list[str] | None = None) -> int:
     command = argv[0] if argv and argv[0] in command_names else None
     parser = _Parser(
         prog="electronicload-tool",
-        description="Electronic Load Tool: diagnostics, fixed CC, offline CV/CR preview and Worker v3.",
+        description="Electronic Load Tool: diagnostics, fixed CC, offline CV/CR/CW and Worker v3.",
         allow_abbrev=False,
     )
     parser.json_errors = json_output
@@ -93,6 +94,8 @@ def main(argv: list[str] | None = None) -> int:
         elif name == "set-cr":
             sub.add_argument("--resistance", required=True, help="Resistance in ohms (offline only).")
             sub.add_argument("--range", required=True, choices=("low", "high"))
+        elif name == "set-cw":
+            sub.add_argument("--power", required=True, help="Power in watts (offline only).")
         elif name == "input-on":
             sub.add_argument("--confirm", action="store_true")
     try:
@@ -123,6 +126,11 @@ def main(argv: list[str] | None = None) -> int:
                     context = json.loads(args.context_json)
                 except (ValueError, UnicodeError) as exc:
                     raise LoadError("argument_error", "Worker request JSON is invalid.") from exc
+                # Validate CW before forwarding a float-rounded JSON number to the Worker.
+                if args.worker_command == "set-cw" and isinstance(arguments, dict):
+                    if type(arguments.get("power")) is float:
+                        power = json.loads(args.arguments_json, parse_float=str)["power"]
+                        arguments["power"] = float(validate_power(power))
                 body = {"schema_version": 3, "command": args.worker_command,
                         "arguments": arguments, "context": context}
                 if args.job_id is not None:
@@ -146,6 +154,7 @@ def main(argv: list[str] | None = None) -> int:
                 current=getattr(args, "current", None),
                 voltage=getattr(args, "voltage", None),
                 resistance=getattr(args, "resistance", None),
+                power=getattr(args, "power", None),
                 range_name=getattr(args, "range", None),
                 confirmed=getattr(args, "confirm", False),
                 validation=args.validation_allow_pending_live_support,

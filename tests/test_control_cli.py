@@ -38,6 +38,7 @@ def test_manifest_static(capsys):
     assert p['execution']=={'model':'multi_job','context_binding':'per_command'}
     assert p['features']=={'common.async_jobs':{'contract_version':1}}
     assert p['commands']['set-cr'] == {'kind': 'async_job'}
+    assert p['commands']['set-cw'] == {'kind': 'async_job'}
 
 
 def test_normal_live_cli_control_dispatches_without_validation_override(monkeypatch, capsys):
@@ -146,3 +147,80 @@ def test_cr_cli_text_and_help(capsys):
     output = capsys.readouterr()
     assert 'resistance_ohm: 5.0' in output.out
     assert output.err == ''
+
+
+@pytest.mark.parametrize('mode', ['simulate', 'dry-run'])
+def test_cw_cli_offline_json(capsys, mode):
+    assert main(['set-cw', f'--{mode}', '--power', '12.34', '--json']) == 0
+    output = capsys.readouterr()
+    payload = json.loads(output.out)
+    assert output.err == ''
+    assert payload['ok'] is True and payload['command'] == 'set-cw'
+    assert payload['mode'] == mode
+    result = payload['result']
+    assert result['power_w'] == 12.34 and 'range' not in result
+    if mode == 'simulate':
+        assert result['input_state'] == 'OFF' and result['function'] == 'POW'
+    else:
+        assert result['hardware_access'] is False
+
+
+@pytest.mark.parametrize('arguments,code', [
+    ([], 'argument_error'),
+    (['--power', '5', '--range', 'low'], 'argument_error'),
+    (['--power', 'NaN'], 'invalid_power'),
+    (['--power', 'text'], 'invalid_power'),
+    (['--power', '-0.01'], 'power_out_of_range'),
+    (['--power', '250.000000000000000001'], 'power_out_of_range'),
+    (['--power', '12.340000000000000001'], 'invalid_power_resolution'),
+])
+def test_cw_cli_invalid_arguments_are_json_errors(capsys, arguments, code):
+    assert main(['set-cw', '--dry-run', *arguments, '--json']) == 2
+    output = capsys.readouterr()
+    assert json.loads(output.out)['error']['code'] == code
+    assert output.err == ''
+
+
+@pytest.mark.parametrize('override', [[], ['--validation-allow-pending-live-support']])
+def test_cw_cli_live_refusal(capsys, override):
+    assert main(['set-cw', '--resource', 'USB0::0xFFFF::0x0001::SYNTHETIC::INSTR',
+                 '--power', '5', *override, '--json']) == 2
+    assert json.loads(capsys.readouterr().out)['error']['code'] == 'unsupported_live_scope'
+
+
+def test_cw_cli_text_and_help(capsys):
+    with pytest.raises(SystemExit) as error:
+        main(['set-cw', '--help'])
+    assert error.value.code == 0
+    output = capsys.readouterr().out
+    assert '--power' in output and '--range' not in output
+    assert main(['set-cw', '--simulate', '--power', '5']) == 0
+    output = capsys.readouterr()
+    assert 'power_w: 5.0' in output.out
+    assert output.err == ''
+
+
+@pytest.mark.parametrize('power,code', [
+    ('12.3400', None),
+    ('12.340000000000000001', 'invalid_power_resolution'),
+    ('250.000000000000000001', 'power_out_of_range'),
+])
+def test_cw_cli_send_command_preserves_power_validation(monkeypatch, capsys, power, code):
+    sent = []
+
+    def fake_request(url, path, body):
+        sent.append(body)
+        return 202, {'status': 'accepted'}
+
+    monkeypatch.setattr(cli, 'worker_request', fake_request)
+    exit_code = main(['send-command', '--url', 'http://127.0.0.1:12345/command',
+                     '--worker-command', 'set-cw', '--arguments-json', '{"power":' + power + '}',
+                     '--context-json', '{"mode":"simulate","planning_model_id":"itech-it8812c"}',
+                     '--json'])
+    payload = json.loads(capsys.readouterr().out)
+    if code:
+        assert exit_code == 2 and payload['error']['code'] == code
+        assert sent == []
+    else:
+        assert exit_code == 0 and payload['status'] == 'accepted'
+        assert sent[0]['arguments'] == {'power': 12.34}

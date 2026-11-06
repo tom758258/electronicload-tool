@@ -699,3 +699,103 @@ def test_cr_physical_input_on_refuses_without_writes(monkeypatch, function, vali
         control.execute('input-on', resource=RESOURCE, confirmed=True, validation=validation)
     assert error.value.code == 'unsupported_live_scope'
     assert fake.calls == ['*IDN?', 'INP:STAT?', 'FUNC:MODE?', 'FUNC?']
+
+
+@pytest.mark.parametrize('power', ['0', '0.01', '12.34', '249.99', '250', '12.3400', '1e-2'])
+def test_cw_offline_bounds_resolution_and_readback(power):
+    sim = ControlSimulator()
+    requested = Decimal(power)
+    before = vars(sim).copy()
+    plan = control.execute('set-cw', mode='dry-run', power=power, simulator=sim)
+    assert plan['hardware_access'] is False
+    assert plan['power_w'] == float(requested)
+    assert 'range' not in plan
+    assert vars(sim) == before
+
+    result = control.execute('set-cw', mode='simulate', power=power, simulator=sim)
+    assert result == {'function_mode': 'FIX', 'function': 'POW',
+                      'power_w': float(requested), 'input_state': 'OFF'}
+    assert Decimal(sim.query('POW?')) == requested
+
+
+@pytest.mark.parametrize('power,code', [
+    (-0.01, 'power_out_of_range'), (250.01, 'power_out_of_range'),
+    ('250.000000000000000001', 'power_out_of_range'),
+    ('0.001', 'invalid_power_resolution'), ('12.345', 'invalid_power_resolution'),
+    ('1.000000000000000000000000000001', 'invalid_power_resolution'),
+    ('1e-1000', 'invalid_power_resolution'),
+    (float('nan'), 'invalid_power'), (float('inf'), 'invalid_power'),
+    (float('-inf'), 'invalid_power'), ('text', 'invalid_power'),
+    (True, 'invalid_power'), (False, 'invalid_power'), ([], 'invalid_power'),
+    ({}, 'invalid_power'), (None, 'argument_error'),
+])
+@pytest.mark.parametrize('mode', ['simulate', 'dry-run'])
+def test_cw_invalid_settings_preserve_simulator(power, code, mode):
+    sim = ControlSimulator()
+    before = vars(sim).copy()
+    with pytest.raises(LoadError) as error:
+        control.execute('set-cw', mode=mode, power=power, simulator=sim)
+    assert error.value.code == code
+    assert vars(sim) == before
+
+
+def test_cw_rejects_range():
+    with pytest.raises(LoadError) as error:
+        control.execute('set-cw', mode='dry-run', power=1, range_name='low')
+    assert error.value.code == 'argument_error'
+
+
+@pytest.mark.parametrize('power', [0, 12.34])
+def test_cw_simulated_input_requires_confirmation_and_off_before_setup(power):
+    sim = ControlSimulator()
+    control.execute('set-cw', mode='simulate', power=power, simulator=sim)
+    with pytest.raises(LoadError) as error:
+        control.execute('input-on', mode='simulate', simulator=sim)
+    assert error.value.code == 'confirmation_required'
+    assert not sim.input_on
+    result = control.execute('input-on', mode='simulate', simulator=sim, confirmed=True)
+    assert result['input_state'] == 'ON' and result['power_w'] == power
+    before = vars(sim).copy()
+    with pytest.raises(LoadError) as error:
+        control.execute('set-cw', mode='simulate', power=250, simulator=sim)
+    assert error.value.code == 'input_not_off'
+    plan = control.execute('set-cw', mode='dry-run', power=250, simulator=sim)
+    assert plan['power_w'] == 250 and plan['hardware_access'] is False
+    assert vars(sim) == before
+    assert control.execute('input-off', mode='simulate', simulator=sim)['input_state'] == 'OFF'
+
+
+def test_cw_readback_mismatch_fails_without_input_on():
+    class MismatchedSimulator(ControlSimulator):
+        def configure_cw(self, power):
+            super().configure_cw(power + Decimal('0.01'))
+
+    sim = MismatchedSimulator()
+    with pytest.raises(LoadError) as error:
+        control.execute('set-cw', mode='simulate', power=5, simulator=sim)
+    assert error.value.code == 'readback_mismatch'
+    assert error.value.exit_code == 3
+    assert not sim.input_on
+
+
+@pytest.mark.parametrize('validation', [False, True])
+def test_cw_live_refuses_before_open_even_with_override(monkeypatch, validation):
+    def forbidden_open(_resource):
+        pytest.fail('CW attempted to open VISA')
+
+    monkeypatch.setattr(control, 'open_session', forbidden_open)
+    with pytest.raises(LoadError) as error:
+        control.execute('set-cw', resource=RESOURCE, power=5, validation=validation)
+    assert error.value.code == 'unsupported_live_scope'
+
+
+@pytest.mark.parametrize('function', ['POW', 'POWER'])
+@pytest.mark.parametrize('validation', [False, True])
+def test_cw_physical_input_on_refuses_without_writes(monkeypatch, function, validation):
+    fake = Fake()
+    fake.function = function
+    session(fake, monkeypatch)
+    with pytest.raises(LoadError) as error:
+        control.execute('input-on', resource=RESOURCE, confirmed=True, validation=validation)
+    assert error.value.code == 'unsupported_live_scope'
+    assert fake.calls == ['*IDN?', 'INP:STAT?', 'FUNC:MODE?', 'FUNC?']
