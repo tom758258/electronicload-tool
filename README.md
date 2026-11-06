@@ -1,7 +1,7 @@
 # Electronic Load Tool
 
 Electronic Load Tool provides read-only identification and measurements,
-plus fixed-CC configuration, offline-only CV/CR/CW and deliberate Input ON/OFF through a shared Core,
+plus fixed-CC configuration, offline CV/CR/CW/Transient CC and deliberate Input ON/OFF through a shared Core,
 Standalone CLI and bundled Common v3 Worker. The initial registered model is
 ITECH IT8812C (`itech-it8812c`).
 
@@ -214,14 +214,14 @@ There is no automatic `SYST:LOC` or `SYST:RWL` command; closing VISA never
 implies Input OFF or returning to local. An ON readback failure is UNKNOWN;
 it is never claimed to be OFF or retried automatically.
 
-Fixed CV is available for **dry-run and simulation only** until exact
+Normal Fixed CV use is available for **dry-run and simulation only** until exact
 IT8812C voltage-range programming/readback is confirmed on physical hardware.
 Use `set-cv --voltage <V> --range low|high` (Low 0.1–18 V, 1 mV;
 High 0.1–120 V, 10 mV). Invalid values and unrepresentable resolutions
 are rejected without rounding. The simulator supports CV configuration and
-confirmed simulated Input ON/OFF; physical CV Input ON is blocked even when
-the operator supplies an ON confirmation. No CV range SCPI is currently sent
-to real instruments. Fixed CC and all previously supported LIVE commands
+confirmed simulated Input ON/OFF; normal physical CV Input ON is blocked even
+with ON confirmation. Controlled physical trials require the separate
+[hardware-validation path](#controlled-instrument-validation). Fixed CC and previously supported LIVE commands
 remain unchanged.
 
 Fixed CR is also available for **dry-run and simulation only**. Use
@@ -235,8 +235,8 @@ does not certify hardware precision or acceptance.
 CR setup verifies simulated range/setpoint readback and leaves Input OFF.
 Simulated Input ON requires explicit confirmation; Input OFF remains explicit.
 The simulator provides setting/state behavior, not a circuit or DUT model.
-Physical `set-cr` and CR Input ON are blocked, including with the contributor
-validation override; no CR setting writes are sent to physical instruments.
+Ordinary physical `set-cr` and CR Input ON are blocked, including with the
+legacy contributor override. The explicit hardware-validation path is separate.
 Results use `resistance_ohm` and `range`; simulated readback also includes
 `range_readback_ohm` (a simulator convention only).
 
@@ -251,9 +251,10 @@ CW simulation verifies Fixed mode and the power setpoint, reports `power_w`,
 and leaves Input OFF. Setup while Input is ON is refused; simulated ON requires
 explicit confirmation and OFF remains explicit. Dry-run reports
 `hardware_access: false` without changing simulation state. There is no
-CW circuit/DUT model or setpoint-derived V/I/P accuracy guarantee. Physical
-`set-cw` is refused before opening VISA, and physical CW Input ON is refused
-before control writes, including with the contributor validation override.
+CW circuit/DUT model or setpoint-derived V/I/P accuracy guarantee. Ordinary
+LIVE `set-cw` is refused before opening VISA, and normal physical CW Input ON
+is refused before writes, including with the legacy contributor override.
+Controlled physical trials require the separate hardware-validation path.
 
 ```powershell
 .\.venv\Scripts\electronicload-tool.exe set-cc --simulate --current 1.5 --range low --json
@@ -279,19 +280,89 @@ runs one async job at a time, reports completion via `job_finished` and
 history. Stop does **not** imply Input OFF. For domain argument shapes and
 permissions, see [Electronic Load Worker Contract](docs/contracts/electronicload-worker-contract.md).
 
+### Offline Transient CC (Dynamic Mode)
+
+Transient CC supports **Continuous, Pulse and Toggle** in Core, CLI, Simulator
+and the Common v3 Worker through `--simulate` and `--dry-run`. Submit the whole
+configuration with `set-transient-cc`; setup, enable, confirmed Input ON, software
+trigger, Input OFF and disable are separate operations.
+
+| Setting | Accepted values |
+| --- | --- |
+| `--transient-mode` | `continuous`, `pulse`, `toggle` |
+| `--range` | `auto`, `low`, `high` |
+| `--level-a`, `--level-b` | Low: 0–6 A, 0.0001 A steps; High: 0–60 A, 0.001 A steps |
+| `--rise-slew`, `--fall-slew` | Low: 0.0001–0.25 A/μs; High: 0.001–2.5 A/μs |
+| Continuous widths | Required `--width-a` and `--width-b`, in seconds |
+| Pulse width | Required `--pulse-width`, in seconds; corresponds to the Level A pulse width |
+| Toggle widths | No width arguments accepted |
+
+Widths are **0.00002–3600 s**, in **0.000001 s** steps. Core validates every
+parameter before changing state and rejects nonfinite, out-of-range or
+unrepresentable values without rounding or clipping. Auto chooses Low only if
+both levels, their resolution and both slew rates fit; otherwise it tries High.
+An explicit range is never changed. Slew is checked against the documented
+bounds; the manuals do not establish a fixed decimal step. Slew result fields
+are decimal **strings** to preserve every accepted digit in JSON.
+
+These limits follow the IT8812C table in the
+[IT8800 User Manual V2.7](https://media.digikey.com/pdf/Data%20Sheets/ITech%20Elect%20PDFs/IT8800%20User%20Manual.pdf)
+(printed page 40), with mode/width semantics from the
+[IT8800 Programming Guide V2.1](https://assets.testequity.com/te1/Documents/pdf/itech/ITECH_IT8800-Programming-Guide-EN.pdf)
+(printed pages 19–20, 48, 50–51). The normal offline implementation sends no Transient SCPI. The explicit
+contributor validation path below prepares physical commands without opening
+normal Product LIVE support.
+
+```powershell
+.\.venv\Scripts\electronicload-tool.exe set-transient-cc --simulate --transient-mode continuous --range auto --level-a 1 --level-b 2 --width-a 0.001 --width-b 0.002 --rise-slew 0.1 --fall-slew 0.1 --json
+.\.venv\Scripts\electronicload-tool.exe set-transient-cc --dry-run --transient-mode pulse --range low --level-a 2 --level-b 1 --pulse-width 0.001 --rise-slew 0.1 --fall-slew 0.1 --json
+.\.venv\Scripts\electronicload-tool.exe set-transient-cc --dry-run --transient-mode toggle --range auto --level-a 1 --level-b 2 --rise-slew 0.1 --fall-slew 0.1 --json
+```
+
+Each standalone simulated command starts fresh. Use **one simulated Worker**
+for the sequence `set-transient-cc` → `transient-enable` → confirmed `input-on`
+→ `transient-trigger` → optional `transient-status` → `input-off` →
+`transient-disable`. Wait for each successful `job_finished` before submitting
+the next command. A successful Trigger job means the software trigger was
+accepted/executed; **it does not mean a waveform finished**. Repeated triggers
+are allowed while Transient is enabled and Input is ON.
+
+Setup requires Input OFF and disabled Transient. Enable requires setup and
+Input OFF; disable also requires Input OFF. None of these commands sends a
+hidden Input ON/OFF, retry or cleanup. Input OFF leaves Transient enabled;
+disable retains the setup. To return to Fixed operation, explicitly disable
+Transient before Fixed setup; successful Fixed setup invalidates the previous
+Transient configuration.
+
+`transient-status` reports configured, mode, resolved range, enabled, configuration
+and the most recent accepted software trigger. Query `input-state` separately.
+The simulator models control state only, with no waveform, pulse timer, current
+transition, DUT physics or physical-running/completion indication. Worker
+`GET /status` retains its runtime/job meaning. At normal workflow completion,
+the Orchestrator must explicitly attempt and confirm Input OFF before stopping
+the Worker; Stop or process exit never proves Input OFF.
+
+All five Transient commands are blocked for ordinary LIVE before opening VISA,
+including with the legacy contributor override. Normal physical Input ON remains
+Fixed CC only. The dedicated `--hardware-validation` path below is separate
+from Product LIVE and is unavailable to the Worker.
+
 ### Unified CLI instrument validation
 
-Use the single `scripts/live-cli-check.ps1` for the supported LIVE CLI
-instrument checks: Identify, Input State, V/I/P, fixed CC (high and low range),
-explicit Input ON, on-state V/I/P, explicit Input OFF, and final Input OFF.
-The same script retains the existing `-PlanOnly`, `-DebugArtifacts`, report
-privacy, process deadlines and interactive Enter confirmation. There is no
-separate control script or mode/suite selection; see
-[Controlled instrument validation](#controlled-instrument-validation).
-`scripts/preflight-cli.ps1` covers offline CV/CR/CW commands, CR/CW argument and
-LIVE refusal checks, and Worker Manifest exposure. CW checks include 0/250 W,
-0.01 W alignment without rounding, and refusal of a Range option;
-the hardware script does not execute physical CV, CR or CW operations.
+`scripts/live-cli-check.ps1` is the single hardware validation entry point.
+Its default sequence covers all five modes: CC High/Low, CV Low/High,
+CR Low/High, CW and Transient Continuous/Pulse/Toggle. Use `-Modes` to select
+one or more modes; common read-only safety prechecks always apply.
+CV/CR/CW/Transient use the explicit validation-only Core/CLI path.
+`-PlanOnly` checks every selected CLI request without hardware; it does not
+count planned cases as physical PASS.
+See [Controlled instrument validation](#controlled-instrument-validation).
+
+`scripts/preflight-cli.ps1` covers the offline CLI and ordinary LIVE refusal
+behavior, including CV/CR/CW/Transient and Manifest exposure. Use
+`-TransientOnly` for focused Transient checks. Preparing hardware scripts and
+executing hardware tests are separate activities: physical runs require the
+operator gates below. Normal CI continues to run no-hardware checks.
 
 ## Checks and builds
 
@@ -321,25 +392,72 @@ installed-wheel checks. Contributor changes follow [AGENTS.md](AGENTS.md).
 ## Controlled instrument validation
 
 `scripts/live-cli-check.ps1` is the **one** CLI hardware verification entry
-point. It runs the supported LIVE CLI functions in order, rather than
-requiring multiple scripts, Suites or Stages. It is an explicit operator-
+point. It defaults to all implemented modes, using supported LIVE commands and
+the validation-only path where required. It is an explicit operator-
 approved hardware validation workflow, **not** a general unattended control
 command and not automatic Product LIVE promotion.
 
-Preview the same full command plan without opening VISA or touching hardware:
+Preview the default **all-mode** plan without opening VISA or touching hardware.
+Use a fictional resource only for offline checks; replace `<USB_RESOURCE>` with
+your own approved resource for a real run:
 
 ```powershell
-.\scripts\live-cli-check.ps1 -Target itech-it8812c -Connection usb -Resource '<USB_RESOURCE>' -Backend system -Current 0.1 -PlanOnly
+.\scripts\live-cli-check.ps1 -Target itech-it8812c -Resource '<USB_RESOURCE>' -SourceCurrentLimitA 0.5 -SourceVoltageLimitV 12 -PlanOnly
 ```
+
+`-Modes` is the sole mode selector and replaces `-IncludeValidationModes`.
+Accepted values are `cc`, `cv`, `cr`, `cw`, and `transient-cc`; omit it for all
+five. Select a single mode or a comma-separated list:
+
+```powershell
+.\scripts\live-cli-check.ps1 -Target itech-it8812c -Resource '<USB_RESOURCE>' -Modes cc -PlanOnly
+.\scripts\live-cli-check.ps1 -Target itech-it8812c -Resource '<USB_RESOURCE>' -Modes transient-cc -SourceCurrentLimitA 0.5 -SourceVoltageLimitV 12 -PlanOnly
+.\scripts\live-cli-check.ps1 -Target itech-it8812c -Resource '<USB_RESOURCE>' -Modes cc,cv -SourceCurrentLimitA 0.5 -SourceVoltageLimitV 12 -PlanOnly
+.\scripts\live-cli-check.ps1 -Target itech-it8812c -Resource '<USB_RESOURCE>' -Modes cc,transient-cc -SourceCurrentLimitA 0.5 -SourceVoltageLimitV 12 -PlanOnly
+```
+
+The selected modes run once each in the established CC, CV, CR, CW, Transient
+order. Unknown or empty mode names are rejected. Unselected modes have no
+validation cases or PASS counts; planned but unexecuted cases remain NOT RUN.
+
+Whenever CV, CR, CW or Transient is selected, including the default all-mode
+plan, explicitly declare source limits greater than zero and no more than
+**2 A / 18 V**, even for PlanOnly. Before a real run, configure and verify these
+limits on the source and confirm the DUT tolerates **every printed setting**.
+The script does not control or verify the source. These script-only bounds do
+not expand product support or substitute for a safe source/DUT setup.
+
+The mode-specific trials use `-Voltage 5` for both CV ranges,
+`-ResistanceLow 10`, `-ResistanceHigh 1000`, `-Power 1`, `-LevelA 0.1`,
+`-LevelB 0.2`, `-RiseSlew 0.1`, `-FallSlew 0.1`, `-WidthA 0.001`,
+`-WidthB 0.002` and `-PulseWidth 0.001` by default. Units are V, ohm, W, A,
+A/us and seconds. Override these parameters for your approved setup; Core
+checks exact model limits without rounding, and Transient levels also obey
+the script's 2 A ceiling. A separate, printed Auto High trial deliberately
+uses **0.5 A/us** for both slew rates while retaining the selected levels.
+An unsuitable parameter combination fails the offline plan before hardware I/O.
+
+The CV/CR/CW/Transient sequence covers CV Low/High, CR Low/High, CW, Continuous Auto,
+Pulse Low, Toggle High, Continuous High and Pulse Auto High. Each trial
+configures with Input OFF, explicitly confirms ON, measures, explicitly turns
+OFF and independently checks OFF. Transient additionally enables before ON,
+sends two software triggers, queries control status, and disables after OFF.
+These checks do not measure waveform shape, timing, slew accuracy or completion;
+such measurements require an appropriate external instrument and procedure.
 
 For a separately approved, safe IT8812C + bounded source/DUT setup, run once
 in an interactive Windows console:
 
 ```powershell
-.\scripts\live-cli-check.ps1 -Target itech-it8812c -Connection usb -Resource '<USB_RESOURCE>' -Backend system -Current 0.1 -ConfirmWrites -EnableInputOn
+.\scripts\live-cli-check.ps1 -Target itech-it8812c -Connection usb -Resource '<USB_RESOURCE>' -Backend system -SourceCurrentLimitA 0.5 -SourceVoltageLimitV 12 -ConfirmWrites -EnableInputOn
 ```
 
-The validation script defaults to 0.1 A, with a script-only maximum of 2 A.
+For a selected-mode run, keep the desired `-Modes` and source limits from the
+preview command and replace `-PlanOnly` with `-ConfirmWrites -EnableInputOn`,
+after separate approval of the physical setup. The same interactive
+confirmation and failure handling apply to every selection.
+
+The CC trial defaults to 0.1 A, with a script-only maximum of 2 A.
 Both low/high configurations must satisfy the model range and programming resolution.
 The single `-Current` applies to both ranges; low is selected last for the
 bounded ON/OFF trial. These limits do not alter normal product CC support.
@@ -352,22 +470,23 @@ runs before any physical VISA connection. After offline preflight, the operator
 presses **Enter once** to run; Ctrl+C cancels. No magic words, Suite, Stage
 or extra prompt are required.
 
-The fixed order is Identify (precheck); Input State (must be OFF);
-V/I/P measurement with Input OFF; CC High and CC Low setting/readback
-(with OFF checks before writes); deliberate Input ON with physical confirmation;
+Every selection starts with Identify (precheck), Input State (must be OFF),
+and V/I/P measurement with Input OFF. When CC is selected, its steps are
+CC High and CC Low setting/readback (with OFF checks before writes);
+deliberate Input ON with physical confirmation;
 V/I/P measurement while ON; explicit Input OFF and confirmation; and a final
-independent Input State OFF query. Any failed verification prevents further
-normal test cases. If Input ON might have been attempted, the script makes
+independent Input State OFF query. Selected CV/CR/CW/Transient trials follow
+with the separate ON/OFF and status steps described above. Any failed
+verification prevents further normal test cases. If Input ON might have been attempted, the script makes
 an **explicit bounded Input OFF cleanup attempt** even after a failure, and
 reports OFF as confirmed only on successful physical readback. If cleanup
 fails or times out, the operator must act; neither process termination nor
 VISA session closure proves Input OFF. No reset, `SYST:LOC`, protection clear,
 SCPI error-queue consumption or automatic reconnect is added.
 
-All six CLI commands in this hardware sequence use normal Product LIVE permissions,
-including fixed CC and deliberate Input ON/OFF. The unified validation script
-runs the actual public CLI path and does not require the hidden contributor
-validation override. Exact identity/USB/System VISA and Input ON
+The CC trial uses normal Product LIVE permissions. CV/CR/CW/Transient trials
+select `--hardware-validation cv|cr|cw|transient-cc` explicitly; the legacy
+`--validation-allow-pending-live-support` does not enable these modes. Exact identity/USB/System VISA and Input ON
 confirmation requirements remain unchanged; the 2 A bound is only for
 the controlled validation script. System VISA library/manufacturer
 is reported for diagnostics and cross-command consistency, not independent
@@ -375,17 +494,45 @@ operator verification. The script does not validate Worker LIVE lifecycle or
 nonzero-load current/power accuracy.
 
 Each CLI command has a **30-second** process deadline; the full run has a
-**240-second** I/O budget beginning at Identify. An explicit OFF cleanup
-has a separate 30-second allowance if needed. The operator prompt is
+**240-second** I/O budget for CC alone, or **900 seconds** when any other mode
+is selected, beginning at Identify. Each explicit cleanup command has a
+separate 30-second allowance.
+After a possibly attempted Transient enable, cleanup separately checks Input
+OFF before attempting Transient Disable. If OFF cannot be confirmed, disable
+is blocked and operator action is reported. Cleanup success never erases an
+earlier failed case. The operator prompt is
 not timed. Instrument VISA timeouts stay at 5000 ms. V/I/P are separate
 measurements and power freshness/synchronization are not guaranteed.
 One run validates a bounded device configuration, not every possible current,
 load range, external DUT, failure condition, or Worker LIVE lifecycle.
 
+The validation-only Core/CLI path verifies exact IT8812C identity and USB/System
+VISA. Enable, ON and Trigger require `--validation-settings-json` with the
+complete expected setup (the same field names as Worker setup arguments).
+Core compares instrument readback with that setup before and after entering
+remote mode, with an additional explicit `--confirm` for ON. Settings are not
+cached across CLI processes. `transient-status` reports physical readback and
+control state; it cannot reconstruct trigger history or prove waveform completion.
+This flag is not accepted by Worker requests and does not change its manifest,
+Common v3 protocol, Stop behavior or LIVE policy.
+
+The prepared physical command mapping follows the
+[Programming Guide V2.1](https://assets.testequity.com/te1/Documents/pdf/itech/ITECH_IT8800-Programming-Guide-EN.pdf),
+printed pages 40, 46, 48, 50–52, 54 and 56–57. Transient uses `FUNC:MODE FIX`,
+`FUNC CURR`, separate `TRAN ON/OFF`, `TRIG:SOUR HOLD` and `TRIG:IMM`.
+Pulse width maps to `CURR:TRAN:AWID`; Toggle writes neither width.
+CV explicitly disables automatic range and selects 18/120 V; CR selects
+10/7500 ohm. The validation path requires those corresponding numeric range
+readbacks and exact requested setpoints before ON; unfamiliar responses fail
+closed for investigation, with no guessed fallback or automatic adjustment.
+These are validation requirements, not a claim of physical acceptance or
+normal Product LIVE availability.
+
 The existing report layout is retained under
 `.tmp_tests/readonly-live-*/shareable/` with `report.json` and
 `summary.md`. The report includes per-case PASS/FAIL/NOT RUN and a final
-summary; the resource stays redacted. Default execution retains **no raw
+summary, printed case parameters and selected control readbacks; the resource
+stays redacted. Planned and unexecuted cases remain NOT RUN. Default execution retains **no raw
 CLI logs or private Resource file**. The existing `-DebugArtifacts` flag
 additionally saves raw CLI stdout/stderr/exit information and Resource
 details under `private/`. Raw files may contain lab or device identifiers:

@@ -1,14 +1,18 @@
 [CmdletBinding()]
-param()
+param([switch]$TransientOnly)
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $cli = Join-Path $repo '.venv/Scripts/electronicload-tool.exe'
+if (-not (Test-Path -LiteralPath $cli)) {
+    $cli = Join-Path $repo '.venv/bin/electronicload-tool'
+}
 
 try {
     if (-not (Test-Path -LiteralPath $cli)) {
         throw 'Sync the repository .venv with uv before running preflight.'
     }
+    if (-not $TransientOnly) {
     foreach ($command in @('identify', 'input-state', 'measure')) {
         foreach ($mode in @('simulate', 'dry-run')) {
             $output = & $cli $command "--$mode" --json
@@ -161,12 +165,105 @@ try {
     if ($LASTEXITCODE -ne 2 -or $result.error.code -ne 'confirmation_required') {
         throw 'Input ON confirmation refusal failed.'
     }
+    }
+    # Transient-only selection keeps local verification scoped to this feature.
+    $transientBase = @('--range', 'auto', '--level-a', '1', '--level-b', '2',
+        '--rise-slew', '0.1', '--fall-slew', '0.1')
+    foreach ($transientMode in @('continuous', 'pulse', 'toggle')) {
+        $widths = switch ($transientMode) {
+            'continuous' { @('--width-a', '0.00002', '--width-b', '3600') }
+            'pulse' { @('--pulse-width', '0.001') }
+            'toggle' { @() }
+        }
+        foreach ($mode in @('simulate', 'dry-run')) {
+            $output = & $cli set-transient-cc "--$mode" --transient-mode $transientMode @transientBase @widths --json
+            $code = $LASTEXITCODE
+            $result = ($output -join "`n") | ConvertFrom-Json
+            if ($code -ne 0 -or $result.ok -ne $true -or $result.result.range -ne 'low') {
+                throw "Transient $transientMode $mode setup failed."
+            }
+            if ($mode -eq 'simulate' -and ($result.result.enabled -ne $false -or
+                $result.result.configured -ne $true -or $result.result.mode -ne $transientMode)) {
+                throw 'Transient simulated setup state failed.'
+            }
+            if ($mode -eq 'dry-run' -and $result.result.hardware_access -ne $false) {
+                throw 'Transient dry-run must not access hardware.'
+            }
+            Write-Host "PASS: Transient $transientMode $mode"
+        }
+    }
+    $output = & $cli set-transient-cc --simulate --transient-mode toggle @transientBase `
+        --rise-slew '0.3000000000000000001' --json
+    $code = $LASTEXITCODE
+    $result = ($output -join "`n") | ConvertFrom-Json
+    if ($code -ne 0 -or $result.result.range -ne 'high' -or
+        $result.result.configuration.rise_slew_a_per_us -cne '0.3000000000000000001') {
+        throw 'Transient Auto High fallback or exact slew reporting failed.'
+    }
+    Write-Host 'PASS: Transient Auto High fallback and exact slew reporting'
+    $transientRefusals = @(
+        @{ Arguments = @('--level-a', '1.000000000000000001'); Code = 'no_matching_range' }
+        @{ Arguments = @('--range', 'low', '--fall-slew', '0.251'); Code = 'slew_out_of_range' }
+        @{ Arguments = @('--level-b', '61'); Code = 'no_matching_range' }
+        @{ Arguments = @('--rise-slew', 'NaN'); Code = 'invalid_transient_value' }
+        @{ Arguments = @('--width-a', '0.001'); Code = 'argument_error' }
+        @{ Arguments = @('--transient-mode', 'pulse'); Code = 'argument_error' }
+        @{ Arguments = @('--transient-mode', 'pulse', '--pulse-width', '0.0000205'); Code = 'invalid_width_resolution' }
+    )
+    foreach ($case in $transientRefusals) {
+        $caseArgs = $case.Arguments
+        $output = & $cli set-transient-cc --dry-run --transient-mode toggle @transientBase @caseArgs --json
+        $code = $LASTEXITCODE
+        $result = ($output -join "`n") | ConvertFrom-Json
+        if ($code -ne 2 -or $result.ok -ne $false -or $result.error.code -ne $case.Code) {
+            throw "Transient argument refusal failed: $($case.Code)."
+        }
+        Write-Host "PASS: Transient argument refusal $($case.Code)"
+    }
+    $transientCommands = @('set-transient-cc', 'transient-enable', 'transient-trigger',
+        'transient-disable', 'transient-status')
+    foreach ($command in $transientCommands) {
+        $setup = @()
+        if ($command -eq 'set-transient-cc') { $setup = @('--transient-mode', 'toggle') + $transientBase }
+        foreach ($override in @($false, $true)) {
+            $extraArgs = @()
+            if ($override) { $extraArgs += '--validation-allow-pending-live-support' }
+            $output = & $cli $command @setup --resource 'USB0::0xFFFF::0x0001::SYNTHETIC::INSTR' @extraArgs --json
+            $code = $LASTEXITCODE
+            $result = ($output -join "`n") | ConvertFrom-Json
+            if ($code -ne 2 -or $result.error.code -ne 'unsupported_live_scope') {
+                throw "Transient LIVE refusal failed: $command."
+            }
+            Write-Host "PASS: $command LIVE refusal (override: $override)"
+        }
+    }
+    foreach ($command in @('transient-enable', 'transient-trigger', 'transient-disable', 'transient-status')) {
+        $output = & $cli $command --dry-run --json
+        $code = $LASTEXITCODE
+        $result = ($output -join "`n") | ConvertFrom-Json
+        if ($code -ne 0 -or $result.result.hardware_access -ne $false) {
+            throw "Transient control dry-run failed: $command."
+        }
+        Write-Host "PASS: $command dry-run"
+    }
+    $output = & $cli transient-status --simulate --json
+    $code = $LASTEXITCODE
+    $result = ($output -join "`n") | ConvertFrom-Json
+    if ($code -ne 0 -or $result.result.configured -ne $false -or $result.result.enabled -ne $false) {
+        throw 'Standalone Transient simulation must start unconfigured.'
+    }
+    Write-Host 'PASS: standalone Transient status'
     $manifest = ((& $cli manifest --json) -join "`n") | ConvertFrom-Json
     if ($LASTEXITCODE -ne 0 -or $manifest.schema_version -ne 2 -or
         $manifest.worker_protocol.schema_versions[0] -ne 3 -or
         $manifest.commands.'set-cr'.kind -ne 'async_job' -or
         $manifest.commands.'set-cw'.kind -ne 'async_job') {
         throw 'Worker manifest check failed.'
+    }
+    foreach ($command in $transientCommands) {
+        if ($manifest.commands.$command.kind -ne 'async_job') {
+            throw "Transient Manifest entry missing: $command."
+        }
     }
     Write-Host 'PASS: offline control commands and Worker manifest'
     exit 0

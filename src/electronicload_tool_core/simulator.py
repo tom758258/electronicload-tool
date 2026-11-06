@@ -15,7 +15,7 @@ class Simulator:
 
 
 class ControlSimulator:
-    """Minimal state for fixed CC and offline-only fixed CV/CR/CW simulation."""
+    """Minimal control state for Fixed modes and offline Transient CC."""
 
     def __init__(self):
         self.input_on = False
@@ -29,6 +29,27 @@ class ControlSimulator:
         self.resistance_ohm = Decimal("10")
         self.power_w = Decimal("0")
         self.remote = False
+        self.transient_configuration = None
+        self.transient_enabled = False
+        self.last_trigger = None
+
+    def transient_status(self) -> dict:
+        configuration = self.transient_configuration
+        return {"configured": configuration is not None,
+                "mode": configuration["transient_mode"] if configuration else None,
+                "range": configuration["range"] if configuration else None,
+                "enabled": self.transient_enabled,
+                "last_trigger": dict(self.last_trigger) if self.last_trigger else None,
+                "configuration": self.transient_settings() if configuration else None}
+
+    def transient_settings(self) -> dict:
+        units = {"level_a": "level_a_a", "level_b": "level_b_a", "width_a": "width_a_s",
+                 "width_b": "width_b_s", "pulse_width": "pulse_width_s",
+                 "rise_slew": "rise_slew_a_per_us", "fall_slew": "fall_slew_a_per_us"}
+        # Slew has no documented decimal step: preserve all accepted digits in JSON.
+        return {units.get(key, key): (str(value) if "slew" in key else float(value))
+                if isinstance(value, Decimal) else value
+                for key, value in self.transient_configuration.items()}
 
     def query(self, command: str) -> str:
         return {
@@ -43,7 +64,7 @@ class ControlSimulator:
             "RES:RANG?": str(10.0 if self.cr_range == "low" else 7500.0),
             "RES?": str(self.resistance_ohm),
             "POW?": str(self.power_w),
-            "TRAN?": "0",
+            "TRAN?": "1" if self.transient_enabled else "0",
             "INP:SHOR:STAT?": "0",
             "MEAS:VOLT?": "12.0",
             "MEAS:CURR?": str(self.current_a if self.input_on else 0),

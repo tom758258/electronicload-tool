@@ -3,6 +3,7 @@
 import argparse
 import json
 import sys
+from decimal import Decimal
 from importlib.metadata import version
 
 from electronicload_tool_core.discovery import discover_resources
@@ -10,7 +11,7 @@ from electronicload_tool_core.errors import LoadError
 from electronicload_tool_core.identity import MODEL_ID
 from electronicload_tool_core.readonly import COMMANDS, execute as read_execute
 from electronicload_tool_core.control import (CONTROL_COMMANDS, execute as control_execute,
-                                              validate_power)
+                                              validate_power, TRANSIENT_FIELDS)
 from .worker import manifest, run_worker
 from .worker_client import request as worker_request, wait_ready
 
@@ -41,7 +42,7 @@ def main(argv: list[str] | None = None) -> int:
     command = argv[0] if argv and argv[0] in command_names else None
     parser = _Parser(
         prog="electronicload-tool",
-        description="Electronic Load Tool: diagnostics, fixed CC, offline CV/CR/CW and Worker v3.",
+        description="Electronic Load Tool: fixed CC, offline CV/CR/CW/Transient CC and Worker v3.",
         allow_abbrev=False,
     )
     parser.json_errors = json_output
@@ -85,17 +86,31 @@ def main(argv: list[str] | None = None) -> int:
         sub.add_argument("--json", action="store_true")
         sub.add_argument("--validation-allow-pending-live-support", action="store_true",
                          help=argparse.SUPPRESS)
+        if name in CONTROL_COMMANDS:
+            sub.add_argument("--hardware-validation", choices=("cv", "cr", "cw", "transient-cc"),
+                             help="Explicit contributor hardware-validation scope; not Product LIVE.")
+            sub.add_argument("--validation-settings-json",
+                             help="Expected complete setup for validation enable, ON and trigger.")
         if name == "set-cc":
             sub.add_argument("--current", required=True, type=float)
             sub.add_argument("--range", required=True, choices=("low", "high"))
         elif name == "set-cv":
-            sub.add_argument("--voltage", required=True, type=float)
+            sub.add_argument("--voltage", required=True)
             sub.add_argument("--range", required=True, choices=("low", "high"))
         elif name == "set-cr":
             sub.add_argument("--resistance", required=True, help="Resistance in ohms (offline only).")
             sub.add_argument("--range", required=True, choices=("low", "high"))
         elif name == "set-cw":
             sub.add_argument("--power", required=True, help="Power in watts (offline only).")
+        elif name == "set-transient-cc":
+            sub.add_argument("--transient-mode", required=True,
+                             choices=("continuous", "pulse", "toggle"))
+            sub.add_argument("--range", required=True, choices=("auto", "low", "high"))
+            for field in ("level-a", "level-b", "rise-slew", "fall-slew"):
+                sub.add_argument(f"--{field}", required=True,
+                                 help="A/us" if "slew" in field else "Amperes")
+            for field in ("width-a", "width-b", "pulse-width"):
+                sub.add_argument(f"--{field}", default=argparse.SUPPRESS, help="Seconds")
         elif name == "input-on":
             sub.add_argument("--confirm", action="store_true")
     try:
@@ -135,6 +150,12 @@ def main(argv: list[str] | None = None) -> int:
                         "arguments": arguments, "context": context}
                 if args.job_id is not None:
                     body["job_id"] = args.job_id
+                if args.worker_command == "set-transient-cc":
+                    # Forward original numeric tokens; Core in the Worker validates them.
+                    # Parsing above already guarantees a complete JSON value.
+                    del body["arguments"]
+                    body = (json.dumps(body)[:-1] + ',"arguments":'
+                            + args.arguments_json + '}').encode("utf-8")
                 url_path = "/command"
             elif args.command == "stop":
                 body = {"schema_version": 3}
@@ -148,6 +169,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "list-resources":
             result = discover_resources(live_only=args.live_only)
         elif args.command in CONTROL_COMMANDS:
+            validation_settings = None
+            if args.validation_settings_json is not None:
+                try:
+                    validation_settings = json.loads(args.validation_settings_json,
+                                                     parse_float=Decimal)
+                except (ValueError, UnicodeError) as exc:
+                    raise LoadError("argument_error", "Validation settings JSON is invalid.") from exc
+                if not isinstance(validation_settings, dict):
+                    raise LoadError("argument_error", "Validation settings must be an object.")
             result = control_execute(
                 args.command, mode=mode, resource=args.resource, backend=args.backend,
                 model_id=args.model,
@@ -155,9 +185,14 @@ def main(argv: list[str] | None = None) -> int:
                 voltage=getattr(args, "voltage", None),
                 resistance=getattr(args, "resistance", None),
                 power=getattr(args, "power", None),
-                range_name=getattr(args, "range", None),
+                range_name=(None if args.command == "set-transient-cc"
+                            else getattr(args, "range", None)),
                 confirmed=getattr(args, "confirm", False),
                 validation=args.validation_allow_pending_live_support,
+                hardware_validation=args.hardware_validation,
+                validation_settings=validation_settings,
+                transient={key: value for key, value in vars(args).items()
+                           if key in TRANSIENT_FIELDS} if args.command == "set-transient-cc" else None,
             )
         else:
             result = read_execute(args.command, mode=mode, resource=args.resource,

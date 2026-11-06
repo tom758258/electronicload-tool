@@ -10,7 +10,7 @@ owning layer. Permanent tests cover CLI help/version, read-only Core policy,
 identity, query parsing, session cleanup, and CLI output/exit integration.
 Default tests replace VISA with a recording fake; an autouse fixture blocks
 accidental creation of a real resource manager. Add focused tests for implemented
-fixed-CC/Input switching, offline CV/CR preview, and Common v3 Worker behavior. Do not add tests for
+fixed-CC/Input switching, offline CV/CR/CW/Transient CC, and Common v3 Worker behavior. Do not add tests for
 unimplemented WebUI or unsupported modes.
 
 Avoid tests tied to private helpers, source text, exact help prose, or document
@@ -59,12 +59,14 @@ affected CLI parser/help/version and read-only CLI contracts:
 ```
 
 Worker integration uses a real local simulated subprocess, HTTP and JSONL,
-but never physical hardware. The **single** `live-cli-check.ps1` now plans
-read-only plus CC High/Low, Input ON, on-state measurement and Input OFF in
-one fixed sequence. Test its `-PlanOnly` operation and unattended LIVE refusal
-with a **fictional** USB Resource. Without `-ConfirmWrites` or
+but never physical hardware. The **single** `live-cli-check.ps1` defaults to
+all five modes: CC, CV, CR, CW and Transient CC. `-Modes` selects one or more
+modes while retaining common read-only safety prechecks and each selected
+mode's explicit Input ON/OFF flow. Test its `-PlanOnly` operation and unattended
+LIVE refusal with a **fictional** USB Resource. Without `-ConfirmWrites` or
 `-EnableInputOn`, and in noninteractive LIVE runs, verify it refuses before
-opening any VISA session or sending SCPI. The script defaults to 0.1 A, with a 2 A script-only hard ceiling.
+opening any VISA session or sending SCPI. CC defaults to 0.1 A, with a
+2 A script-only hard ceiling.
 Verify redacted shareable case totals and normal mode's lack of private raw
 logs; `-DebugArtifacts` uses the existing private/raw location without
 changing authorization. No hardware is permitted in automated checks.
@@ -78,17 +80,42 @@ between remote transition and Input ON. Read-only commands must not send
 Run the **single** `live-cli-check.ps1` full LIVE command only with
 separately approved model/Resource, bounded DUT/source, explicit two-layer
 write/Input ON opt-in, and a manual OFF contingency. Check physical Input
-OFF before CC; high and low range are configured with the same bounded current
+OFF before any selected mode; CC high and low range use the same bounded current
 before one authorized ON/OFF trial. Reject further normal tests on any failure.
 After a potentially attempted Input ON, make one explicit bounded OFF cleanup
 attempt; if physical OFF cannot be confirmed, flag operator action. Validation
 does not automatically promote Product LIVE support or demonstrate LIVE Worker
-coverage. Because this change touches only PowerShell verification/docs, do
-not rerun release packaging or unrelated pytest.
+coverage. Script-only changes do not require unrelated local pytest or
+release packaging.
 
 Dependency/lockfile changes require the focused packaging checks below.
 Report unavailable PowerShell, Ruff, dependencies and hardware as BLOCKED
 or NOT RUN, not PASS.
+
+For offline Transient CC, run only its Core/CLI tests and selected Worker cases:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q tests/test_transient_core.py tests/test_transient_cli.py tests/test_worker.py -k transient
+.\scripts\preflight-cli.ps1 -TransientOnly
+```
+
+Cover complete mode-specific setup, both levels/slew rates, exact resolution,
+Auto Low preference and High fallback, no rounding, atomic refusal, state guards,
+repeated software triggers, status snapshots and side-effect-free dry-run.
+Verify one simulated Worker's HTTP/JSONL flow, Manifest entries, decimal-token
+preservation, failed-job terminals, unchanged `GET /status`, and LIVE refusal
+before VISA even with the CLI override. Trigger terminal success never proves
+waveform completion; Stop never changes Input state.
+
+Select existing Input/Fixed CC regression cases only when those shared paths
+change, and existing help/version or client/dispatch cases when those adapters
+change. Run Ruff only on modified Python files. `-TransientOnly` runs the new
+CLI cases and Manifest checks without unrelated preflight suites; the default
+preflight includes all existing cases plus Transient. Use a fictional USB
+resource solely for offline checks. Preparing the separately authorized
+validation-only Core/CLI and hardware script is allowed without executing
+hardware. Ordinary offline work does not require full local pytest,
+release/packaging acceptance or physical validation.
 
 For offline Fixed CR changes, start with CR cases in `test_control_core.py`,
 `test_control_cli.py` and `test_worker.py`. Cover explicit Low/High bounds
@@ -101,8 +128,8 @@ Run existing CC/CV/Input cases only where their shared paths are affected.
 
 The offline preflight includes CR Low/High simulation and dry-run, explicit
 range/out-of-range refusal, LIVE refusal using a fictional resource, and Manifest
-checks. `live-cli-check.ps1` remains limited to supported LIVE commands; it must
-not perform CV/CR hardware operations. Offline CR work alone does not warrant
+checks. CV/CR physical trials require the dedicated validation-only opt-in
+and separately approved hardware setup. Offline CR work alone does not warrant
 the full test suite, release acceptance, packaging checks or hardware validation.
 
 For offline Fixed CW, select CW cases in the same Core, CLI and Worker test
@@ -114,7 +141,8 @@ LIVE CW must fail before VISA opens, and fake physical CW Input ON must fail
 before writes, including with the contributor override. Then run only directly
 affected shared Input/parser/dispatch cases and Ruff on modified Python files.
 Do not run unrelated CC/CV/CR suites, release/packaging acceptance or hardware
-validation for offline CW. The physical validation script must not execute CW.
+validation for offline CW. Prepared CW hardware trials require the dedicated
+validation-only opt-in and separately approved hardware setup.
 
 When changing CW CLI preflight coverage, run `scripts/preflight-cli.ps1` with
 the repository's installed CLI. It checks 0/250 W and a fractional CW setpoint
@@ -124,6 +152,44 @@ without rounding, LIVE refusal with/without the contributor override using a
 fictional resource, and Manifest exposure. Script/documentation-only changes
 do not require rerunning unrelated pytest or packaging checks locally. The
 existing Windows CI job runs this same preflight script.
+
+## Validation-only Core/CLI and hardware script preparation
+
+Preparing an executable hardware procedure does not authorize running it.
+Use recording Fake VISA tests for the dedicated `--hardware-validation` path:
+exact identity/transport, complete expected settings, readback mismatch,
+OFF-before-setup, guards before/after remote transition, explicit confirmation,
+uncertain writes without retry, separate OFF/disable, and unchanged normal
+CLI/Worker LIVE refusal. Physical range/trigger semantics remain subject to
+real-instrument acceptance; Fake VISA is not physical evidence.
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q tests/test_hardware_validation.py tests/test_live_validation_script.py
+```
+
+The script tests run the real PowerShell PlanOnly and noninteractive gates with
+fictional resources and a child-process VISA blocker. PowerShell must be installed;
+unavailable PowerShell is reported as SKIP, not a successful script check.
+For mode-selection changes alone, run only `tests/test_live_validation_script.py`
+and Ruff on that modified Python file. Verify default all-mode, every single
+mode, comma-separated/PowerShell-array selections, invalid-mode refusal,
+unchanged authorization and source-limit gates, selected case totals, and NOT RUN
+for planned cases. Unselected modes must have no cases or PASS counts.
+Keep every existing Transient mode/range, repeated trigger, status and OFF/disable
+step. No unrelated Core/CLI/Worker, local full-suite, release or packaging checks
+are required for this script-only behavior change.
+Exercise failure cleanup with a fake CLI/VISA process as appropriate: failure
+after a possible ON must attempt explicit OFF, an enabled Transient is disabled
+only after verified OFF, and failures retain FAIL with remaining cases NOT RUN.
+Check redaction and that normal runs do not retain private raw artifacts.
+Never bypass interactive gates to test an actual instrument automatically.
+
+Run directly affected existing Input/Fixed, CLI parser and Transient tests when
+those paths change, and Ruff only on modified Python files. Local focused checks
+do not replace the repository's normal CI: do not add CI-skip commit markers or
+change workflow filters to suppress checks. CI retains its configured offline
+suites, Windows preflight and applicable packaging smoke checks. Physical
+validation is separate and must be reported NOT RUN until explicitly performed.
 
 ## Packaging checks
 
