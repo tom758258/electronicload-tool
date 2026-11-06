@@ -1,8 +1,8 @@
 <#
 Single, bounded IT8812C CLI hardware validation: read-only, fixed CC and explicit Input ON/OFF.
 Requires approved safe hardware setup, explicit write/ON gates and one interactive Enter confirmation.
-Fixed CV/CR remain offline-only; preflight-cli.ps1 covers their offline CLI paths.
-Neither mode is included in this script's physical command sequence or hardware claims.
+Fixed CV/CR/CW remain offline-only; preflight-cli.ps1 covers their offline CLI paths.
+These modes are not included in this script's physical command sequence or hardware claims.
 #>
 [CmdletBinding()]
 param(

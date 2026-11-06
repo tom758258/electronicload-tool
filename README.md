@@ -288,7 +288,9 @@ The same script retains the existing `-PlanOnly`, `-DebugArtifacts`, report
 privacy, process deadlines and interactive Enter confirmation. There is no
 separate control script or mode/suite selection; see
 [Controlled instrument validation](#controlled-instrument-validation).
-`scripts/preflight-cli.ps1` covers offline CV/CR commands and CR refusal checks;
+`scripts/preflight-cli.ps1` covers offline CV/CR/CW commands, CR/CW argument and
+LIVE refusal checks, and Worker Manifest exposure. CW checks include 0/250 W,
+0.01 W alignment without rounding, and refusal of a Range option;
 the hardware script does not execute physical CV, CR or CW operations.
 
 ## Checks and builds

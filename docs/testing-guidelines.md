@@ -116,6 +116,15 @@ affected shared Input/parser/dispatch cases and Ruff on modified Python files.
 Do not run unrelated CC/CV/CR suites, release/packaging acceptance or hardware
 validation for offline CW. The physical validation script must not execute CW.
 
+When changing CW CLI preflight coverage, run `scripts/preflight-cli.ps1` with
+the repository's installed CLI. It checks 0/250 W and a fractional CW setpoint
+in simulation/dry-run, Fixed CW/Input OFF readback, no hardware access in
+dry-run, required power, unsupported Range, invalid/bounds/resolution refusal
+without rounding, LIVE refusal with/without the contributor override using a
+fictional resource, and Manifest exposure. Script/documentation-only changes
+do not require rerunning unrelated pytest or packaging checks locally. The
+existing Windows CI job runs this same preflight script.
+
 ## Packaging checks
 
 For packaging, dependency, or entry-point changes:
