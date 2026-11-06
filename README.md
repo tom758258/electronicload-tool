@@ -1,7 +1,7 @@
 # Electronic Load Tool
 
 Electronic Load Tool provides read-only identification and measurements,
-plus fixed-CC configuration, offline-only CV/CR preview and deliberate Input ON/OFF through a shared Core,
+plus fixed-CC configuration, offline-only CV/CR/CW and deliberate Input ON/OFF through a shared Core,
 Standalone CLI and bundled Common v3 Worker. The initial registered model is
 ITECH IT8812C (`itech-it8812c`).
 
@@ -184,7 +184,7 @@ Core owns profiles, identity, support policy, queries, parsing, VISA lifetime,
 and simulation. CLI handles arguments and presentation. Core must not import
 CLI. WebUI is not implemented. The bundled Worker is part of the CLI package and uses the same Core.
 
-## Fixed CC, offline Fixed CV/CR, Input and Common v3 Worker
+## Fixed CC, offline Fixed CV/CR/CW, Input and Common v3 Worker
 
 Fixed CC uses a complete `set-cc` request with amperes and an explicit
 `low` (0–6 A) or `high` (0–60 A) range. Before LIVE configuration, Core
@@ -240,18 +240,35 @@ validation override; no CR setting writes are sent to physical instruments.
 Results use `resistance_ohm` and `range`; simulated readback also includes
 `range_readback_ohm` (a simulator convention only).
 
+Fixed CW (Constant Power) supports **dry-run and simulation only** through
+`set-cw --power <W>`. Power is required, from **0 to 250 W inclusive** in
+**0.01 W** steps; 0 W is allowed. Invalid, nonfinite, out-of-range and
+non-step-aligned values are rejected without rounding or clamping. CW has no
+Range option. These are IT8812C offline limits, not physical programming
+evidence or DUT safety limits.
+
+CW simulation verifies Fixed mode and the power setpoint, reports `power_w`,
+and leaves Input OFF. Setup while Input is ON is refused; simulated ON requires
+explicit confirmation and OFF remains explicit. Dry-run reports
+`hardware_access: false` without changing simulation state. There is no
+CW circuit/DUT model or setpoint-derived V/I/P accuracy guarantee. Physical
+`set-cw` is refused before opening VISA, and physical CW Input ON is refused
+before control writes, including with the contributor validation override.
+
 ```powershell
 .\.venv\Scripts\electronicload-tool.exe set-cc --simulate --current 1.5 --range low --json
 .\.venv\Scripts\electronicload-tool.exe set-cv --simulate --voltage 5 --range low --json
 .\.venv\Scripts\electronicload-tool.exe set-cr --simulate --resistance 5 --range low --json
 .\.venv\Scripts\electronicload-tool.exe set-cr --dry-run --resistance 100 --range high --json
+.\.venv\Scripts\electronicload-tool.exe set-cw --simulate --power 12.34 --json
+.\.venv\Scripts\electronicload-tool.exe set-cw --dry-run --power 0 --json
 .\.venv\Scripts\electronicload-tool.exe input-on --simulate --confirm --json
 .\.venv\Scripts\electronicload-tool.exe input-off --simulate --json
 .\.venv\Scripts\electronicload-tool.exe manifest --json
 .\.venv\Scripts\electronicload-tool.exe worker --mode simulate --control-port 0
 ```
 
-Standalone simulation commands each start with fresh state. To exercise a CR
+Standalone simulation commands each start with fresh state. To exercise a CV/CR/CW
 setup followed by simulated ON/OFF, send the commands to the same simulated
 Worker, with `confirm_input_on: true` on the ON request.
 
@@ -272,7 +289,7 @@ privacy, process deadlines and interactive Enter confirmation. There is no
 separate control script or mode/suite selection; see
 [Controlled instrument validation](#controlled-instrument-validation).
 `scripts/preflight-cli.ps1` covers offline CV/CR commands and CR refusal checks;
-the hardware script does not execute physical CV or CR operations.
+the hardware script does not execute physical CV, CR or CW operations.
 
 ## Checks and builds
 

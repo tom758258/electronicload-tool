@@ -105,6 +105,17 @@ checks. `live-cli-check.ps1` remains limited to supported LIVE commands; it must
 not perform CV/CR hardware operations. Offline CR work alone does not warrant
 the full test suite, release acceptance, packaging checks or hardware validation.
 
+For offline Fixed CW, select CW cases in the same Core, CLI and Worker test
+files first. Cover 0/250 W bounds, exact 0.01 W steps without rounding, invalid
+values, absence of a range argument, simulated readback, Input OFF before setup,
+confirmed simulated ON/explicit OFF, and dry-run without state changes. Verify
+CLI JSON/help, Manifest exposure and Worker argument/async result integration.
+LIVE CW must fail before VISA opens, and fake physical CW Input ON must fail
+before writes, including with the contributor override. Then run only directly
+affected shared Input/parser/dispatch cases and Ruff on modified Python files.
+Do not run unrelated CC/CV/CR suites, release/packaging acceptance or hardware
+validation for offline CW. The physical validation script must not execute CW.
+
 ## Packaging checks
 
 For packaging, dependency, or entry-point changes:

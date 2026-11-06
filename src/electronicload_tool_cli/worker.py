@@ -1,6 +1,7 @@
 """Minimal Common Worker Protocol v3 multi-job, in-memory, single-slot runtime."""
 
 import datetime as dt
+from decimal import Decimal, InvalidOperation
 import json
 import threading
 import uuid
@@ -9,7 +10,7 @@ from urllib.parse import urlsplit
 
 from electronicload_tool_core.control import (CONTROL_COMMANDS, execute as control_execute,
                                               validate_current, validate_voltage,
-                                              validate_resistance)
+                                              validate_resistance, validate_power)
 from electronicload_tool_core.errors import LoadError
 from electronicload_tool_core.identity import MODEL_ID
 from electronicload_tool_core.readonly import COMMANDS as READ_COMMANDS, _read
@@ -92,6 +93,7 @@ class Runtime:
                 backend=self.backend, model_id=MODEL_ID,
                 current=arguments.get("current"), voltage=arguments.get("voltage"),
                 resistance=arguments.get("resistance"),
+                power=arguments.get("power"),
                 range_name=arguments.get("range"),
                 confirmed=arguments.get("confirm_input_on", False),
                 stop=self.stop, simulator=self.simulator,
@@ -168,6 +170,7 @@ def _arguments(command, raw, runtime):
     permitted = ({"current", "range"} if command == "set-cc" else
                  {"voltage", "range"} if command == "set-cv" else
                  {"resistance", "range"} if command == "set-cr" else
+                 {"power"} if command == "set-cw" else
                  {"confirm_input_on"} if command == "input-on" else set())
     if set(raw) - permitted:
         raise LoadError("argument_error", "Unsupported command arguments.")
@@ -186,6 +189,10 @@ def _arguments(command, raw, runtime):
                 or type(raw["resistance"]) not in (int, float)):
             raise LoadError("argument_error", "CR requires resistance and range.")
         validate_resistance(raw["resistance"], raw["range"])
+    if command == "set-cw":
+        if set(raw) != permitted or type(raw["power"]) not in (int, float, Decimal):
+            raise LoadError("argument_error", "CW requires power as a JSON number.")
+        validate_power(raw["power"])
     if command == "input-on" and "confirm_input_on" in raw:
         if type(raw["confirm_input_on"]) is not bool:
             raise LoadError("argument_error", "confirm_input_on must be boolean.")
@@ -210,11 +217,18 @@ def _handler(runtime):
                 size = int(self.headers.get("Content-Length", "0"))
                 if not 0 <= size <= 65536:
                     raise ValueError("Content length is missing or too large.")
-                value = json.loads(self.rfile.read(size)) if size else {}
+                body = self.rfile.read(size)
+                value = json.loads(body) if size else {}
                 if not isinstance(value, dict):
                     raise ValueError("JSON body must be an object.")
+                # Preserve the CW numeric token until Core validates the exact step/bounds.
+                # Keep existing Common schema tokens and other commands' decoding unchanged.
+                if value.get("command") == "set-cw" and isinstance(value.get("arguments"), dict):
+                    if type(value["arguments"].get("power")) is float:
+                        value["arguments"]["power"] = json.loads(
+                            body, parse_float=Decimal)["arguments"]["power"]
                 return value
-            except (ValueError, UnicodeError, json.JSONDecodeError) as exc:
+            except (ValueError, UnicodeError, json.JSONDecodeError, InvalidOperation) as exc:
                 raise LoadError("invalid_request", "Invalid JSON request.") from exc
 
         def do_GET(self):

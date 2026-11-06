@@ -47,6 +47,7 @@ Common contracts remain authoritative for the HTTP and JSONL envelopes.
 | `set-cc` | `{"current": <number>, "range": "low"\|"high"}` | Four confirmed CC settings, physical input stays OFF |
 | `set-cv` | `{"voltage": <number>, "range": "low"\|"high"}` | Offline-only CV setpoint simulation; LIVE refused |
 | `set-cr` | `{"resistance": <number>, "range": "low"\|"high"}` | Offline-only CR setpoint/range simulation; LIVE refused |
+| `set-cw` | `{"power": <number>}` | Offline-only Fixed CW setpoint simulation; LIVE refused |
 | `input-on` | `{"confirm_input_on": true}` | Confirmed `input_state: "ON"` or failure/UNKNOWN |
 | `input-off` | `{}` | Confirmed `input_state: "OFF"` or failure/UNKNOWN |
 
@@ -96,6 +97,28 @@ refused before any write, even with the CLI contributor-validation override.
 A valid LIVE `set-cr` request retains the existing async admission behavior:
 HTTP 202 means accepted; its terminal reports `unsupported_live_scope`.
 Invalid CR arguments are rejected with HTTP 400 before creating a job.
+
+Fixed CW supports `simulate` and `dry_run` with **0–250 W inclusive** in
+**0.01 W** steps, including 0 W. The required `power` is a finite JSON number,
+not a boolean or numeric string. Missing power, invalid types, out-of-range
+values, non-step-aligned values and extra arguments (including `range`) are
+rejected with HTTP 400 before job creation. Core owns these offline model
+limits; no rounding, clamping or range selection is applied.
+
+CW results contain `power_w`. Simulation also returns `function_mode: "FIX"`,
+`function: "POW"` and `input_state: "OFF"`, after verifying simulated readback.
+The internal simulated power readback is not a physical POW/POW:RANG SCPI
+contract. Dry-run returns `command: "set-cw"`, `hardware_access: false` and
+`input_on_requires_confirmation: false`; it does not change simulated state.
+No CW result contains a range. These offline settings do not establish a
+circuit/DUT model or power-derived V/I/P measurement accuracy.
+
+Within the same simulated Worker, CW uses the existing confirmed `input-on`
+and explicit `input-off` commands. Setup while Input is ON is refused. A valid
+LIVE `set-cw` retains HTTP 202 async admission, then fails with
+`unsupported_live_scope` before opening VISA. Physical CW Input ON is refused
+before any control write or power query, even with the CLI contributor override.
+CW support does not change Worker Stop, cleanup or existing Product LIVE scope.
 
 LIVE Input ON has two gates: the Worker starts with `--allow-input-on`, and the
 single `input-on` request carries `confirm_input_on: true`. Neither gate

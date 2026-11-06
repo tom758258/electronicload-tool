@@ -309,6 +309,7 @@ def test_control_worker_dry_run_returns_plan_without_hardware(worker):
         ('set-cc', {'current': 1.5, 'range': 'low'}),
         ('set-cv', {'voltage': 5, 'range': 'low'}),
         ('set-cr', {'resistance': 123.456789, 'range': 'high'}),
+        ('set-cw', {'power': 12.34}),
         ('input-on', {}),
         ('input-off', {}),
     ]
@@ -324,6 +325,9 @@ def test_control_worker_dry_run_returns_plan_without_hardware(worker):
         if command == 'set-cr':
             assert finished['result']['resistance_ohm'] == arguments['resistance']
             assert finished['result']['range'] == arguments['range']
+        if command == 'set-cw':
+            assert finished['result']['power_w'] == arguments['power']
+            assert 'range' not in finished['result']
 
 
 def test_cr_worker_validation_and_confirmed_input_cycle(worker):
@@ -385,6 +389,95 @@ def test_cr_live_worker_job_fails_without_visa(monkeypatch, capsys):
     runtime = Runtime(mode='live', resource='USB0::0xFFFF::0x0001::SYNTHETIC::INSTR')
     job = {'worker_job_id': 'cr-live', 'job_id': 'request-cr', 'command': 'set-cr'}
     runtime.run_job(job, {'resistance': 5, 'range': 'low'}, {'mode': 'live'})
+    terminal = runtime.snapshot()['last_job']
+    assert terminal['state'] == 'failed' and terminal['ok'] is False
+    assert terminal['error']['code'] == 'unsupported_live_scope'
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert events[-1]['event'] == 'job_finished'
+    assert events[-1]['error'] == terminal['error']
+
+
+@pytest.mark.parametrize('power,code', [
+    ('12.340000000000000001', 'invalid_power_resolution'),
+    ('250.000000000000000001', 'power_out_of_range'),
+])
+def test_cw_worker_rejects_exact_json_number_without_rounding(worker, power, code):
+    _, _, ready = worker
+    body = ('{"schema_version":3,"command":"set-cw","arguments":{"power":' + power
+            + '},"context":{"mode":"simulate","planning_model_id":"itech-it8812c"}}')
+    req = Request(ready['command_url'], body.encode(), headers={'Content-Type': 'application/json'})
+    with pytest.raises(HTTPError) as error:
+        urlopen(req, timeout=3)
+    with error.value as response:
+        assert response.code == 400
+        rejected = json.load(response)
+    assert rejected['worker_job_id'] is None and rejected['error']['code'] == code
+    assert rejected['command'] == 'set-cw' and rejected['kind'] == 'async_job'
+    assert http(ready['status_url'])[1]['last_job'] is None
+
+
+def test_cw_worker_validation_and_confirmed_input_cycle(worker):
+    _, out, ready = worker
+    for arguments in (
+        {}, {'power': '5'}, {'power': True}, {'power': None}, {'power': []},
+        {'power': float('nan')}, {'power': float('inf')},
+        {'power': -1}, {'power': 250.01}, {'power': 1.001},
+        {'power': 5, 'range': 'low'}, {'power': 5, 'extra': 1},
+    ):
+        code, rejected = http(ready['command_url'], request('set-cw', arguments))
+        assert code == 400 and rejected['worker_job_id'] is None
+        assert rejected['error']['category'] == 'validation'
+    status = http(ready['status_url'])[1]
+    assert status['active_job'] is None and status['last_job'] is None
+
+    cases = [
+        ('set-cw', {'power': 0}, 'simulate', None),
+        ('set-cw', {'power': 12.34}, 'simulate', None),
+        ('set-cw', {'power': 250}, 'dry_run', None),
+        ('input-on', {}, 'simulate', 'confirmation_required'),
+        ('input-on', {'confirm_input_on': True}, 'simulate', None),
+        ('set-cw', {'power': 5}, 'simulate', 'input_not_off'),
+        ('input-off', {}, 'simulate', None),
+    ]
+    for index, (command, arguments, mode, error_code) in enumerate(cases):
+        payload = {**request(command, arguments), 'job_id': f'cw-{index}'}
+        payload['context']['mode'] = mode
+        code, accepted = http(ready['command_url'], payload)
+        assert code == 202 and accepted['kind'] == 'async_job'
+        terminal = wait_finished(out, accepted['worker_job_id'])
+        assert terminal['job_id'] == payload['job_id']
+        assert terminal['schema_version'] == 3 and terminal['run_id'] == ready['run_id']
+        if error_code:
+            assert terminal['state'] == 'failed' and terminal['ok'] is False
+            assert terminal['error']['code'] == error_code
+        else:
+            assert terminal['state'] == 'succeeded' and terminal['ok'] is True
+            result = terminal['result']
+            if command == 'set-cw':
+                assert result['power_w'] == arguments['power'] and 'range' not in result
+            if mode == 'dry_run':
+                assert result['hardware_access'] is False
+            else:
+                assert result['input_state'] == ('ON' if command == 'input-on' else 'OFF')
+            if command == 'input-on':
+                assert result['function'] == 'POW' and result['power_w'] == 12.34
+        status = http(ready['status_url'])[1]
+        assert status['last_job']['worker_job_id'] == accepted['worker_job_id']
+        assert status['last_job']['result'] == terminal['result']
+        assert status['last_job']['error'] == terminal['error']
+
+
+def test_cw_live_worker_job_fails_without_visa(monkeypatch, capsys):
+    from electronicload_tool_cli.worker import Runtime
+    from electronicload_tool_core import control
+
+    def forbidden_open(_resource):
+        pytest.fail('CW Worker attempted to open VISA')
+
+    monkeypatch.setattr(control, 'open_session', forbidden_open)
+    runtime = Runtime(mode='live', resource='USB0::0xFFFF::0x0001::SYNTHETIC::INSTR')
+    job = {'worker_job_id': 'cw-live', 'job_id': 'request-cw', 'command': 'set-cw'}
+    runtime.run_job(job, {'power': 5}, {'mode': 'live'})
     terminal = runtime.snapshot()['last_job']
     assert terminal['state'] == 'failed' and terminal['ok'] is False
     assert terminal['error']['code'] == 'unsupported_live_scope'
