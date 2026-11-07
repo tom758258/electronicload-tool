@@ -5,13 +5,15 @@ import json
 import sys
 from decimal import Decimal
 from importlib.metadata import version
+from pathlib import Path
 
 from electronicload_tool_core.discovery import discover_resources
 from electronicload_tool_core.errors import LoadError
 from electronicload_tool_core.identity import MODEL_ID
 from electronicload_tool_core.readonly import COMMANDS, execute as read_execute
 from electronicload_tool_core.control import (CONTROL_COMMANDS, execute as control_execute,
-                                              validate_power, TRANSIENT_FIELDS)
+                                              validate_power, TRANSIENT_FIELDS, LIST_COMMANDS)
+from .json_input import decode_list_json
 from .worker import manifest, run_worker
 from .worker_client import request as worker_request, wait_ready
 
@@ -42,7 +44,7 @@ def main(argv: list[str] | None = None) -> int:
     command = argv[0] if argv and argv[0] in command_names else None
     parser = _Parser(
         prog="electronicload-tool",
-        description="Electronic Load Tool: fixed CC, offline CV/CR/CW/Transient CC and Worker v3.",
+        description="Electronic Load Tool: fixed CC, offline CV/CR/CW/Transient/LIST CC and Worker v3.",
         allow_abbrev=False,
     )
     parser.json_errors = json_output
@@ -86,7 +88,7 @@ def main(argv: list[str] | None = None) -> int:
         sub.add_argument("--json", action="store_true")
         sub.add_argument("--validation-allow-pending-live-support", action="store_true",
                          help=argparse.SUPPRESS)
-        if name in CONTROL_COMMANDS:
+        if name in CONTROL_COMMANDS and name not in LIST_COMMANDS:
             sub.add_argument("--hardware-validation", choices=("cv", "cr", "cw", "transient-cc"),
                              help="Explicit contributor hardware-validation scope; not Product LIVE.")
             sub.add_argument("--validation-settings-json",
@@ -111,6 +113,12 @@ def main(argv: list[str] | None = None) -> int:
                                  help="A/us" if "slew" in field else "Amperes")
             for field in ("width-a", "width-b", "pulse-width"):
                 sub.add_argument(f"--{field}", default=argparse.SUPPRESS, help="Seconds")
+        elif name == "set-list-cc":
+            data = sub.add_mutually_exclusive_group(required=True)
+            data.add_argument("--arguments-json", help="Complete LIST configuration JSON (offline only).")
+            data.add_argument("--file", help="UTF-8 JSON file containing the same LIST configuration.")
+        elif name in {"list-save", "list-recall"}:
+            sub.add_argument("--slot", required=True, type=int, help="Instrument LIST slot, 1 through 7.")
         elif name == "input-on":
             sub.add_argument("--confirm", action="store_true")
     try:
@@ -137,9 +145,11 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             if args.command == "send-command":
                 try:
-                    arguments = json.loads(args.arguments_json)
+                    arguments = (decode_list_json(args.arguments_json)
+                                 if args.worker_command in LIST_COMMANDS
+                                 else json.loads(args.arguments_json))
                     context = json.loads(args.context_json)
-                except (ValueError, UnicodeError) as exc:
+                except (ValueError, UnicodeError, RecursionError) as exc:
                     raise LoadError("argument_error", "Worker request JSON is invalid.") from exc
                 # Validate CW before forwarding a float-rounded JSON number to the Worker.
                 if args.worker_command == "set-cw" and isinstance(arguments, dict):
@@ -150,7 +160,7 @@ def main(argv: list[str] | None = None) -> int:
                         "arguments": arguments, "context": context}
                 if args.job_id is not None:
                     body["job_id"] = args.job_id
-                if args.worker_command == "set-transient-cc":
+                if args.worker_command in {"set-transient-cc", *LIST_COMMANDS}:
                     # Forward original numeric tokens; Core in the Worker validates them.
                     # Parsing above already guarantees a complete JSON value.
                     del body["arguments"]
@@ -169,8 +179,16 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "list-resources":
             result = discover_resources(live_only=args.live_only)
         elif args.command in CONTROL_COMMANDS:
+            list_configuration = None
+            if args.command == "set-list-cc":
+                try:
+                    data = (Path(args.file).read_text(encoding="utf-8-sig")
+                            if args.file is not None else args.arguments_json)
+                    list_configuration = decode_list_json(data)
+                except (OSError, ValueError, UnicodeError, RecursionError) as exc:
+                    raise LoadError("argument_error", "Cannot read a valid LIST JSON configuration.") from exc
             validation_settings = None
-            if args.validation_settings_json is not None:
+            if getattr(args, "validation_settings_json", None) is not None:
                 try:
                     validation_settings = json.loads(args.validation_settings_json,
                                                      parse_float=Decimal)
@@ -189,10 +207,12 @@ def main(argv: list[str] | None = None) -> int:
                             else getattr(args, "range", None)),
                 confirmed=getattr(args, "confirm", False),
                 validation=args.validation_allow_pending_live_support,
-                hardware_validation=args.hardware_validation,
+                hardware_validation=getattr(args, "hardware_validation", None),
                 validation_settings=validation_settings,
                 transient={key: value for key, value in vars(args).items()
                            if key in TRANSIENT_FIELDS} if args.command == "set-transient-cc" else None,
+                list_configuration=list_configuration,
+                slot=getattr(args, "slot", None),
             )
         else:
             result = read_execute(args.command, mode=mode, resource=args.resource,

@@ -11,12 +11,15 @@ from urllib.parse import urlsplit
 from electronicload_tool_core.control import (CONTROL_COMMANDS, execute as control_execute,
                                               validate_current, validate_voltage,
                                               validate_resistance, validate_power,
-                                              TRANSIENT_FIELDS, validate_transient_cc)
+                                              TRANSIENT_FIELDS, validate_transient_cc,
+                                              LIST_COMMANDS, LIST_FIELDS,
+                                              validate_list_cc, validate_list_slot)
 from electronicload_tool_core.errors import LoadError
 from electronicload_tool_core.identity import MODEL_ID
 from electronicload_tool_core.readonly import COMMANDS as READ_COMMANDS, _read
 from electronicload_tool_core.simulator import ControlSimulator
 from electronicload_tool_core.visa import open_session, validate_connection
+from .json_input import decode_list_json
 
 SCHEMA = 3
 COMMANDS = READ_COMMANDS + CONTROL_COMMANDS
@@ -95,10 +98,13 @@ class Runtime:
                 current=arguments.get("current"), voltage=arguments.get("voltage"),
                 resistance=arguments.get("resistance"),
                 power=arguments.get("power"),
-                range_name=None if command == "set-transient-cc" else arguments.get("range"),
+                range_name=(None if command in {"set-transient-cc", "set-list-cc"}
+                            else arguments.get("range")),
                 confirmed=arguments.get("confirm_input_on", False),
                 stop=self.stop, simulator=self.simulator,
                 transient=arguments if command == "set-transient-cc" else None,
+                list_configuration=arguments if command == "set-list-cc" else None,
+                slot=arguments.get("slot"),
             )
         if context["mode"] == "simulate":
             return _read(self.simulator, command)
@@ -174,9 +180,15 @@ def _arguments(command, raw, runtime):
                  {"resistance", "range"} if command == "set-cr" else
                  {"power"} if command == "set-cw" else
                  TRANSIENT_FIELDS if command == "set-transient-cc" else
+                 LIST_FIELDS if command == "set-list-cc" else
+                 {"slot"} if command in {"list-save", "list-recall"} else
                  {"confirm_input_on"} if command == "input-on" else set())
     if set(raw) - permitted:
         raise LoadError("argument_error", "Unsupported command arguments.")
+    if command == "set-list-cc":
+        validate_list_cc(raw)
+    if command in {"list-save", "list-recall"}:
+        validate_list_slot(raw.get("slot"))
     if command == "set-transient-cc":
         for key, value in raw.items():
             if key not in {"transient_mode", "range"} and type(value) not in (int, float, Decimal):
@@ -238,8 +250,12 @@ def _handler(runtime):
                 if (value.get("command") == "set-transient-cc"
                         and isinstance(value.get("arguments"), dict)):
                     value["arguments"] = json.loads(body, parse_float=Decimal)["arguments"]
+                if value.get("command") in LIST_COMMANDS:
+                    # Preserve nested numeric tokens; reject duplicate fields/nonfinite JSON.
+                    value = decode_list_json(body)
                 return value
-            except (ValueError, UnicodeError, json.JSONDecodeError, InvalidOperation) as exc:
+            except (ValueError, UnicodeError, json.JSONDecodeError, InvalidOperation,
+                    RecursionError) as exc:
                 raise LoadError("invalid_request", "Invalid JSON request.") from exc
 
         def do_GET(self):
