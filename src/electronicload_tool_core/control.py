@@ -1,4 +1,4 @@
-"""Fixed CC, offline CV/CR/CW preview and deliberate input switching for IT8812C.
+"""Fixed CC, offline CV/CR/CW/Transient/LIST and deliberate Input switching for IT8812C.
 
 No hidden write retry, automatic input OFF or VISA connection selection.
 """
@@ -17,8 +17,11 @@ from .simulator import ControlSimulator
 
 TRANSIENT_COMMANDS = ("set-transient-cc", "transient-enable", "transient-disable",
                       "transient-trigger", "transient-status")
+LIST_COMMANDS = ("set-list-cc", "list-save", "list-recall", "list-trigger",
+                 "list-status", "list-exit")
+LIST_FIELDS = frozenset({"range", "repeat_count", "steps"})
 CONTROL_COMMANDS = ("set-cc", "set-cv", "set-cr", "set-cw", "input-on", "input-off",
-                    *TRANSIENT_COMMANDS)
+                    *TRANSIENT_COMMANDS, *LIST_COMMANDS)
 TRANSIENT_FIELDS = frozenset({"transient_mode", "range", "level_a", "level_b", "rise_slew",
                               "fall_slew", "width_a", "width_b", "pulse_width"})
 # IT8800 User Manual V2.7, IT8812C table (printed p.40): slew bounds,
@@ -124,12 +127,144 @@ def validate_transient_cc(arguments: dict) -> dict:
                     ranges=errors)
 
 
+def validate_list_slot(slot: object) -> int:
+    if type(slot) is not int or not 1 <= slot <= 7:
+        raise LoadError("invalid_list_slot", "LIST slot must be an integer from 1 through 7.")
+    return slot
+
+
+def validate_list_cc(arguments: dict) -> dict:
+    """Complete offline LIST validation; never infer a LIST width decimal step.
+
+    IT8800 Programming Guide V2.1 pp.60–61: LIST current range, steps,
+    count and per-step level/slew/seconds. User Manual V2.7 pp.31–32:
+    LIST width bounds; pp.40–41: IT8812C current resolution and slew bounds.
+    The T1/T2 1-us resolution is not documented as a LIST width step.
+    """
+    if not isinstance(arguments, dict) or set(arguments) != LIST_FIELDS:
+        raise LoadError("argument_error", "LIST requires exactly range, repeat_count and steps.")
+    selected = arguments["range"]
+    if not isinstance(selected, str) or selected not in {"auto", "low", "high"}:
+        raise LoadError("invalid_range", "LIST range must be auto, low or high.")
+    repeat = arguments["repeat_count"]
+    if type(repeat) is not int or not 1 <= repeat <= 65536:
+        raise LoadError("invalid_repeat_count", "Repeat count must be an integer from 1 to 65536.")
+    raw_steps = arguments["steps"]
+    if not isinstance(raw_steps, list) or not 2 <= len(raw_steps) <= 84:
+        raise LoadError("invalid_list_steps", "LIST requires 2 through 84 steps.")
+    fields = {"current_a", "slew_a_per_us", "width_s"}
+    steps = []
+    for index, raw in enumerate(raw_steps, 1):
+        if not isinstance(raw, dict) or set(raw) != fields:
+            raise LoadError("argument_error", "Each LIST step requires current_a, slew_a_per_us, width_s.",
+                            step=index)
+        step = {}
+        for field in fields:
+            value = raw[field]
+            if type(value) not in (int, float, Decimal):
+                raise LoadError("invalid_list_value", "LIST step values must be finite JSON numbers.",
+                                step=index, field=field)
+            try:
+                step[field] = _decimal(value)
+            except LoadError as exc:
+                raise LoadError("invalid_list_value", "LIST step values must be finite JSON numbers.",
+                                step=index, field=field) from exc
+        if not Decimal("0.00002") <= step["width_s"] <= Decimal("3600"):
+            raise LoadError("width_out_of_range", "LIST width must be 0.00002 through 3600 seconds.",
+                            step=index)
+        steps.append(step)
+    errors = {}
+    for candidate in ("low", "high") if selected == "auto" else (selected,):
+        try:
+            for index, step in enumerate(steps, 1):
+                current = step["current_a"]
+                if not 0 <= current <= Decimal(str(RANGE_LIMITS[candidate])):
+                    raise LoadError("current_out_of_range", "LIST current is outside the range.",
+                                    step=index)
+                # Equality prevents silent rounding, including long/tiny JSON tokens.
+                if current != current.quantize(RANGE_RESOLUTION[candidate]):
+                    raise LoadError("invalid_current_resolution", "LIST current exceeds range resolution.",
+                                    step=index)
+                minimum, maximum = SLEW_LIMITS[candidate]
+                if not minimum <= step["slew_a_per_us"] <= maximum:
+                    raise LoadError("slew_out_of_range", "LIST slew is outside the range.", step=index)
+        except LoadError as exc:
+            if selected != "auto":
+                raise
+            errors[candidate] = exc.code
+        else:
+            return {"range": candidate, "repeat_count": repeat, "steps": steps}
+    raise LoadError("no_matching_range", "Neither range accepts the complete LIST.", ranges=errors)
+
+
+def _list_selected(session) -> None:
+    if (session.mode != "LIST" or session.function != "CURR"
+            or session.list_configuration is None):
+        raise LoadError("list_not_selected", "Select a configured CC LIST first.")
+    validate_list_cc(session.list_configuration)
+
+
+def _list_simulation(session, command, configuration, slot, stop):
+    """Control state only; no physical LIST engine, SCPI, timer or completion claim."""
+    if command == "list-status":
+        return session.list_status()
+
+    def check_stop():
+        if stop is not None and stop.is_set():
+            raise LoadError("stopping", "LIST control was blocked because Worker is stopping.")
+
+    check_stop()
+    if _flag(session, "TRAN?") != "OFF":
+        raise LoadError("transient_enabled", "Disable Transient before LIST control.")
+    if command == "list-trigger":
+        _list_selected(session)
+        if _flag(session, "INP:STAT?") != "ON":
+            raise LoadError("input_not_on", "LIST trigger requires Input ON.")
+        if _flag(session, "INP:SHOR:STAT?") != "OFF":
+            raise LoadError("unsafe_mode", "Short must be OFF.")
+        check_stop()
+        previous = session.list_last_trigger
+        session.list_last_trigger = {"sequence": previous["sequence"] + 1 if previous else 1,
+                                     "accepted_at_utc": datetime.now(timezone.utc).isoformat(),
+                                     "source": "software"}
+    else:
+        _input_off(session)
+        if command == "list-recall":
+            if slot not in session.list_slots:
+                raise LoadError("list_slot_empty", "No simulated LIST is stored in that slot.")
+            configuration = validate_list_cc(session.list_slots[slot])
+        elif command == "list-save":
+            if session.list_configuration is None:
+                raise LoadError("list_not_configured", "Configure LIST before saving.")
+            configuration = validate_list_cc(session.list_configuration)
+        elif command == "list-exit":
+            _list_selected(session)
+        check_stop()
+        if command in {"set-list-cc", "list-recall"}:
+            session.list_configuration = configuration
+            session.list_last_trigger = None
+            session.list_slot = slot
+            session.mode = "LIST"
+            session.function = "CURR"
+            # Replace inactive setup, as Fixed setup does; never disable active Transient.
+            session.transient_configuration = None
+            session.last_trigger = None
+        elif command == "list-save":
+            session.list_slots[slot] = configuration
+            session.list_slot = slot
+        elif command == "list-exit":
+            session.mode = "FIX"
+    return session.list_status()
+
+
 def _transient_simulation(session, command, configuration, stop):
     """Control state only: no SCPI, waveform, timer or physical completion claim."""
     if command == "transient-status":
         return session.transient_status()
     if stop is not None and stop.is_set():
         raise LoadError("stopping", "Transient control was blocked because Worker is stopping.")
+    if session.mode == "LIST":
+        raise LoadError("list_selected", "Exit LIST explicitly before Transient control.")
     if command == "transient-trigger":
         if not session.transient_enabled or session.transient_configuration is None:
             raise LoadError("transient_not_enabled", "Trigger requires enabled Transient setup.")
@@ -377,6 +512,13 @@ def _check_input_on_conditions(session, stop: Event | None, *, allow_cv: bool,
     state = _flag(session, "INP:STAT?")
     if state != "OFF":
         raise LoadError("already_on", "Input is already ON.")
+    if isinstance(session, ControlSimulator) and session.mode == "LIST":
+        _list_selected(session)
+        if _flag(session, "TRAN?") != "OFF" or _flag(session, "INP:SHOR:STAT?") != "OFF":
+            raise LoadError("unsafe_mode", "Transient and Short must be OFF.")
+        if stop is not None and stop.is_set():
+            raise LoadError("stopping", "Input ON was blocked because Worker is stopping.")
+        return {"function_mode": "LIST", "function": "CURR", **session.list_settings()}
     if isinstance(session, ControlSimulator) and session.transient_configuration is not None:
         if not session.transient_enabled or session.mode != "TRAN" or session.function != "CURR":
             raise LoadError("transient_not_enabled", "Enable Transient before Input ON.")
@@ -525,12 +667,39 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
             confirmed: bool = False, validation: bool = False,
             stop: Event | None = None, simulator: ControlSimulator | None = None,
             transient: dict | None = None, hardware_validation: str | None = None,
-            validation_settings: dict | None = None) -> dict:
+            validation_settings: dict | None = None,
+            list_configuration: dict | None = None, slot: int | None = None) -> dict:
     if command not in CONTROL_COMMANDS or mode not in {"live", "simulate", "dry-run"}:
         raise LoadError("argument_error", "Unknown control command or mode.")
     if model_id != MODEL_ID:
         raise LoadError("unsupported_model", "The requested profile is not registered.")
     validate_connection(resource, backend, required=mode == "live")
+    if command in LIST_COMMANDS:
+        if (any(value is not None for value in (current, voltage, resistance, power, range_name,
+                                                transient, hardware_validation, validation_settings))
+                or confirmed):
+            raise LoadError("argument_error", "LIST commands accept only their LIST arguments.")
+        configuration = validate_list_cc(list_configuration) if command == "set-list-cc" else None
+        if command != "set-list-cc" and list_configuration is not None:
+            raise LoadError("argument_error", "Complete LIST data applies only to set-list-cc.")
+        if command in {"list-save", "list-recall"}:
+            validate_list_slot(slot)
+        elif slot is not None:
+            raise LoadError("argument_error", "Slot applies only to LIST Save/Recall.")
+        if mode == "live":
+            raise LoadError("unsupported_live_scope", "LIST CC is offline only.")
+        if mode == "dry-run":
+            result = {"command": command, "hardware_access": False}
+            if configuration is not None:
+                preview = ControlSimulator()
+                preview.list_configuration = configuration
+                result.update(preview.list_settings())
+            if slot is not None:
+                result["slot"] = slot
+            return result
+        return _list_simulation(simulator or ControlSimulator(), command, configuration, slot, stop)
+    if list_configuration is not None or slot is not None:
+        raise LoadError("argument_error", "LIST arguments require a LIST command.")
     if hardware_validation is not None:
         from .hardware_validation import execute as validate_hardware
 
@@ -603,6 +772,8 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
         return result
     if mode == "simulate":
         simulated = simulator or ControlSimulator()
+        if command in {"set-cc", "set-cv", "set-cr", "set-cw"} and simulated.mode == "LIST":
+            raise LoadError("list_selected", "Exit LIST explicitly before Fixed setup.")
         if command in {"set-cc", "set-cv", "set-cr", "set-cw"} and simulated.transient_enabled:
             raise LoadError("transient_enabled", "Disable Transient before Fixed setup.")
         result = _perform(simulated, command, current=current,

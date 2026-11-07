@@ -1,7 +1,7 @@
 # Electronic Load Tool
 
 Electronic Load Tool provides read-only identification and measurements,
-plus fixed-CC configuration, offline CV/CR/CW/Transient CC and deliberate Input ON/OFF through a shared Core,
+plus fixed-CC configuration, offline CV/CR/CW/Transient/LIST CC and deliberate Input ON/OFF through a shared Core,
 Standalone CLI and bundled Common v3 Worker. The initial registered model is
 ITECH IT8812C (`itech-it8812c`).
 
@@ -346,6 +346,21 @@ All five Transient commands are blocked for ordinary LIVE before opening VISA,
 including with the legacy contributor override. Normal physical Input ON remains
 Fixed CC only. The dedicated `--hardware-validation` path below is separate
 from Product LIVE and is unavailable to the Worker.
+
+### Offline native LIST CC
+
+Use `set-list-cc --simulate --arguments-json '<JSON>'` or
+`set-list-cc --simulate --file list.json` for a complete 2–84 Step CC LIST.
+Save/Recall use slots 1–7; `repeat_count: 65536` explicitly requests infinite
+repeat. Setup/Recall select LIST, with separate confirmed Input ON, software
+trigger, explicit Input OFF and mode exit. Use one simulated Worker to retain
+state across jobs. Product LIVE LIST remains blocked. See the
+[LIST interface and safety flow](docs/list-cc.md).
+
+以完整 JSON 或本機 JSON 檔案設定 2～84 個 Step 的 CC LIST，支援 1～7 號
+Save/Recall 與明確指定的無限循環。設定／Recall、Input ON、Trigger、Input OFF、
+退出模式分開操作；需連續保留狀態時使用同一個模擬 Worker。Product LIVE LIST
+維持封鎖。請參閱 [LIST 介面與安全流程（繁體中文）](docs/list-cc.zh-TW.md)。
 
 ### Unified CLI instrument validation
 

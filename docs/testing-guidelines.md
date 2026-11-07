@@ -10,7 +10,7 @@ owning layer. Permanent tests cover CLI help/version, read-only Core policy,
 identity, query parsing, session cleanup, and CLI output/exit integration.
 Default tests replace VISA with a recording fake; an autouse fixture blocks
 accidental creation of a real resource manager. Add focused tests for implemented
-fixed-CC/Input switching, offline CV/CR/CW/Transient CC, and Common v3 Worker behavior. Do not add tests for
+fixed-CC/Input switching, offline CV/CR/CW/Transient/LIST CC, and Common v3 Worker behavior. Do not add tests for
 unimplemented WebUI or unsupported modes.
 
 Avoid tests tied to private helpers, source text, exact help prose, or document
@@ -190,6 +190,33 @@ do not replace the repository's normal CI: do not add CI-skip commit markers or
 change workflow filters to suppress checks. CI retains its configured offline
 suites, Windows preflight and applicable packaging smoke checks. Physical
 validation is separate and must be reported NOT RUN until explicitly performed.
+
+## Offline LIST CC focused checks
+
+Start with only LIST Core/CLI tests and LIST Worker cases:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q tests/test_list_core.py tests/test_list_cli.py
+.\.venv\Scripts\python.exe -m pytest -q tests/test_worker.py -k list
+```
+
+Cover complete JSON and nested Step types, exact integer repeat/slots, 2–84
+Steps, whole-LIST Auto range selection, no rounding, explicit mode exclusion,
+OFF-before-setup/recall/save/exit, confirmed ON, Short/Stop guards, snapshot and
+saved-slot isolation, overwrite, empty Recall and retained data after exit.
+Do not infer a LIST width decimal step from Transient T1/T2. Preserve exact
+width/slew decimal tokens through inline/file input, CLI forwarding and HTTP.
+Verify one real simulated Worker's HTTP/JSONL flow, failed-job terminals,
+unchanged `GET /status`, Manifest 2 / protocol 3, side-effect-free dry-run and
+LIVE refusal before VISA, including contributor override refusal. Trigger job
+success never means LIST completion or Input OFF; Stop never changes Input.
+
+Run existing Input/Fixed, Transient, CLI parser/help/version and Worker
+client/dispatch checks only when their shared paths change. Ruff is limited to
+modified Python files. LIST-only offline work does not require all-mode
+PowerShell preflight, full local pytest, release acceptance, packaging checks
+or physical tests. Keep the normal configured CI intact. Physical LIST work
+requires separate authorization and is not established by simulation.
 
 ## Packaging checks
 

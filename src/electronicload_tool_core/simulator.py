@@ -15,7 +15,7 @@ class Simulator:
 
 
 class ControlSimulator:
-    """Minimal control state for Fixed modes and offline Transient CC."""
+    """Minimal control state for Fixed modes, offline Transient and LIST CC."""
 
     def __init__(self):
         self.input_on = False
@@ -32,6 +32,28 @@ class ControlSimulator:
         self.transient_configuration = None
         self.transient_enabled = False
         self.last_trigger = None
+        self.list_configuration = None
+        self.list_slot = None
+        self.list_slots = {}
+        self.list_last_trigger = None
+
+    def list_settings(self) -> dict:
+        configuration = self.list_configuration
+        # LIST width/slew have no documented decimal step; retain all accepted digits.
+        return {"range": configuration["range"], "repeat_count": configuration["repeat_count"],
+                "steps": [{"current_a": float(step["current_a"]),
+                           "slew_a_per_us": str(step["slew_a_per_us"]),
+                           "width_s": str(step["width_s"])} for step in configuration["steps"]]}
+
+    def list_status(self) -> dict:
+        configuration = self.list_configuration
+        return {"state_source": "simulate", "configured": configuration is not None,
+                "selected": self.mode == "LIST" and self.function == "CURR",
+                "function_mode": self.mode,
+                "range": configuration["range"] if configuration else None,
+                "slot": self.list_slot,
+                "configuration": self.list_settings() if configuration else None,
+                "last_trigger": dict(self.list_last_trigger) if self.list_last_trigger else None}
 
     def transient_status(self) -> dict:
         configuration = self.transient_configuration

@@ -617,3 +617,156 @@ def test_transient_live_worker_terminal_refuses_before_visa(command, monkeypatch
     events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert events[-1]['event'] == 'job_finished' and not events[-1]['ok']
     assert events[-1]['error']['code'] == 'unsupported_live_scope'
+
+
+def list_arguments(repeat_count=1):
+    return {'range': 'auto', 'repeat_count': repeat_count, 'steps': [
+        {'current_a': .5, 'slew_a_per_us': .1, 'width_s': 1},
+        {'current_a': 1, 'slew_a_per_us': .2, 'width_s': 2},
+    ]}
+
+
+@pytest.mark.parametrize('repeat_count', [1, 65536])
+def test_list_worker_http_jsonl_cycle_and_unchanged_runtime_status(worker, repeat_count):
+    p, out, ready = worker
+    status_keys = set(http(ready['status_url'])[1])
+
+    def execute(command, arguments=None, dry_run=False, error=None):
+        payload = request(command, arguments)
+        if dry_run:
+            payload['context']['mode'] = 'dry_run'
+        code, accepted = http(ready['command_url'], payload)
+        assert code == 202 and accepted['kind'] == 'async_job'
+        terminal = wait_finished(out, accepted['worker_job_id'])
+        assert terminal['schema_version'] == 3 and terminal['run_id'] == ready['run_id']
+        snapshot = http(ready['status_url'])[1]['last_job']
+        assert snapshot == {key: value for key, value in terminal.items()
+                            if key not in {'event', 'schema_version', 'run_id'}}
+        if error:
+            assert terminal['state'] == 'failed' and terminal['error']['code'] == error
+        else:
+            assert terminal['ok'], terminal
+        return terminal['result']
+
+    execute('list-trigger', error='list_not_selected')
+    setup = execute('set-list-cc', list_arguments(repeat_count))
+    assert setup['selected'] and setup['range'] == 'low'
+    assert setup['configuration']['repeat_count'] == repeat_count
+    assert execute('input-state')['input_state'] == 'OFF'
+    assert execute('list-save', {'slot': 7})['slot'] == 7
+    execute('list-exit')
+    assert execute('list-recall', {'slot': 7})['selected']
+    execute('input-on', {'confirm_input_on': True})
+    triggered = execute('list-trigger')
+    assert triggered['last_trigger']['sequence'] == 1 and triggered['selected']
+    assert execute('input-state')['input_state'] == 'ON'  # Job success never implies OFF.
+    assert execute('list-status') == triggered
+    execute('list-exit', error='input_not_off')
+    for command in ('set-list-cc', 'list-save', 'list-recall', 'list-trigger',
+                    'list-status', 'list-exit'):
+        arguments = (list_arguments(3) if command == 'set-list-cc' else
+                     {'slot': 1} if command in {'list-save', 'list-recall'} else {})
+        assert execute(command, arguments, dry_run=True)['hardware_access'] is False
+    assert execute('list-status') == triggered
+    execute('input-off')
+    assert execute('list-status')['selected']  # OFF and exit remain separate.
+    exited = execute('list-exit')
+    assert not exited['selected'] and exited['configured']
+    assert exited['configuration'] == setup['configuration']
+    assert set(http(ready['status_url'])[1]) == status_keys
+    assert http(ready['stop_url'], {'schema_version': 3})[0] == 202
+    assert p.wait(timeout=5) == 0
+    summary = out.get(timeout=5)
+    assert summary['event'] == 'summary' and summary['ok']
+
+
+def test_list_worker_invalid_arguments_are_rejected_before_job_creation(worker):
+    _, _, ready = worker
+    invalid = [request('set-list-cc', {**list_arguments(), **changes}) for changes in (
+        {'repeat_count': True}, {'repeat_count': '65536'}, {'repeat_count': 1.0},
+        {'repeat_count': 65537}, {'range': []}, {'steps': []}, {'file': 'client.json'},
+        {'steps': [{'current_a': '1', 'slew_a_per_us': .1, 'width_s': 1}] * 2},
+        {'steps': [{'current_a': 1, 'width_s': 1}] * 2},
+        {'steps': [{'current_a': 1, 'slew_a_per_us': .1, 'width_s': 1, 'extra': 2}] * 2},
+    )]
+    invalid += [request(command, {'slot': slot}) for command in ('list-save', 'list-recall')
+                for slot in (None, 0, 8, True, '1', 1.0)]
+    invalid += [request('list-trigger', {'wait_complete': True}),
+                request('list-status', {'file': 'client.json'}), request('set-list-cc')]
+    for payload in invalid:
+        code, rejected = http(ready['command_url'], payload)
+        assert code == 400 and rejected['worker_job_id'] is None
+    assert http(ready['status_url'])[1]['last_job'] is None
+
+
+@pytest.mark.parametrize('token,accepted', [('0.12345678901234567890123456789', True),
+                                          ('2.500000000000000001', False)])
+def test_list_worker_preserves_nested_numbers_through_cli_http_jsonl(worker, capsys, token, accepted):
+    from electronicload_tool_cli.cli import main
+    _, out, ready = worker
+    arguments = json.dumps(list_arguments()).replace('"slew_a_per_us": 0.1',
+                                                     f'"slew_a_per_us": {token}')
+    code = main(['send-command', '--url', ready['command_url'],
+                 '--worker-command', 'set-list-cc', '--arguments-json', arguments,
+                 '--context-json', json.dumps(request('input-state')['context']), '--json'])
+    response = json.loads(capsys.readouterr().out)
+    if accepted:
+        assert code == 0
+        terminal = wait_finished(out, response['worker_job_id'])
+        assert terminal['ok']
+        assert terminal['result']['configuration']['steps'][0]['slew_a_per_us'] == token
+        assert http(ready['status_url'])[1]['last_job']['result'] == terminal['result']
+    else:
+        assert code == 2 and response['worker_job_id'] is None
+        assert response['error']['code'] == 'no_matching_range'
+        assert http(ready['status_url'])[1]['last_job'] is None
+
+
+def test_list_worker_raw_json_rejects_duplicates_nonfinite_and_fractional_schema(worker):
+    from electronicload_tool_cli.worker_client import request as send
+    _, _, ready = worker
+    raw = json.dumps(request('set-list-cc', list_arguments()))
+    for body in (raw.replace('"range": "auto"', '"range":"low","range":"auto"'),
+                 raw.replace('"width_s": 1', '"width_s":1,"width_s":2'),
+                 raw.replace('"current_a": 0.5', '"current_a":NaN'),
+                 raw.replace('"schema_version": 3', '"schema_version":3.0'),
+                 raw.replace('"schema_version": 3', '"schema_version":3e0')):
+        code, rejected = send(ready['command_url'], '/command', body.encode())
+        assert code == 400 and rejected['worker_job_id'] is None
+    assert http(ready['status_url'])[1]['last_job'] is None
+
+
+def test_list_worker_stop_is_io_free_and_blocks_trigger_without_changing_input():
+    from electronicload_tool_cli.worker import Runtime
+    from electronicload_tool_core.errors import LoadError
+    runtime = Runtime(mode='simulate')
+    context = request('input-state')['context']
+    runtime._execute('set-list-cc', list_arguments(65536), context)
+    runtime._execute('input-on', {'confirm_input_on': True}, context)
+    triggered = runtime._execute('list-trigger', {}, context)
+    runtime.stop.set()
+    with pytest.raises(LoadError) as error:
+        runtime._execute('list-trigger', {}, context)
+    assert error.value.code == 'stopping'
+    assert runtime.simulator.input_on
+    assert runtime._execute('list-status', {}, context) == triggered
+    # The explicit safety action is still independent of Stop.
+    assert runtime._execute('input-off', {}, context)['input_state'] == 'OFF'
+
+
+@pytest.mark.parametrize('command', ['set-list-cc', 'list-save', 'list-recall',
+                                     'list-trigger', 'list-status', 'list-exit'])
+def test_list_live_worker_terminal_refuses_before_visa(command, monkeypatch, capsys):
+    from electronicload_tool_cli.worker import Runtime
+    from electronicload_tool_core import control
+    monkeypatch.setattr(control, 'open_session', lambda *_: pytest.fail('VISA opened'))
+    runtime = Runtime(mode='live', resource='USB0::0xFFFF::0x0001::SYNTHETIC::INSTR')
+    job = {'worker_job_id': 'list-live', 'job_id': None, 'command': command}
+    arguments = (list_arguments() if command == 'set-list-cc' else
+                 {'slot': 1} if command in {'list-save', 'list-recall'} else {})
+    runtime.run_job(job, arguments, {'mode': 'live'})
+    terminal = runtime.snapshot()['last_job']
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert terminal['state'] == 'failed' and not terminal['ok']
+    assert terminal['error']['code'] == 'unsupported_live_scope'
+    assert events[-1]['event'] == 'job_finished' and events[-1]['error'] == terminal['error']

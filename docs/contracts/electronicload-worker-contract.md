@@ -53,6 +53,12 @@ Common contracts remain authoritative for the HTTP and JSONL envelopes.
 | `transient-disable` | `{}` | Offline Transient control status |
 | `transient-trigger` | `{}` | Status with latest accepted software trigger |
 | `transient-status` | `{}` | Offline Transient control status |
+| `set-list-cc` | `{"range":"auto"\|"low"\|"high","repeat_count":<integer>,"steps":[{"current_a":<number>,"slew_a_per_us":<number>,"width_s":<number>},...]}` | Offline LIST status; selects CC + LIST |
+| `list-save` | `{"slot": <integer 1–7>}` | Save configured LIST; explicit overwrite allowed |
+| `list-recall` | `{"slot": <integer 1–7>}` | Recall stored LIST and select CC + LIST |
+| `list-trigger` | `{}` | LIST status with software-trigger record; no completion inference |
+| `list-status` | `{}` | Known simulated LIST configuration/mode/slot/trigger |
+| `list-exit` | `{}` | Confirmed Input OFF required; select FIXED, retain LIST data |
 | `input-on` | `{"confirm_input_on": true}` | Confirmed `input_state: "ON"` or failure/UNKNOWN |
 | `input-off` | `{}` | Confirmed `input_state: "OFF"` or failure/UNKNOWN |
 
@@ -167,6 +173,41 @@ At normal workflow completion, the Orchestrator must explicitly attempt
 `input-off` and confirm a successful OFF result before requesting Worker Stop.
 Trigger completion, Transient Disable, Stop acknowledgement, process exit and
 VISA close are not Input OFF confirmation.
+
+## Offline native LIST CC
+
+The complete LIST JSON, limits, status fields and mode guards are defined in
+the [LIST interface](../list-cc.md) ([繁體中文](../list-cc.zh-TW.md)). Worker
+arguments are that JSON object directly, without a wrapping file/configuration
+field. Only CLI loads files. Unknown/missing/duplicate fields, nonfinite or
+non-numeric Step values, invalid slots/counts and invalid complete-range
+requests fail with HTTP 400 before job creation. Integer fields require integer
+tokens; `1.0`, booleans and numeric strings are rejected. Decimal tokens survive
+CLI forwarding and HTTP parsing without binary-float rounding.
+
+LIST uses ordinary async jobs, Manifest schema 2 and Worker protocol 3.
+State-precondition failures yield failed `job_finished` events after HTTP 202
+admission. A valid LIVE LIST request is also admitted, then fails with
+`unsupported_live_scope` before opening VISA. Neither CLI contributor override
+nor Worker Input ON authorization grants physical LIST support.
+
+Input ON/OFF remain the shared commands. Setup/Recall/Save/Exit require
+confirmed OFF and disabled Transient. Setup/Recall select CC + LIST; they
+replace inactive Transient setup without disabling an active one. Fixed setup
+and Transient mutations require explicit LIST exit first. Save may operate on
+retained configuration after exit. Empty Recall fails without mutation.
+Trigger requires configured selected CC LIST, Input ON, Transient OFF, Short
+OFF and Worker not stopping. Every LIST mutation checks Stop. Status is
+read-only and returns independent in-memory snapshots with
+`state_source: "simulate"`; `GET /status` keeps its Worker/job shape.
+
+Dry-run validates data only, with `hardware_access: false`, and leaves active
+simulation untouched. The simulator has no timer/waveform or completion state.
+`job_finished` for Trigger never proves LIST completion, including finite
+repeat; 65536 means infinite. Input OFF and LIST exit are explicit and separate.
+Stop is I/O-free and does not change Input. The Orchestrator must attempt and
+confirm explicit Input OFF before Worker Stop on normal/error/user-stop exits;
+Input OFF does not prove the internal LIST engine aborted.
 
 ## Safety
 
