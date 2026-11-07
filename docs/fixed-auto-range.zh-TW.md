@@ -51,3 +51,11 @@ CV／CR／CW、Transient、LIST 維持 Product LIVE 封鎖；Transient／LIST
 比較預期設定。原有授權與安全檢查不變，包括 `VOLT:RANG:AUTO OFF`；這
 不代表已獲准執行實機測試。詳見 [Worker 契約](contracts/electronicload-worker-contract.md)
 與[受控驗證流程](../README.md#controlled-instrument-validation)。
+
+`scripts/preflight-cli.ps1 -FixedAutoOnly` 可只檢查這項離線功能；預設
+preflight 也包含這些檢查。統一的 `live-cli-check.ps1` 使用原有參數值，
+為 CC、CV、CR 增加 Input OFF 下的 Auto 設定與 Readback 案例。`-Current`
+保留原始小數字串交給 Core 驗證，不先轉成二進位浮點數。預期 Range
+來自 Core 的 dry-run 計畫，另經核准的實機執行時會比較回傳結果。手動案例
+與 ON／OFF 次數不變；CC 上限維持 2 A，超過 6 A 的 Auto High 選擇只在
+離線檢查。`-PlanOnly` 不存取硬體，也不會將計畫中的案例標成實機通過。

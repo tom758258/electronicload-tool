@@ -57,3 +57,14 @@ planning commands or comparing expected settings. It retains its existing
 authorization and safety gates, including `VOLT:RANG:AUTO OFF`; this is not
 permission to execute a physical trial. See the [Worker contract](contracts/electronicload-worker-contract.md)
 and [controlled validation procedure](../README.md#controlled-instrument-validation).
+
+`scripts/preflight-cli.ps1 -FixedAutoOnly` checks this feature offline; the
+default preflight includes it. The unified `live-cli-check.ps1` prepares
+additional Input OFF Auto setup/readback cases for CC, CV and CR using the
+existing parameter values. `-Current` preserves the original decimal token
+for Core validation rather than converting it to a binary float.
+Expected ranges come from Core's dry-run plan and
+are compared with results during an approved physical run. Manual cases and
+ON/OFF counts stay unchanged. The CC ceiling stays 2 A; Auto High above 6 A
+is checked offline. `-PlanOnly` never accesses hardware or marks planned cases
+as physically passed.

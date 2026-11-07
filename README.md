@@ -408,6 +408,12 @@ Then run the relevant checks:
 .\scripts\preflight-cli.ps1
 ```
 
+For a focused Fixed Auto CLI check, run `scripts/preflight-cli.ps1 -FixedAutoOnly`.
+It covers Auto Low/High in simulation/dry-run, exact-value refusal, required
+Range, explicit High, Product LIVE refusal for CV/CR and Manifest Range options.
+The default preflight includes these checks; `-TransientOnly` stays scoped to
+Transient and cannot be combined with `-FixedAutoOnly`.
+
 See [Testing Guidelines](docs/testing-guidelines.md) for verification scope and
 installed-wheel checks. Contributor changes follow [AGENTS.md](AGENTS.md).
 
@@ -467,6 +473,14 @@ sends two software triggers, queries control status, and disables after OFF.
 These checks do not measure waveform shape, timing, slew accuracy or completion;
 such measurements require an appropriate external instrument and procedure.
 
+Fixed Auto adds Input OFF setup/readback before the existing manual trials:
+CC uses the same `-Current`, CV uses `-Voltage`, and CR uses both
+`-ResistanceLow` and `-ResistanceHigh`. Each Auto result must match the range
+resolved by Core's offline plan. PlanOnly reports this as `expected_range` while
+the case remains NOT RUN. These checks add no Input ON/OFF cycles or higher
+setpoints. The CC script ceiling remains 2 A, so Auto High selection above 6 A
+is covered offline, without increasing physical loading for that test.
+
 For a separately approved, safe IT8812C + bounded source/DUT setup, run once
 in an interactive Windows console:
 
@@ -481,7 +495,8 @@ confirmation and failure handling apply to every selection.
 
 The CC trial defaults to 0.1 A, with a script-only maximum of 2 A.
 Both low/high configurations must satisfy the model range and programming resolution.
-The single `-Current` applies to both ranges; low is selected last for the
+`-Current` retains its original decimal token for Core validation, including
+the script's positive/2 A bounds. The single value applies to both ranges; low is selected last for the
 bounded ON/OFF trial. These limits do not alter normal product CC support.
 
 The complete LIVE validation requires **both** `-ConfirmWrites` and
@@ -494,7 +509,7 @@ or extra prompt are required.
 
 Every selection starts with Identify (precheck), Input State (must be OFF),
 and V/I/P measurement with Input OFF. When CC is selected, its steps are
-CC High and CC Low setting/readback (with OFF checks before writes);
+CC High, CC Auto and CC Low setting/readback (with OFF checks before writes);
 deliberate Input ON with physical confirmation;
 V/I/P measurement while ON; explicit Input OFF and confirmation; and a final
 independent Input State OFF query. Selected CV/CR/CW/Transient trials follow

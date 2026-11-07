@@ -11,7 +11,7 @@ param(
     [ValidateSet('usb')][string]$Connection = 'usb',
     [string]$Resource,
     [ValidateSet('system')][string]$Backend = 'system',
-    [double]$Current = 0.1,
+    [string]$Current = '0.1',
     [string[]]$Modes = @('cc', 'cv', 'cr', 'cw', 'transient-cc'),
     [double]$SourceCurrentLimitA,
     [double]$SourceVoltageLimitV,
@@ -48,7 +48,7 @@ if (-not (Test-Path -LiteralPath $python)) {
 }
 $perCommandDeadlineMs = 30000
 $totalDeadlineMs = $(if ($hasValidationModes) { 900000 } else { 240000 })
-$currentText = $Current.ToString([Globalization.CultureInfo]::InvariantCulture)
+$currentText = $Current
 $scriptCurrentCeilingA = 2.0
 $reportDirectory = $null
 $watch = $null
@@ -95,13 +95,16 @@ function Save-Report {
         }
         if ($entry.Contains('arguments')) { $case.arguments = $entry.arguments }
         if ($entry.Contains('error_code')) { $case.error_code = $entry.error_code }
+        if ($entry.Contains('expected_range')) { $case.expected_range = $entry.expected_range }
         if ($entry.status -eq 'PASS') {
             if ($entry.command -eq 'input-state' -or $entry.command -eq 'input-on' -or
                 $entry.command -eq 'input-off') {
                 $case.input_state = $entry.response.result.input_state
             }
-            if ($entry.command -eq 'set-cc') {
+            if ($entry.command -in @('set-cc', 'set-cv', 'set-cr')) {
                 $case.range = $entry.response.result.range
+            }
+            if ($entry.command -eq 'set-cc') {
                 $case.current_a = $entry.response.result.current_a
             }
             foreach ($field in @('configuration', 'enabled', 'validation_only', 'validation_scope',
@@ -337,12 +340,11 @@ try {
         throw 'Sync the repository .venv with uv before running validation.'
     }
     if ('cc' -in $selectedModes) {
-        if ([double]::IsNaN($Current) -or [double]::IsInfinity($Current) -or
-            $Current -le 0 -or $Current -gt $scriptCurrentCeilingA) {
-            throw 'Current must be positive and at most 2 A for this controlled test.'
+        # Preserve the original token; both manual trials and the script ceiling must pass.
+        & $python -c 'from electronicload_tool_core.control import validate_current; import sys; value = validate_current(sys.argv[1], sys.argv[2]); validate_current(sys.argv[1], sys.argv[3]); sys.exit(0 if 0 < value <= 2 else 2)' $currentText low high
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Current must be positive, at most 2 A, and valid for both CC ranges without rounding.'
         }
-        & $python -c 'from electronicload_tool_core.control import validate_current; import sys; validate_current(sys.argv[1], "low"); validate_current(sys.argv[1], "high")' $currentText
-        if ($LASTEXITCODE -ne 0) { throw 'Test current is invalid for both CC ranges.' }
         $report.prechecks.current = 'PASS'
     }
     $report.script_current_ceiling_a = $scriptCurrentCeilingA
@@ -366,6 +368,7 @@ try {
     }
     $highArgs = @('--current', $currentText, '--range', 'high')
     $lowArgs = @('--current', $currentText, '--range', 'low')
+    $autoArgs = @('--current', $currentText, '--range', 'auto')
     $onArgs = @('--confirm')
     $planned = @(
         @{name='identify';command='identify';args=@()},
@@ -375,6 +378,7 @@ try {
     if ('cc' -in $selectedModes) {
         $planned += @(
             @{name='set-cc-high';command='set-cc';args=$highArgs},
+            @{name='set-cc-auto';command='set-cc';args=$autoArgs},
             @{name='set-cc-low';command='set-cc';args=$lowArgs},
             @{name='input-on';command='input-on';args=$onArgs},
             @{name='measure-on';command='measure';args=@()},
@@ -413,6 +417,15 @@ try {
             foreach ($key in ($trial.settings.Keys | Sort-Object)) {
                 $setupArgs += @(('--' + ($key -replace '_','-')), ([string]$trial.settings[$key]))
             }
+            if ($prefix -in @('cv-low', 'cr-low', 'cr-high')) {
+                # Reuse the approved values, adding OFF-only setup without extra ON/OFF cycles.
+                $autoSetupArgs = @($setupArgs)
+                $autoSetupArgs[[Array]::IndexOf($autoSetupArgs, '--range') + 1] = 'auto'
+                $autoName = $(if ($trial.scope -eq 'cv') { 'cv-auto' } else {
+                    $prefix -replace '^cr-', 'cr-auto-'
+                })
+                $planned += @{name="$autoName-setup";command="set-$($trial.scope)";args=$autoSetupArgs}
+            }
             $expectedArgs = $scopeArgs + @('--validation-settings-json',
                 ($trial.settings | ConvertTo-Json -Compress))
             $planned += @{name="$prefix-setup";command="set-$($trial.scope)";args=$setupArgs}
@@ -440,6 +453,16 @@ try {
     foreach ($step in $planned) {
         $extras = @($step.args)
         $plan = Invoke-PlanCommand $step.command $extras
+        if ($step.command -in @('set-cc', 'set-cv', 'set-cr') -and 'auto' -in $step.args) {
+            # The Core plan owns selection; the script only compares later physical readback.
+            $resolved = $(if ($step.command -eq 'set-cc') { $plan.result.range } else {
+                $plan.result.expected_configuration.range
+            })
+            if ($resolved -cnotin @('low', 'high')) { throw 'Auto plan did not resolve a Range.' }
+            $step.expected_range = $resolved
+            $entry = $report.results | Where-Object { $_.name -eq $step.name } | Select-Object -First 1
+            $entry['expected_range'] = $resolved
+        }
         $report.plans += $plan
     }
     $report.prechecks.plan = 'PASS'
@@ -449,6 +472,7 @@ try {
     [void][IO.Directory]::CreateDirectory($reportDirectory)
     Write-Host "Plan: Identify, Input State, Measure; selected modes: $($selectedModes -join ', ')."
     Write-Host 'Every selected mode includes explicit ON/OFF and independent OFF confirmation.'
+    Write-Host 'Fixed Auto adds Input OFF setup/readback with the existing values; no extra ON/OFF cycles.'
     if ('transient-cc' -in $selectedModes) {
         Write-Host 'Transient: Continuous/Pulse/Toggle, Low/High/Auto, repeated triggers, control status and separate disable.'
         Write-Host 'Trigger/status/measure do not establish waveform shape, timing or completion.'
@@ -541,6 +565,9 @@ try {
         }
         if ($step.command -eq 'input-on' -and $result.result.input_state -cne 'ON') {
             Fail-Case $step.name 'input_on_not_confirmed' 'Input ON was not confirmed.'
+        }
+        if ($step.ContainsKey('expected_range') -and $result.result.range -cne $step.expected_range) {
+            Fail-Case $step.name 'readback_mismatch' 'Auto Range differs from the Core plan.'
         }
         if ($step.command -eq 'transient-status') {
             $expectedOn = $step.name.EndsWith('-status-on')

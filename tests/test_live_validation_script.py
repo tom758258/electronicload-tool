@@ -33,10 +33,11 @@ def run_script(tmp_path):
         directory = tmp_path / name.lower()
         directory.mkdir()
         env[name] = str(directory)
-    def run(extra, *, source_limits=True, mode_array=None):
-        args = [str(ROOT / 'scripts/live-cli-check.ps1'), '-Target', 'itech-it8812c',
-                '-Resource', RESOURCE]
-        if source_limits:
+    def run(extra, *, source_limits=True, mode_array=None, preflight=False):
+        args = ([str(ROOT / 'scripts/preflight-cli.ps1')] if preflight else
+                [str(ROOT / 'scripts/live-cli-check.ps1'), '-Target', 'itech-it8812c',
+                 '-Resource', RESOURCE])
+        if source_limits and not preflight:
             args += ['-SourceCurrentLimitA', '0.5', '-SourceVoltageLimitV', '12']
         args += extra
         if mode_array is None:
@@ -72,10 +73,12 @@ def assert_report(result, expected, modes):
     assert all(case['status'] == 'NOT RUN' for case in cases.values())
     expected_names = ['input-state', 'measure-off']
     if 'cc' in modes:
-        expected_names += ['set-cc-high', 'set-cc-low', 'input-on', 'measure-on',
+        expected_names += ['set-cc-high', 'set-cc-auto', 'set-cc-low', 'input-on', 'measure-on',
                            'input-off', 'final-input-state']
         assert cases['set-cc-high']['arguments'][-1] == 'high'
         assert cases['set-cc-low']['arguments'][-1] == 'low'
+        assert cases['set-cc-auto']['arguments'][-1] == 'auto'
+        assert cases['set-cc-auto']['expected_range'] == 'low'
     prefixes = {
         'cv': ('cv-low', 'cv-high'), 'cr': ('cr-low', 'cr-high'), 'cw': ('cw',),
         'transient-cc': ('transient-continuous-auto', 'transient-pulse-low',
@@ -90,6 +93,14 @@ def assert_report(result, expected, modes):
             steps = ['setup', 'enable', 'on', 'trigger-1', 'trigger-2', 'status-on',
                      'measure', 'off', 'disable', 'status-off', 'final-state']
         for prefix in trials:
+            if prefix in ('cv-low', 'cr-low', 'cr-high'):
+                automatic = 'cv-auto' if mode == 'cv' else prefix.replace('cr-', 'cr-auto-')
+                expected_names += [f'{automatic}-setup']
+                setup = cases[f'{automatic}-setup']
+                assert setup['command'] == f'set-{mode}'
+                assert setup['arguments'][setup['arguments'].index('--range') + 1] == 'auto'
+                expected_range = 'high' if prefix == 'cr-high' else 'low'
+                assert setup['expected_range'] == expected_range
             expected_names += [f'{prefix}-{step}' for step in steps]
             assert cases[f'{prefix}-setup']['command'] == f'set-{mode}'
             assert cases[f'{prefix}-off']['command'] == 'input-off'
@@ -112,6 +123,28 @@ def assert_report(result, expected, modes):
     assert RESOURCE not in summary
     for name in expected_names:
         assert f'{name}: NOT RUN' in summary
+    return report
+
+
+def test_fixed_auto_offline_preflight(run_script):
+    result = run_script(['-FixedAutoOnly'], preflight=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_fixed_auto_script_plan_uses_core_resolution_and_original_values(run_script):
+    resistance = '10.000000000000000001'
+    result = run_script(['-PlanOnly', '-Modes', 'cv,cr', '-Voltage', '12.0000',
+                         '-ResistanceHigh', resistance])
+    report = assert_report(result, 'PLAN ONLY', ('cv', 'cr'))
+    setup = next(case for case in report['cases'] if case['name'] == 'cr-auto-high-setup')
+    assert setup['arguments'][setup['arguments'].index('--resistance') + 1] == resistance
+
+
+@pytest.mark.parametrize('current', ['0', '3', '0.1000000000000000001'])
+def test_fixed_auto_script_current_bounds_and_no_rounding(run_script, current):
+    result = run_script(['-PlanOnly', '-Modes', 'cc', '-Current', current], source_limits=False)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert 'Report:' not in result.stdout
 
 
 @pytest.mark.parametrize('selection,modes', [

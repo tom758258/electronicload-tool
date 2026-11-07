@@ -210,6 +210,15 @@ validators or Fixed setup paths are affected. Run Ruff on modified Python files.
 Keep local evidence in `.tmp_tests/`; no full local suite, packaging acceptance
 or physical trial is required for this feature. Normal CI remains unchanged.
 
+For script coverage, run `scripts/preflight-cli.ps1 -FixedAutoOnly` and
+`tests/test_live_validation_script.py`. The script tests execute the real
+PowerShell preflight, PlanOnly and unattended-refusal paths with child-process
+VISA access blocked. Check Core-resolved `expected_range`, original decimal
+arguments, preserved ON/OFF counts, redacted reports and NOT RUN for planned
+hardware cases. Fixed Auto adds only OFF setup/readback to the existing
+bounded manual trials; never increase CC above the script ceiling to exercise
+Auto High physically. Missing PowerShell must be reported, not treated as PASS.
+
 ## Offline LIST CC focused checks
 
 Start with only LIST Core/CLI tests and LIST Worker cases:
