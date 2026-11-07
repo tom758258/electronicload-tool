@@ -22,6 +22,8 @@ LIST_COMMANDS = ("set-list-cc", "list-save", "list-recall", "list-trigger",
 LIST_FIELDS = frozenset({"range", "repeat_count", "steps"})
 CONTROL_COMMANDS = ("set-cc", "set-cv", "set-cr", "set-cw", "input-on", "input-off",
                     *TRANSIENT_COMMANDS, *LIST_COMMANDS)
+FIXED_RANGE_COMMANDS = ("set-cc", "set-cv", "set-cr")
+FIXED_RANGE_CHOICES = ("auto", "low", "high")
 TRANSIENT_FIELDS = frozenset({"transient_mode", "range", "level_a", "level_b", "rise_slew",
                               "fall_slew", "width_a", "width_b", "pulse_width"})
 # IT8800 User Manual V2.7, IT8812C table (printed p.40): slew bounds,
@@ -66,7 +68,7 @@ def validate_current(value: object, range_name: str) -> Decimal:
     current = _decimal(value)
     if current < 0 or current > Decimal(str(RANGE_LIMITS[range_name])):
         raise LoadError("current_out_of_range", "Current is outside the selected range.")
-    if current % RANGE_RESOLUTION[range_name] != 0:
+    if current != current.quantize(RANGE_RESOLUTION[range_name]):
         raise LoadError("invalid_current_resolution", "Current exceeds the range's programming resolution.")
     return current
 
@@ -305,7 +307,7 @@ def validate_voltage(value: object, range_name: str) -> Decimal:
         raise LoadError("invalid_voltage", "Voltage must be finite.")
     if not CV_MIN_VOLTAGE <= voltage <= CV_RANGE_LIMITS[range_name]:
         raise LoadError("voltage_out_of_range", "Voltage is outside the selected range.")
-    if voltage % CV_RESOLUTION[range_name] != 0:
+    if voltage != voltage.quantize(CV_RESOLUTION[range_name]):
         raise LoadError("invalid_voltage_resolution", "Voltage exceeds range resolution.")
     return voltage
 
@@ -339,6 +341,29 @@ def validate_resistance(value: object, range_name: str) -> Decimal:
         raise LoadError("resistance_out_of_range", "Resistance is outside the selected range.")
     # The published 16-bit resolution does not establish a fixed decimal step.
     return resistance
+
+
+def resolve_fixed_range(command: str, value: object, selection: str) -> str:
+    """Validate the original setpoint and resolve software Auto before any I/O."""
+    validators = {"set-cc": validate_current, "set-cv": validate_voltage,
+                  "set-cr": validate_resistance}
+    if command not in validators:
+        raise LoadError("argument_error", "Fixed range requires CC, CV or CR.")
+    if not isinstance(selection, str) or selection not in FIXED_RANGE_CHOICES:
+        raise LoadError("invalid_range", "Range must be auto, low or high.")
+    errors = {}
+    for candidate in ("low", "high") if selection == "auto" else (selection,):
+        try:
+            validators[command](value, candidate)
+        except LoadError as exc:
+            # Invalid types/nonfinite values retain their established error codes.
+            if selection != "auto" or exc.code in {
+                    "invalid_current", "invalid_voltage", "invalid_resistance"}:
+                raise
+            errors[candidate] = exc.code
+        else:
+            return candidate
+    raise LoadError("no_matching_range", "Neither range accepts the Fixed setpoint.", ranges=errors)
 
 
 def _offline_cr_settings(session) -> dict:
@@ -731,11 +756,11 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
     if transient is not None:
         raise LoadError("argument_error", "Transient parameters require set-transient-cc.")
     if command == "set-cc" and current is None:
-        raise LoadError("argument_error", "CC requires current and low/high range.")
+        raise LoadError("argument_error", "CC requires current and auto/low/high range.")
     if command == "set-cv" and voltage is None:
-        raise LoadError("argument_error", "CV requires voltage and low/high range.")
+        raise LoadError("argument_error", "CV requires voltage and auto/low/high range.")
     if command == "set-cr" and resistance is None:
-        raise LoadError("argument_error", "CR requires resistance and low/high range.")
+        raise LoadError("argument_error", "CR requires resistance and auto/low/high range.")
     if command == "set-cw" and (power is None or range_name is not None):
         raise LoadError("argument_error", "CW requires power and does not accept a range.")
     if mode == "live" and command == "set-cv":
@@ -749,12 +774,9 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
                         "CW LIVE programming requires hardware confirmation.")
     if mode == "live" and command not in PRODUCT_LIVE_COMMANDS and not validation:
         raise LoadError("unsupported_live_scope", "Control is pending LIVE validation.")
-    if command == "set-cc":
-        validate_current(current, range_name)
-    if command == "set-cv":
-        validate_voltage(voltage, range_name)
-    if command == "set-cr":
-        validate_resistance(resistance, range_name)
+    if command in FIXED_RANGE_COMMANDS:
+        value = {"set-cc": current, "set-cv": voltage, "set-cr": resistance}[command]
+        range_name = resolve_fixed_range(command, value, range_name)
     if command == "set-cw":
         validate_power(power)
     if mode == "dry-run":

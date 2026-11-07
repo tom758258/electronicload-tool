@@ -135,7 +135,8 @@ def test_transient_preserves_slew_precision_in_setup_and_status():
     assert preview['rise_slew_a_per_us'] == slew
 
 
-def test_transient_guards_do_not_perform_hidden_actions():
+@pytest.mark.parametrize('selection', ['low', 'auto'])
+def test_transient_guards_do_not_perform_hidden_actions(selection):
     sim = ControlSimulator()
 
     def refused(command, code, **kwargs):
@@ -153,7 +154,7 @@ def test_transient_guards_do_not_perform_hidden_actions():
     run(sim, 'transient-enable')
     refused('transient-trigger', 'input_not_on')
     refused('set-transient-cc', 'transient_enabled', transient=config())
-    refused('set-cc', 'transient_enabled', current='.1', range_name='low')
+    refused('set-cc', 'transient_enabled', current='.1', range_name=selection)
     run(sim, 'input-on', confirmed=True)
     for command in ('transient-enable', 'transient-disable'):
         refused(command, 'input_not_off')

@@ -12,7 +12,8 @@ from electronicload_tool_core.errors import LoadError
 from electronicload_tool_core.identity import MODEL_ID
 from electronicload_tool_core.readonly import COMMANDS, execute as read_execute
 from electronicload_tool_core.control import (CONTROL_COMMANDS, execute as control_execute,
-                                              validate_power, TRANSIENT_FIELDS, LIST_COMMANDS)
+                                              validate_power, TRANSIENT_FIELDS, LIST_COMMANDS,
+                                              FIXED_RANGE_COMMANDS, FIXED_RANGE_CHOICES)
 from .json_input import decode_list_json
 from .worker import manifest, run_worker
 from .worker_client import request as worker_request, wait_ready
@@ -33,6 +34,15 @@ def _emit_error(error: LoadError, command: str | None, mode: str, json_output: b
         if error.details:
             print(json.dumps(error.details), file=sys.stderr)
     return error.exit_code
+
+
+def _current_token(value: str) -> str:
+    # Retain the parser's numeric syntax check without rounding the setpoint.
+    try:
+        float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("Current must be numeric.") from exc
+    return value
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -94,14 +104,14 @@ def main(argv: list[str] | None = None) -> int:
             sub.add_argument("--validation-settings-json",
                              help="Expected complete setup for validation enable, ON and trigger.")
         if name == "set-cc":
-            sub.add_argument("--current", required=True, type=float)
-            sub.add_argument("--range", required=True, choices=("low", "high"))
+            sub.add_argument("--current", required=True, type=_current_token)
+            sub.add_argument("--range", required=True, choices=FIXED_RANGE_CHOICES)
         elif name == "set-cv":
             sub.add_argument("--voltage", required=True)
-            sub.add_argument("--range", required=True, choices=("low", "high"))
+            sub.add_argument("--range", required=True, choices=FIXED_RANGE_CHOICES)
         elif name == "set-cr":
             sub.add_argument("--resistance", required=True, help="Resistance in ohms (offline only).")
-            sub.add_argument("--range", required=True, choices=("low", "high"))
+            sub.add_argument("--range", required=True, choices=FIXED_RANGE_CHOICES)
         elif name == "set-cw":
             sub.add_argument("--power", required=True, help="Power in watts (offline only).")
         elif name == "set-transient-cc":
@@ -160,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
                         "arguments": arguments, "context": context}
                 if args.job_id is not None:
                     body["job_id"] = args.job_id
-                if args.worker_command in {"set-transient-cc", *LIST_COMMANDS}:
+                if args.worker_command in {*FIXED_RANGE_COMMANDS, "set-transient-cc", *LIST_COMMANDS}:
                     # Forward original numeric tokens; Core in the Worker validates them.
                     # Parsing above already guarantees a complete JSON value.
                     del body["arguments"]

@@ -9,8 +9,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
 from electronicload_tool_core.control import (CONTROL_COMMANDS, execute as control_execute,
-                                              validate_current, validate_voltage,
-                                              validate_resistance, validate_power,
+                                              resolve_fixed_range, validate_power,
+                                              FIXED_RANGE_COMMANDS, FIXED_RANGE_CHOICES,
                                               TRANSIENT_FIELDS, validate_transient_cc,
                                               LIST_COMMANDS, LIST_FIELDS,
                                               validate_list_cc, validate_list_slot)
@@ -39,7 +39,10 @@ def manifest(version: str) -> dict:
             "worker_protocol": {"compatibility_policy": "v3-only", "schema_versions": [3]},
             "execution": {"model": "multi_job", "context_binding": "per_command"},
             "features": {"common.async_jobs": {"contract_version": 1}},
-            "commands": {command: {"kind": "async_job"} for command in COMMANDS}}
+            "commands": {command: {"kind": "async_job",
+                                   **({"range_options": list(FIXED_RANGE_CHOICES)}
+                                      if command in FIXED_RANGE_COMMANDS else {})}
+                         for command in COMMANDS}}
 
 
 class Runtime:
@@ -196,19 +199,19 @@ def _arguments(command, raw, runtime):
         validate_transient_cc(raw)
     if command == "set-cc":
         if (set(raw) != permitted or not isinstance(raw["range"], str)
-                or type(raw["current"]) not in (int, float)):
+                or type(raw["current"]) not in (int, float, Decimal)):
             raise LoadError("argument_error", "CC requires current and range.")
-        validate_current(raw["current"], raw["range"])
+        resolve_fixed_range(command, raw["current"], raw["range"])
     if command == "set-cv":
         if (set(raw) != permitted or not isinstance(raw["range"], str)
-                or type(raw["voltage"]) not in (int, float)):
+                or type(raw["voltage"]) not in (int, float, Decimal)):
             raise LoadError("argument_error", "CV requires voltage and range.")
-        validate_voltage(raw["voltage"], raw["range"])
+        resolve_fixed_range(command, raw["voltage"], raw["range"])
     if command == "set-cr":
         if (set(raw) != permitted or not isinstance(raw["range"], str)
-                or type(raw["resistance"]) not in (int, float)):
+                or type(raw["resistance"]) not in (int, float, Decimal)):
             raise LoadError("argument_error", "CR requires resistance and range.")
-        validate_resistance(raw["resistance"], raw["range"])
+        resolve_fixed_range(command, raw["resistance"], raw["range"])
     if command == "set-cw":
         if set(raw) != permitted or type(raw["power"]) not in (int, float, Decimal):
             raise LoadError("argument_error", "CW requires power as a JSON number.")
@@ -247,8 +250,9 @@ def _handler(runtime):
                     if type(value["arguments"].get("power")) is float:
                         value["arguments"]["power"] = json.loads(
                             body, parse_float=Decimal)["arguments"]["power"]
-                if (value.get("command") == "set-transient-cc"
+                if (value.get("command") in (*FIXED_RANGE_COMMANDS, "set-transient-cc")
                         and isinstance(value.get("arguments"), dict)):
+                    # Fixed and Transient validation must see the original decimal tokens.
                     value["arguments"] = json.loads(body, parse_float=Decimal)["arguments"]
                 if value.get("command") in LIST_COMMANDS:
                     # Preserve nested numeric tokens; reject duplicate fields/nonfinite JSON.

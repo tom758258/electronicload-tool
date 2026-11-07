@@ -44,9 +44,9 @@ Common contracts remain authoritative for the HTTP and JSONL envelopes.
 | `identify` | `{}` | Physical/simulated identity |
 | `input-state` | `{}` | `input_state` |
 | `measure` | `{}` | `voltage_v`, `current_a`, `power_w` |
-| `set-cc` | `{"current": <number>, "range": "low"\|"high"}` | Four confirmed CC settings, physical input stays OFF |
-| `set-cv` | `{"voltage": <number>, "range": "low"\|"high"}` | Offline-only CV setpoint simulation; LIVE refused |
-| `set-cr` | `{"resistance": <number>, "range": "low"\|"high"}` | Offline-only CR setpoint/range simulation; LIVE refused |
+| `set-cc` | `{"current": <number>, "range": "auto"\|"low"\|"high"}` | Four confirmed CC settings, physical input stays OFF |
+| `set-cv` | `{"voltage": <number>, "range": "auto"\|"low"\|"high"}` | Offline-only CV setpoint simulation; LIVE refused |
+| `set-cr` | `{"resistance": <number>, "range": "auto"\|"low"\|"high"}` | Offline-only CR setpoint/range simulation; LIVE refused |
 | `set-cw` | `{"power": <number>}` | Offline-only Fixed CW setpoint simulation; LIVE refused |
 | `set-transient-cc` | Complete mode-specific configuration below | Offline Transient control status |
 | `transient-enable` | `{}` | Offline Transient control status |
@@ -72,6 +72,32 @@ A live request uses `context: {"mode": "live"}` with optional matching
 `expected_model_id`. Simulation/dry-run uses the canonical
 `planning_model_id: "itech-it8812c"`; the Worker startup mode constrains the
 request mode. Worker does **not** allow the contributor-validation override.
+
+## Fixed Software Auto Range
+
+Fixed `set-cc`, `set-cv` and `set-cr` require `range: "auto"|"low"|"high"`;
+omission is still HTTP 400. Core tries Low, then High, using the original
+setpoint and the existing mode's bounds/resolution. If neither candidate matches,
+`no_matching_range` includes a `details.ranges` error code for each candidate,
+before job creation. Invalid numeric types/nonfinite values retain their
+existing validation errors. Explicit Low/High never fall back to another range.
+Fixed CW still rejects any Range argument.
+
+Successful results, including `dry_run`, contain the resolved `range: "low"|"high"`.
+Decimal numeric tokens are preserved through `send-command` and HTTP validation;
+values are never rounded or clamped. Software Auto selects once during setup,
+before VISA access, and never switches range during Input ON. The same
+simulated Worker retains the resolved settings across jobs; dry-run does not
+inspect or mutate those settings. See [bounds and examples](../fixed-auto-range.md)
+([繁體中文](../fixed-auto-range.zh-TW.md)).
+
+Manifest schema 2 adds the tool-specific `range_options: ["auto", "low", "high"]`
+to these three command entries beside the unchanged `kind: "async_job"`.
+Consumers may use this additive capability field for selection; it is not a
+LIVE support declaration. Common Worker protocol 3, HTTP admission/state error
+timing, result fields, JSONL envelopes, lifecycle and exits remain unchanged.
+CV/CR/CW, Transient and LIST remain Product LIVE blocked. Auto uses the existing
+Fixed CC commands, readbacks and Input OFF/ON gates.
 
 ## Offline Transient CC
 
@@ -217,16 +243,16 @@ Safety Config or extra DUT current ceiling. Model range/current checks do not
 guarantee DUT safety or enforce the full voltage/power operating envelope.
 
 Fixed CV can be planned and simulated, with published IT8812C Low
-0.1–18 V (1 mV) / High 0.1–120 V (10 mV) validation and explicit range
-selection. Physical CV range SCPI and readback semantics remain unverified.
+0.1–18 V (1 mV) / High 0.1–120 V (10 mV) validation and required
+Auto/Low/High selection. Physical CV range SCPI and readback semantics remain unverified.
 LIVE `set-cv` and LIVE CV `input-on` are blocked, including when an
 operator uses the contributor-validation CLI override; the simulated CV
 readback does not certify hardware support.
 
-Fixed CR supports `simulate` and `dry_run` with an explicit Low **0.05–10 Ω**
-or High **10–7,500 Ω** range. Both ranges include 10 Ω. `resistance` must be
+Fixed CR supports `simulate` and `dry_run` with Auto, Low **0.05–10 Ω**
+or High **10–7,500 Ω**. Both ranges include 10 Ω; Auto prefers Low. `resistance` must be
 a finite JSON number (not a boolean or numeric string); no decimal-place or
-fixed-step restriction, rounding or automatic range choice is applied. The
+fixed-step restriction or rounding is applied. The
 published 16-bit resolution does not define a confirmed decimal step.
 
 The result contains `resistance_ohm` and `range`. Simulation also reports
