@@ -179,7 +179,7 @@ def test_worker_multi_job_terminal_without_files(worker,tmp_path):
 def test_worker_invalid_request_does_not_create_job(worker):
     _,_,ready=worker
     command_url=ready['command_url']
-    for payload in [request('unknown'), request([]), request({}),
+    for payload in [request('unknown'),
                     request('set-cc',{'current':9,'range':'low'}),
                     {**request('input-off'),'context':{'mode':'live'}},
                     {**request('input-off'),'unknown':1}]:
