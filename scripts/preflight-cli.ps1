@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([switch]$TransientOnly)
+param([switch]$TransientOnly, [switch]$FixedAutoOnly)
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -9,8 +9,101 @@ if (-not (Test-Path -LiteralPath $cli)) {
 }
 
 try {
+    if ($TransientOnly -and $FixedAutoOnly) {
+        throw 'Select only one of -TransientOnly and -FixedAutoOnly.'
+    }
     if (-not (Test-Path -LiteralPath $cli)) {
         throw 'Sync the repository .venv with uv before running preflight.'
+    }
+    if (-not $TransientOnly) {
+        $fixedCases = @(
+            @{ Command = 'set-cc'; Field = 'current'; Low = '2.5'; High = '10' }
+            @{ Command = 'set-cv'; Field = 'voltage'; Low = '12'; High = '24' }
+            @{ Command = 'set-cr'; Field = 'resistance'; Low = '10'; High = '100' }
+        )
+        foreach ($case in $fixedCases) {
+            $command = $case.Command
+            foreach ($mode in @('simulate', 'dry-run')) {
+                foreach ($range in @('low', 'high')) {
+                    $value = $case[$range]
+                    $setting = @(('--' + $case.Field), $value)
+                    $output = & $cli $command "--$mode" @setting --range auto --json
+                    $code = $LASTEXITCODE
+                    $result = ($output -join "`n") | ConvertFrom-Json
+                    if ($code -ne 0 -or $result.ok -ne $true -or $result.result.range -cne $range) {
+                        throw "$command Auto $range $mode failed."
+                    }
+                    if ($mode -eq 'simulate' -and $result.result.input_state -cne 'OFF') {
+                        throw "$command Auto must leave Input OFF."
+                    }
+                    if ($mode -eq 'dry-run' -and $result.result.hardware_access -ne $false) {
+                        throw "$command Auto dry-run must not access hardware."
+                    }
+                    Write-Host "PASS: $command Auto $range $mode"
+                }
+            }
+            $setting = @(('--' + $case.Field), $case.Low)
+            $output = & $cli $command --dry-run @setting --range high --json
+            $code = $LASTEXITCODE
+            $result = ($output -join "`n") | ConvertFrom-Json
+            if ($code -ne 0 -or $result.result.range -cne 'high') {
+                throw "$command explicit High must stay High."
+            }
+            $output = & $cli $command --dry-run @setting --json
+            $code = $LASTEXITCODE
+            $result = ($output -join "`n") | ConvertFrom-Json
+            if ($code -ne 2 -or $result.error.code -cne 'argument_error') {
+                throw "$command Range must remain required."
+            }
+        }
+        $fixedRefusals = @(
+            @{ Command = 'set-cc'; Field = 'current'; Value = '6.0001' }
+            @{ Command = 'set-cc'; Field = 'current'; Value = '1.0000000000000000001' }
+            @{ Command = 'set-cv'; Field = 'voltage'; Value = '18.001' }
+            @{ Command = 'set-cv'; Field = 'voltage'; Value = '12.000000000000000001' }
+            @{ Command = 'set-cr'; Field = 'resistance'; Value = '0.049999999999999999' }
+            @{ Command = 'set-cr'; Field = 'resistance'; Value = '7500.000000000000001' }
+        )
+        foreach ($case in $fixedRefusals) {
+            $setting = @(('--' + $case.Field), $case.Value)
+            $output = & $cli $case.Command --dry-run @setting --range auto --json
+            $code = $LASTEXITCODE
+            $result = ($output -join "`n") | ConvertFrom-Json
+            if ($code -ne 2 -or $result.ok -ne $false -or
+                $result.error.code -cne 'no_matching_range' -or
+                -not $result.error.details.ranges.low -or -not $result.error.details.ranges.high) {
+                throw "$($case.Command) Auto must reject the original value $($case.Value)."
+            }
+            Write-Host "PASS: $($case.Command) Auto exact-value refusal"
+        }
+        # Fictional resource only: Auto must not bypass Product LIVE refusal.
+        foreach ($case in @($fixedCases | Where-Object { $_.Command -ne 'set-cc' })) {
+            foreach ($override in @($false, $true)) {
+                $extraArgs = @()
+                if ($override) { $extraArgs += '--validation-allow-pending-live-support' }
+                $setting = @(('--' + $case.Field), $case.Low)
+                $output = & $cli $case.Command @setting --range auto @extraArgs `
+                    --resource 'USB0::0xFFFF::0x0001::SYNTHETIC::INSTR' --json
+                $code = $LASTEXITCODE
+                $result = ($output -join "`n") | ConvertFrom-Json
+                if ($code -ne 2 -or $result.error.code -cne 'unsupported_live_scope') {
+                    throw "$($case.Command) Auto LIVE refusal failed."
+                }
+            }
+        }
+        $manifest = ((& $cli manifest --json) -join "`n") | ConvertFrom-Json
+        if ($LASTEXITCODE -ne 0 -or $manifest.schema_version -ne 2 -or
+            $manifest.worker_protocol.schema_versions[0] -ne 3) {
+            throw 'Fixed Auto must retain Manifest 2 and Worker protocol 3.'
+        }
+        foreach ($case in $fixedCases) {
+            $entry = $manifest.commands.($case.Command)
+            if ($entry.kind -cne 'async_job' -or ($entry.range_options -join ',') -cne 'auto,low,high') {
+                throw "$($case.Command) Manifest Range options failed."
+            }
+        }
+        Write-Host 'PASS: Fixed Auto required Range, manual High, LIVE refusal and Manifest'
+        if ($FixedAutoOnly) { exit 0 }
     }
     if (-not $TransientOnly) {
     foreach ($command in @('identify', 'input-state', 'measure')) {

@@ -70,6 +70,81 @@ def request(command,arguments=None):
             'context':{'mode':'simulate','planning_model_id':'itech-it8812c'}}
 
 
+def test_fixed_auto_worker_resolved_state_and_dry_run(worker):
+    _, out, ready = worker
+
+    def execute(command, arguments=None, dry_run=False, error=None):
+        payload = request(command, arguments)
+        if dry_run:
+            payload['context']['mode'] = 'dry_run'
+        code, accepted = http(ready['command_url'], payload)
+        assert code == 202
+        terminal = wait_finished(out, accepted['worker_job_id'])
+        snapshot = http(ready['status_url'])[1]['last_job']
+        assert snapshot == {key: terminal[key] for key in snapshot}
+        if error:
+            assert terminal['error']['code'] == error
+            return
+        assert terminal['ok'] and terminal['state'] == 'succeeded'
+        return terminal['result']
+
+    for command, field, low, high in [
+        ('set-cc', 'current', 2.5, 10), ('set-cv', 'voltage', 12, 24),
+        ('set-cr', 'resistance', 10, 100),
+    ]:
+        for value, expected in [(low, 'low'), (high, 'high')]:
+            result = execute(command, {field: value, 'range': 'auto'})
+            assert result['range'] == expected and result['input_state'] == 'OFF'
+        # Planning another range must not replace the active High setup.
+        plan = execute(command, {field: low, 'range': 'auto'}, dry_run=True)
+        assert plan['range'] == 'low' and plan['hardware_access'] is False
+        on = execute('input-on', {'confirm_input_on': True})
+        assert on['input_state'] == 'ON' and on['range'] == 'high'
+        execute(command, {field: low, 'range': 'auto'}, error='input_not_off')
+        assert execute('input-state')['input_state'] == 'ON'
+        assert execute('input-off')['input_state'] == 'OFF'
+
+
+@pytest.mark.parametrize('command,field,value', [
+    ('set-cc', 'current', 2), ('set-cv', 'voltage', 12), ('set-cr', 'resistance', 10),
+])
+def test_fixed_auto_worker_argument_refusals_create_no_job(worker, command, field, value):
+    _, _, ready = worker
+    for arguments in ({field: value}, {'range': 'auto'},
+                      {field: value, 'range': None}, {field: value, 'range': []},
+                      {field: value, 'range': 'unknown'},
+                      {field: True, 'range': 'auto'}, {field: str(value), 'range': 'auto'},
+                      {field: None, 'range': 'auto'}, {field: value, 'range': 'auto', 'extra': 1}):
+        code, rejected = http(ready['command_url'], request(command, arguments))
+        assert code == 400 and rejected['worker_job_id'] is None
+    assert http(ready['status_url'])[1]['last_job'] is None
+
+
+@pytest.mark.parametrize('command,field,token', [
+    ('set-cc', 'current', '1.00000000000000000000000000000001'),
+    ('set-cv', 'voltage', '5.0000000000000000001'),
+    ('set-cr', 'resistance', '7500.00000000000000001'),
+])
+def test_fixed_auto_worker_and_cli_preserve_decimal_refusal(worker, capsys, command, field, token):
+    from electronicload_tool_cli.cli import main
+    from electronicload_tool_cli.worker_client import request as client_request
+    _, _, ready = worker
+    arguments = '{"' + field + '":' + token + ',"range":"auto"}'
+    # Use a complete request with one arguments field, as an external HTTP caller would.
+    payload = request(command)
+    del payload['arguments']
+    body = (json.dumps(payload)[:-1] + ',"arguments":' + arguments + '}').encode()
+    code, rejected = client_request(ready['command_url'], '/command', body)
+    assert code == 400 and rejected['error']['code'] == 'no_matching_range'
+    assert main(['send-command', '--url', ready['command_url'], '--worker-command', command,
+                 '--arguments-json', arguments, '--context-json', json.dumps(payload['context']),
+                 '--json']) == 2
+    rejected = json.loads(capsys.readouterr().out)
+    assert rejected['error']['code'] == 'no_matching_range'
+    assert rejected['worker_job_id'] is None
+    assert http(ready['status_url'])[1]['last_job'] is None
+
+
 def test_worker_multi_job_terminal_without_files(worker,tmp_path):
     p,out,ready=worker
     status_url,command_url,stop_url=ready['status_url'],ready['command_url'],ready['stop_url']
@@ -104,7 +179,8 @@ def test_worker_multi_job_terminal_without_files(worker,tmp_path):
 def test_worker_invalid_request_does_not_create_job(worker):
     _,_,ready=worker
     command_url=ready['command_url']
-    for payload in [request('unknown'),request('set-cc',{'current':9,'range':'low'}),
+    for payload in [request('unknown'),
+                    request('set-cc',{'current':9,'range':'low'}),
                     {**request('input-off'),'context':{'mode':'live'}},
                     {**request('input-off'),'unknown':1}]:
         assert http(command_url,payload)[0]==400
@@ -338,7 +414,7 @@ def test_cr_worker_validation_and_confirmed_input_cycle(worker):
         {'resistance': True, 'range': 'low'},
         {'resistance': float('nan'), 'range': 'low'},
         {'resistance': 5, 'range': []},
-        {'resistance': 5, 'range': 'auto'},
+        {'resistance': 5, 'range': 'unknown'},
         {'resistance': 9, 'range': 'high'},
         {'resistance': 5, 'range': 'low', 'extra': 1},
     ):

@@ -34,7 +34,10 @@ def _configuration(scope, settings):
     if set(settings) != required:
         raise LoadError("argument_error", "Supply exactly the selected scope's setup fields.")
     if scope != "cw" and not isinstance(settings["range"], str):
-        raise LoadError("invalid_range", "Range must be low or high.")
+        raise LoadError("invalid_range", "Range must be auto, low or high.")
+    if scope != "cw":
+        settings = {**settings, "range": c.resolve_fixed_range(
+            "set-" + scope, settings[field], settings["range"])}
     with localcontext() as context:
         context.prec = max(28, len(str(settings[field])) + 8)
         value = (validator(settings[field]) if scope == "cw"

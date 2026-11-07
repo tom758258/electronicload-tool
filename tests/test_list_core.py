@@ -150,7 +150,8 @@ def test_list_invalid_slots_are_rejected(slot, command):
     assert error.value.code == "invalid_list_slot"
 
 
-def test_list_guards_preserve_state_and_require_explicit_mode_exit():
+@pytest.mark.parametrize('selection', ['low', 'auto'])
+def test_list_guards_preserve_state_and_require_explicit_mode_exit(selection):
     sim = ControlSimulator()
 
     def refused(command, code, **arguments):
@@ -172,9 +173,9 @@ def test_list_guards_preserve_state_and_require_explicit_mode_exit():
     run(sim, "transient-disable")
     run(sim, "set-list-cc", list_configuration=configuration())
     refused("list-trigger", "input_not_on")
-    for command, arguments in (("set-cc", {"current": .1, "range_name": "low"}),
-                               ("set-cv", {"voltage": 5, "range_name": "low"}),
-                               ("set-cr", {"resistance": 5, "range_name": "low"}),
+    for command, arguments in (("set-cc", {"current": .1, "range_name": selection}),
+                               ("set-cv", {"voltage": 5, "range_name": selection}),
+                               ("set-cr", {"resistance": 5, "range_name": selection}),
                                ("set-cw", {"power": 1}),
                                ("set-transient-cc", {"transient": transient}),
                                ("transient-enable", {}), ("transient-disable", {})):

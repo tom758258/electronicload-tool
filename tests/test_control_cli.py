@@ -7,6 +7,43 @@ from electronicload_tool_cli.cli import main
 from electronicload_tool_cli import cli
 
 
+@pytest.mark.parametrize('mode', ['simulate', 'dry-run'])
+@pytest.mark.parametrize('command,field,value,expected', [
+    ('set-cc', 'current', '2.5', 'low'), ('set-cc', 'current', '10', 'high'),
+    ('set-cv', 'voltage', '12', 'low'), ('set-cv', 'voltage', '24', 'high'),
+    ('set-cr', 'resistance', '10', 'low'), ('set-cr', 'resistance', '100', 'high'),
+])
+def test_fixed_auto_cli_json(capsys, mode, command, field, value, expected):
+    assert main([command, '--' + mode, '--' + field, value, '--range', 'auto', '--json']) == 0
+    output = capsys.readouterr()
+    assert json.loads(output.out)['result']['range'] == expected
+    assert output.err == ''
+
+
+@pytest.mark.parametrize('command,field,value', [
+    ('set-cc', 'current', '1'), ('set-cv', 'voltage', '5'), ('set-cr', 'resistance', '10'),
+])
+def test_fixed_range_still_required_and_help_lists_auto(capsys, command, field, value):
+    assert main([command, '--dry-run', '--' + field, value, '--json']) == 2
+    assert json.loads(capsys.readouterr().out)['error']['code'] == 'argument_error'
+    with pytest.raises(SystemExit) as error:
+        main([command, '--help'])
+    assert error.value.code == 0
+    assert '{auto,low,high}' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('selection,code', [('auto', 'no_matching_range'),
+                                          ('low', 'invalid_current_resolution'),
+                                          ('high', 'invalid_current_resolution')])
+def test_fixed_cc_cli_preserves_original_decimal(capsys, selection, code):
+    assert main(['set-cc', '--dry-run', '--current', '1.0000000000000000001',
+                 '--range', selection, '--json']) == 2
+    assert json.loads(capsys.readouterr().out)['error']['code'] == code
+    assert main(['set-cc', '--dry-run', '--current', 'text',
+                 '--range', selection, '--json']) == 2
+    assert json.loads(capsys.readouterr().out)['error']['code'] == 'argument_error'
+
+
 def test_new_simulation_and_json(capsys):
     assert main(['set-cc','--simulate','--current','1.5','--range','low','--json'])==0
     p=json.loads(capsys.readouterr().out)
@@ -37,7 +74,9 @@ def test_manifest_static(capsys):
     assert p['worker_protocol']['schema_versions']==[3]
     assert p['execution']=={'model':'multi_job','context_binding':'per_command'}
     assert p['features']=={'common.async_jobs':{'contract_version':1}}
-    assert p['commands']['set-cr'] == {'kind': 'async_job'}
+    for command in ('set-cc', 'set-cv', 'set-cr'):
+        assert p['commands'][command] == {
+            'kind': 'async_job', 'range_options': ['auto', 'low', 'high']}
     assert p['commands']['set-cw'] == {'kind': 'async_job'}
 
 
@@ -118,7 +157,7 @@ def test_cr_cli_offline_json(capsys, mode, range_name, resistance):
 @pytest.mark.parametrize('arguments,code', [
     (['--resistance', '5'], 'argument_error'),
     (['--range', 'low'], 'argument_error'),
-    (['--resistance', '5', '--range', 'auto'], 'argument_error'),
+    (['--resistance', '5', '--range', 'unknown'], 'argument_error'),
     (['--resistance', 'NaN', '--range', 'low'], 'invalid_resistance'),
     (['--resistance', 'text', '--range', 'low'], 'invalid_resistance'),
     (['--resistance', '10.000000000000000001', '--range', 'low'], 'resistance_out_of_range'),

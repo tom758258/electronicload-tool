@@ -68,8 +68,9 @@ def run(command, scope='transient-cc', **kwargs):
     return control.execute(command, resource=RESOURCE, hardware_validation=scope, **kwargs)
 
 
-TRIALS = [('cv', {'voltage': '5', 'range': r}) for r in ('low', 'high')] + [
-    ('cr', {'resistance': '10' if r == 'low' else '1000', 'range': r}) for r in ('low', 'high')
+TRIALS = [('cv', {'voltage': '5', 'range': r}) for r in ('auto', 'low', 'high')] + [
+    ('cr', {'resistance': '1000' if r == 'high' else '10', 'range': r})
+    for r in ('auto', 'low', 'high')
 ] + [('cw', {'power': '1'})] + [
     ('transient-cc', transient(m, r)) for m in ('continuous', 'pulse', 'toggle')
     for r in ('auto', 'low', 'high')
@@ -108,6 +109,31 @@ def test_validation_complete_cycles_preserve_explicit_off(monkeypatch, scope, se
         assert not fake.transient
     assert fake.calls.count('INP ON') == fake.calls.count('INP OFF') == 1
     assert not any(command in fake.calls for command in ('*RST', 'SYST:ERR?', 'SYST:LOC'))
+
+
+@pytest.mark.parametrize('scope,field,value,range_name', [
+    ('cv', 'voltage', '12', 'low'), ('cv', 'voltage', '24', 'high'),
+    ('cr', 'resistance', '10', 'low'), ('cr', 'resistance', '100', 'high'),
+])
+def test_fixed_auto_validation_plan_matches_manual(scope, field, value, range_name):
+    automatic = setup(scope, {field: value, 'range': 'auto'}, mode='dry-run')
+    manual = setup(scope, {field: value, 'range': range_name}, mode='dry-run')
+    assert automatic == manual
+    assert automatic['expected_configuration']['range'] == range_name
+    assert automatic['hardware_access'] is False
+    if scope == 'cv':
+        assert 'VOLT:RANG:AUTO OFF' in automatic['planned_writes']
+
+
+@pytest.mark.parametrize('scope,field,value', [('cv', 'voltage', '18.001'),
+                                             ('cr', 'resistance', '8000')])
+def test_fixed_auto_validation_refuses_before_visa(monkeypatch, scope, field, value):
+    fake = ValidationFake()
+    session(fake, monkeypatch)
+    with pytest.raises(LoadError) as error:
+        setup(scope, {field: value, 'range': 'auto'})
+    assert error.value.code == 'no_matching_range'
+    assert fake.calls == []
 
 
 def test_validation_auto_high_and_exact_numeric_tokens(monkeypatch):
@@ -203,12 +229,13 @@ def test_fixed_on_cannot_use_changed_setup(monkeypatch, scope, settings):
     assert 'INP ON' not in fake.calls
 
 
-def test_setup_stops_if_input_changes_between_writes(monkeypatch):
+@pytest.mark.parametrize('selection', ['low', 'auto'])
+def test_setup_stops_if_input_changes_between_writes(monkeypatch, selection):
     fake = ValidationFake()
     session(fake, monkeypatch)
     fake.after_write = lambda f, cmd: setattr(f, 'input', True) if cmd == 'FUNC VOLT' else None
     with pytest.raises(LoadError):
-        setup('cv', {'voltage': '5', 'range': 'low'})
+        setup('cv', {'voltage': '5', 'range': selection})
     assert 'VOLT:RANG:AUTO OFF' not in fake.calls and 'INP OFF' not in fake.calls
 
 

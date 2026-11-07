@@ -191,6 +191,34 @@ change workflow filters to suppress checks. CI retains its configured offline
 suites, Windows preflight and applicable packaging smoke checks. Physical
 validation is separate and must be reported NOT RUN until explicitly performed.
 
+## Fixed Software Auto Range focused checks
+
+For Fixed CC/CV/CR Range changes, run `test_control_core.py`,
+`test_control_cli.py`, `test_foundation.py` and `test_readonly_cli.py` from
+the repository root. Select Worker Fixed Auto, Fixed setup, argument rejection,
+dry-run, client and Stop cases. For the dedicated CV/CR validation path, use
+`test_hardware_validation.py` with recording fakes only.
+
+Cover Low-first choice, High fallback, CR 10 Ω overlap, exact bounds and
+resolution without rounding, required Range, unchanged manual selection,
+resolved result/Manifest metadata, original decimal tokens through CLI/HTTP,
+pre-admission refusal and simulator state across jobs. Verify dry-run leaves
+active settings unchanged, Input ON blocks setup, and Fake VISA preserves CC
+remote/write/OFF/readback ordering and failure handling. Select Transient/LIST
+Auto, precision, atomic-validation and shared mode-guard cases when their
+validators or Fixed setup paths are affected. Run Ruff on modified Python files.
+Keep local evidence in `.tmp_tests/`; no full local suite, packaging acceptance
+or physical trial is required for this feature. Normal CI remains unchanged.
+
+For script coverage, run `scripts/preflight-cli.ps1 -FixedAutoOnly` and
+`tests/test_live_validation_script.py`. The script tests execute the real
+PowerShell preflight, PlanOnly and unattended-refusal paths with child-process
+VISA access blocked. Check Core-resolved `expected_range`, original decimal
+arguments, preserved ON/OFF counts, redacted reports and NOT RUN for planned
+hardware cases. Fixed Auto adds only OFF setup/readback to the existing
+bounded manual trials; never increase CC above the script ceiling to exercise
+Auto High physically. Missing PowerShell must be reported, not treated as PASS.
+
 ## Offline LIST CC focused checks
 
 Start with only LIST Core/CLI tests and LIST Worker cases:

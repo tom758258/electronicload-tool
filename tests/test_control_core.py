@@ -11,6 +11,77 @@ from electronicload_tool_core.simulator import ControlSimulator
 RESOURCE = 'USB0::0xFFFF::0x0001::SYNTHETIC::INSTR'
 
 
+@pytest.mark.parametrize('mode', ['simulate', 'dry-run'])
+@pytest.mark.parametrize('command,field,value,expected', [
+    ('set-cc', 'current', '0', 'low'),
+    ('set-cc', 'current', '0.0001', 'low'),
+    ('set-cc', 'current', '2.5000', 'low'),
+    ('set-cc', 'current', '6', 'low'),
+    ('set-cc', 'current', '6.001', 'high'),
+    ('set-cc', 'current', '60', 'high'),
+    ('set-cv', 'voltage', '0.1', 'low'),
+    ('set-cv', 'voltage', '12', 'low'),
+    ('set-cv', 'voltage', '18', 'low'),
+    ('set-cv', 'voltage', '18.01', 'high'),
+    ('set-cv', 'voltage', '120', 'high'),
+    ('set-cr', 'resistance', '0.05', 'low'),
+    ('set-cr', 'resistance', '1.234567890123456789', 'low'),
+    ('set-cr', 'resistance', '10', 'low'),
+    ('set-cr', 'resistance', '10.000000000000000001', 'high'),
+    ('set-cr', 'resistance', '7500', 'high'),
+])
+def test_fixed_auto_matches_explicit_range(mode, command, field, value, expected):
+    automatic = control.execute(command, mode=mode, range_name='auto', **{field: value})
+    manual = control.execute(command, mode=mode, range_name=expected, **{field: value})
+    assert automatic == manual
+    assert automatic['range'] == expected
+
+
+@pytest.mark.parametrize('command,field,value,code', [
+    ('set-cc', 'current', '-0.0001', 'no_matching_range'),
+    ('set-cc', 'current', '6.0001', 'no_matching_range'),
+    ('set-cc', 'current', '1.00000000000000000000000000000001', 'no_matching_range'),
+    ('set-cc', 'current', '1e-1000000', 'no_matching_range'),
+    ('set-cv', 'voltage', '0.099999999999999999', 'no_matching_range'),
+    ('set-cv', 'voltage', '18.001', 'no_matching_range'),
+    ('set-cv', 'voltage', '120.000000000000001', 'no_matching_range'),
+    ('set-cr', 'resistance', '0.049999999999999999', 'no_matching_range'),
+    ('set-cr', 'resistance', '7500.000000000000001', 'no_matching_range'),
+    ('set-cc', 'current', True, 'invalid_current'),
+    ('set-cv', 'voltage', float('inf'), 'invalid_voltage'),
+    ('set-cr', 'resistance', float('nan'), 'invalid_resistance'),
+    ('set-cr', 'resistance', [], 'invalid_resistance'),
+])
+def test_fixed_auto_refusal_preserves_state(command, field, value, code):
+    sim = ControlSimulator()
+    before = vars(sim).copy()
+    with pytest.raises(LoadError) as error:
+        control.execute(command, mode='simulate', simulator=sim,
+                        range_name='auto', **{field: value})
+    assert error.value.code == code
+    if code == 'no_matching_range':
+        assert set(error.value.details['ranges']) == {'low', 'high'}
+    assert vars(sim) == before
+
+
+@pytest.mark.parametrize('command,field,value', [
+    ('set-cc', 'current', 2), ('set-cv', 'voltage', 12), ('set-cr', 'resistance', 10),
+])
+def test_fixed_auto_dry_run_and_on_setup_do_not_change_active_state(command, field, value):
+    sim = ControlSimulator()
+    control.execute(command, mode='simulate', simulator=sim, range_name='high', **{field: value})
+    control.execute('input-on', mode='simulate', simulator=sim, confirmed=True)
+    before = vars(sim).copy()
+    plan = control.execute(command, mode='dry-run', simulator=sim,
+                           range_name='auto', **{field: value})
+    assert plan['range'] == 'low' and plan['hardware_access'] is False
+    with pytest.raises(LoadError) as error:
+        control.execute(command, mode='simulate', simulator=sim,
+                        range_name='auto', **{field: value})
+    assert error.value.code == 'input_not_off'
+    assert vars(sim) == before
+
+
 class Fake:
     def __init__(self):
         self.calls = []
@@ -92,10 +163,11 @@ def live(command, **kw):
     return control.execute(command, resource=RESOURCE, validation=True, **kw)
 
 
-def test_four_off_checks_and_four_readbacks(monkeypatch):
+@pytest.mark.parametrize('selection', ['low', 'auto'])
+def test_four_off_checks_and_four_readbacks(monkeypatch, selection):
     fake=Fake()
     session(fake,monkeypatch)
-    result=live('set-cc',current=1.5,range_name='low')
+    result=live('set-cc',current=1.5,range_name=selection)
     assert result['range']=='low' and result['current_a']==1.5
     assert fake.calls==['*IDN?','INP:STAT?','SYST:REM',
                         'INP:STAT?','FUNC:MODE FIX',
@@ -146,30 +218,36 @@ def test_live_input_on_without_extra_config_still_checks_physical_current(monkey
     assert 'INP ON' not in fake.calls
 
 
-def test_setting_failure_does_not_rollback_or_off(monkeypatch):
+@pytest.mark.parametrize('selection', ['low', 'auto'])
+def test_setting_failure_does_not_rollback_or_off(monkeypatch, selection):
     fake=Fake()
     session(fake,monkeypatch)
     fake.write_fail='CURR:RANG 1.5'
     with pytest.raises(LoadError) as err:
-        live('set-cc',current=1.5,range_name='low')
+        live('set-cc',current=1.5,range_name=selection)
     assert err.value.code=='write_failed'
     assert err.value.details['completed_steps']==['fixed_mode','cc_mode']
     assert 'CURR 1.5' not in fake.calls and 'INP OFF' not in fake.calls
 
 
-def test_cc_requires_off(monkeypatch):
+@pytest.mark.parametrize('selection', ['low', 'auto'])
+def test_cc_requires_off(monkeypatch, selection):
     fake=Fake()
     fake.input=True
     session(fake,monkeypatch)
     with pytest.raises(LoadError,match='Input'):
-        live('set-cc',current=1.5,range_name='low')
+        live('set-cc',current=1.5,range_name=selection)
     assert not any(x.startswith('FUNC ') for x in fake.calls)
+    assert 'SYST:REM' not in fake.calls
 
 
 @pytest.mark.parametrize('current,range_name,code',[
     (6.1,'low','current_out_of_range'),
     (1.2345,'high','invalid_current_resolution'), (float('nan'),'low','invalid_current'),
-    (True,'low','invalid_current'), (1.0,'medium','invalid_range')])
+    (True,'low','invalid_current'), (1.0,'medium','invalid_range'),
+    ('6.0001', 'auto', 'no_matching_range'),
+    (65, 'auto', 'no_matching_range'),
+    (float('nan'), 'auto', 'invalid_current')])
 def test_invalid_cc_no_writes(monkeypatch,current,range_name,code):
     fake=Fake()
     session(fake,monkeypatch)
@@ -394,7 +472,8 @@ def test_remote_required_for_local_hardware_cc(monkeypatch):
     assert fake.calls[-1] == 'INP:STAT?'
 
 
-def test_setting_not_applied_never_passes_even_with_zero_range_readback(monkeypatch):
+@pytest.mark.parametrize('selection', ['low', 'auto'])
+def test_setting_not_applied_never_passes_even_with_zero_range_readback(monkeypatch, selection):
     fake = Fake()
     fake.range = 0.0
     session(fake, monkeypatch)
@@ -403,7 +482,7 @@ def test_setting_not_applied_never_passes_even_with_zero_range_readback(monkeypa
         fake.calls.append(command)
     fake.write = ignored_remote
     with pytest.raises(LoadError) as error:
-        live('set-cc', current=0.1, range_name='low')
+        live('set-cc', current=0.1, range_name=selection)
     assert error.value.code == 'readback_mismatch'
     assert error.value.details['observed']['current_a'] == 0.0
     assert error.value.details['completed_steps'] == ['fixed_mode', 'cc_mode', 'range', 'current']
@@ -531,13 +610,14 @@ def test_numeric_low_range_fix_reproduces_real_error_120_and_recovers(monkeypatc
     assert 'INP ON' not in fake.calls
 
 
-def test_high_range_still_uses_existing_max_command(monkeypatch):
+@pytest.mark.parametrize('current,selection', [(1.5, 'high'), (10, 'auto')])
+def test_high_range_still_uses_existing_max_command(monkeypatch, current, selection):
     fake = Fake()
     session(fake, monkeypatch)
-    result = live('set-cc', current=1.5, range_name='high')
+    result = live('set-cc', current=current, range_name=selection)
     assert result['range'] == 'high'
     assert result['range_readback_a'] == 60.0
-    assert result['current_a'] == 1.5
+    assert result['current_a'] == current
     assert 'CURR:RANG MAX' in fake.calls
 
 
@@ -574,13 +654,14 @@ def test_cv_invalid_settings_fail_without_hardware(voltage, range_name, code):
     assert err.value.code == code
 
 
-def test_cv_live_stays_blocked_without_range_hardware_evidence(monkeypatch):
+@pytest.mark.parametrize('selection', ['low', 'auto'])
+def test_cv_live_stays_blocked_without_range_hardware_evidence(monkeypatch, selection):
     def forbidden_open(_resource):
         raise AssertionError('CV attempted real VISA')
 
     monkeypatch.setattr(control, 'open_session', forbidden_open)
     with pytest.raises(LoadError) as err:
-        control.execute('set-cv', resource=RESOURCE, voltage=5, range_name='low')
+        control.execute('set-cv', resource=RESOURCE, voltage=5, range_name=selection)
     assert err.value.code == 'unsupported_live_scope'
 
     fake = Fake()
@@ -630,7 +711,7 @@ def test_cr_offline_bounds_and_no_quantization(resistance, range_name):
     ('text', 'low', 'invalid_resistance'),
     (True, 'low', 'invalid_resistance'),
     ([], 'low', 'invalid_resistance'),
-    (1, 'auto', 'invalid_range'),
+    (1, 'other', 'invalid_range'),
     (1, None, 'invalid_range'),
     (1, [], 'invalid_range'),
     (None, 'low', 'argument_error'),
@@ -678,14 +759,15 @@ def test_cr_readback_mismatch_fails_without_input_on():
 
 
 @pytest.mark.parametrize('validation', [False, True])
-def test_cr_live_refuses_before_open_even_with_override(monkeypatch, validation):
+@pytest.mark.parametrize('selection', ['low', 'auto'])
+def test_cr_live_refuses_before_open_even_with_override(monkeypatch, validation, selection):
     def forbidden_open(_resource):
         pytest.fail('CR attempted to open VISA')
 
     monkeypatch.setattr(control, 'open_session', forbidden_open)
     with pytest.raises(LoadError) as error:
         control.execute('set-cr', resource=RESOURCE, resistance=5,
-                        range_name='low', validation=validation)
+                        range_name=selection, validation=validation)
     assert error.value.code == 'unsupported_live_scope'
 
 
