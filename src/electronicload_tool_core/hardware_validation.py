@@ -1,6 +1,6 @@
 """Explicit, CLI-only IT8812C validation; never promotes Product LIVE support.
 
-IT8800 Programming Guide V2.1 (printed pp.40,46,48,50-52,54,56-57):
+IT8800 Programming Guide V2.1 (printed pp.40,46,48,50-58):
 https://assets.testequity.com/te1/Documents/pdf/itech/ITECH_IT8800-Programming-Guide-EN.pdf
 Physical Transient uses FIX + TRAN, not the simulator's internal TRAN mode.
 Range responses must match these candidate semantics before any Input ON.
@@ -16,7 +16,9 @@ from .identity import parse_identity
 
 
 FUNCTIONS = {"cv": ("VOLT", "VOLTAGE"), "cr": ("RES", "RESISTANCE"),
-             "cw": ("POW", "POWER"), "transient-cc": ("CURR", "CURRENT")}
+             "cw": ("POW", "POWER"), "transient-cc": ("CURR", "CURRENT"),
+             "transient-cv": ("VOLT", "VOLTAGE"), "transient-cr": ("RES", "RESISTANCE"),
+             "transient-cw": ("POW", "POWER")}
 MODES = {"continuous": "CONT", "pulse": "PULS", "toggle": "TOGG"}
 TRANSIENT_QUERIES = {"level_a": "CURR:TRAN:ALEV", "level_b": "CURR:TRAN:BLEV",
                      "rise_slew": "CURR:SLEW:POS", "fall_slew": "CURR:SLEW:NEG"}
@@ -25,8 +27,8 @@ TRANSIENT_QUERIES = {"level_a": "CURR:TRAN:ALEV", "level_b": "CURR:TRAN:BLEV",
 def _configuration(scope, settings):
     if not isinstance(settings, dict):
         raise LoadError("argument_error", "Supply the complete expected validation settings.")
-    if scope == "transient-cc":
-        return c.validate_transient_cc(settings)
+    if scope.startswith("transient-"):
+        return c.validate_transient("set-" + scope, settings)
     field, validator = {"cv": ("voltage", c.validate_voltage),
                         "cr": ("resistance", c.validate_resistance),
                         "cw": ("power", c.validate_power)}[scope]
@@ -68,7 +70,7 @@ def _snapshot(session, scope):
     enabled = c._flag(session, "TRAN?") == "ON"
     if c._flag(session, "INP:SHOR:STAT?") != "OFF":
         raise LoadError("unsafe_mode", "Short must be OFF.")
-    if scope != "transient-cc" and enabled:
+    if not scope.startswith("transient-") and enabled:
         raise LoadError("unsafe_mode", "Fixed validation requires Transient OFF.")
     if scope == "cv":
         raw_range = _number(session, "VOLT:RANG?")
@@ -89,20 +91,31 @@ def _snapshot(session, scope):
     elif scope == "cw":
         settings = {"power": _number(session, "POW?")}
     else:
-        raw_mode = c._query(session, "CURR:TRAN:MODE?").upper()
+        prefix = FUNCTIONS[scope][0]
+        raw_mode = c._query(session, f"{prefix}:TRAN:MODE?").upper()
         names = {"CONT": "continuous", "CONTINUOUS": "continuous",
                  "PULS": "pulse", "PULSE": "pulse", "TOGG": "toggle", "TOGGLE": "toggle"}
         if raw_mode not in names:
             raise LoadError("invalid_response", "Unknown physical Transient mode.", 3)
-        settings = {"transient_mode": names[raw_mode],
-                    "range": c._range_name(c._number(session, "CURR:RANG?"))}
-        settings.update({field: _number(session, query + "?")
-                         for field, query in TRANSIENT_QUERIES.items()})
+        settings = {"transient_mode": names[raw_mode]}
+        if scope == "transient-cc":
+            settings["range"] = c._range_name(c._number(session, "CURR:RANG?"))
+        elif scope in {"transient-cv", "transient-cr"}:
+            low, high = (Decimal(18), Decimal(120)) if scope == "transient-cv" else (Decimal(10), Decimal(7500))
+            raw_range = _number(session, f"{prefix}:RANG?")
+            if raw_range not in (low, high):
+                raise LoadError("invalid_range_readback", "Unrecognized physical Transient range.", 3)
+            settings["range"] = "low" if raw_range == low else "high"
+            if scope == "transient-cv" and c._flag(session, "VOLT:RANG:AUTO?") != "OFF":
+                raise LoadError("readback_mismatch", "CV automatic range must be disabled.", 3)
+        queries = (TRANSIENT_QUERIES if scope == "transient-cc" else
+                   {"level_a": f"{prefix}:TRAN:ALEV", "level_b": f"{prefix}:TRAN:BLEV"})
+        settings.update({field: _number(session, query + "?") for field, query in queries.items()})
         if settings["transient_mode"] == "continuous":
-            settings.update(width_a=_number(session, "CURR:TRAN:AWID?"),
-                            width_b=_number(session, "CURR:TRAN:BWID?"))
+            settings.update(width_a=_number(session, f"{prefix}:TRAN:AWID?"),
+                            width_b=_number(session, f"{prefix}:TRAN:BWID?"))
         elif settings["transient_mode"] == "pulse":
-            settings["pulse_width"] = _number(session, "CURR:TRAN:AWID?")
+            settings["pulse_width"] = _number(session, f"{prefix}:TRAN:AWID?")
         if c._query(session, "TRIG:SOUR?").upper() != "HOLD":
             raise LoadError("unsafe_trigger_source", "Validation requires software-only HOLD source.")
     validated = _configuration(scope, settings)
@@ -144,16 +157,23 @@ def _sequence(scope, settings):
     elif scope == "cw":
         sequence += [f"POW {settings['power']:f}"]
     else:
-        selector = f"{max(settings['level_a'], settings['level_b']):f}"
-        sequence += [f"CURR:RANG {'MAX' if settings['range'] == 'high' else selector}",
-                     f"CURR:TRAN:MODE {MODES[settings['transient_mode']]}"]
-        sequence += [f"{query} {settings[field]:f}"
-                     for field, query in TRANSIENT_QUERIES.items()]
+        prefix = FUNCTIONS[scope][0]
+        if scope == "transient-cc":
+            selector = f"{max(settings['level_a'], settings['level_b']):f}"
+            sequence += [f"CURR:RANG {'MAX' if settings['range'] == 'high' else selector}"]
+        elif scope == "transient-cv":
+            sequence += ["VOLT:RANG:AUTO OFF", f"VOLT:RANG {c.CV_RANGE_LIMITS[settings['range']]}"]
+        elif scope == "transient-cr":
+            sequence += [f"RES:RANG {c.CR_RANGE_LIMITS[settings['range']][1]}"]
+        sequence += [f"{prefix}:TRAN:MODE {MODES[settings['transient_mode']]}"]
+        queries = (TRANSIENT_QUERIES if scope == "transient-cc" else
+                   {"level_a": f"{prefix}:TRAN:ALEV", "level_b": f"{prefix}:TRAN:BLEV"})
+        sequence += [f"{query} {settings[field]:f}" for field, query in queries.items()]
         if settings["transient_mode"] == "continuous":
-            sequence += [f"CURR:TRAN:AWID {settings['width_a']:f}",
-                         f"CURR:TRAN:BWID {settings['width_b']:f}"]
+            sequence += [f"{prefix}:TRAN:AWID {settings['width_a']:f}",
+                         f"{prefix}:TRAN:BWID {settings['width_b']:f}"]
         elif settings["transient_mode"] == "pulse":
-            sequence += [f"CURR:TRAN:AWID {settings['pulse_width']:f}"]
+            sequence += [f"{prefix}:TRAN:AWID {settings['pulse_width']:f}"]
         sequence += ["TRIG:SOUR HOLD"]
     return sequence
 
@@ -194,7 +214,7 @@ def _perform(session, command, scope, expected, sequence, stop):
         wanted_input = "ON" if command == "transient-trigger" else "OFF"
         if result["input_state"] != wanted_input:
             raise LoadError("unsafe_input_state", f"Validation requires Input {wanted_input}.")
-        wanted_enabled = scope == "transient-cc" and command != "transient-enable"
+        wanted_enabled = scope.startswith("transient-") and command != "transient-enable"
         if result["enabled"] != wanted_enabled:
             raise LoadError("unsafe_mode", "Transient enable state does not match the operation.")
         _stopping(stop)
@@ -232,8 +252,8 @@ def execute(command, *, scope, mode, resource, current, voltage, resistance, pow
         raise LoadError("argument_error", "Hardware validation requires an explicit scope and LIVE/dry-run.")
     setup = "set-" + scope
     permitted = {setup, "input-on", "input-off"}
-    if scope == "transient-cc":
-        permitted.update(c.TRANSIENT_COMMANDS)
+    if scope.startswith("transient-"):
+        permitted.update(set(c.TRANSIENT_COMMANDS) - c.TRANSIENT_SETUP_COMMANDS.keys())
     if command not in permitted:
         raise LoadError("argument_error", "Command does not match hardware-validation scope.")
     supplied = {key: value for key, value in
@@ -241,11 +261,11 @@ def execute(command, *, scope, mode, resource, current, voltage, resistance, pow
                  "power": power, "range": range_name}.items() if value is not None}
     sequence = []
     if command == setup:
-        if expected is not None or (scope == "transient-cc" and supplied):
+        if expected is not None or (scope.startswith("transient-") and supplied):
             raise LoadError("argument_error", "Setup takes only its complete mode parameters.")
-        if scope != "transient-cc" and transient is not None:
+        if not scope.startswith("transient-") and transient is not None:
             raise LoadError("argument_error", "Transient parameters do not apply to Fixed validation.")
-        expected = _configuration(scope, transient if scope == "transient-cc" else supplied)
+        expected = _configuration(scope, transient if scope.startswith("transient-") else supplied)
         sequence = _sequence(scope, expected)
     else:
         if supplied or transient is not None:

@@ -1,7 +1,7 @@
 <#
 Single, bounded IT8812C CLI hardware validation.
-Default: all five modes, with common read-only safety prechecks.
--Modes selects cc, cv, cr, cw and/or transient-cc (comma-separated or an array).
+Default: all eight modes, with common read-only safety prechecks.
+-Modes selects cc, cv, cr, cw and/or transient-cc/cv/cr/cw (comma-separated or an array).
 Requires approved source/DUT limits, write/ON gates and interactive confirmation.
 -PlanOnly validates every planned CLI request without VISA or hardware access.
 #>
@@ -12,7 +12,7 @@ param(
     [string]$Resource,
     [ValidateSet('system')][string]$Backend = 'system',
     [string]$Current = '0.1',
-    [string[]]$Modes = @('cc', 'cv', 'cr', 'cw', 'transient-cc'),
+    [string[]]$Modes = @('cc', 'cv', 'cr', 'cw', 'transient-cc', 'transient-cv', 'transient-cr', 'transient-cw'),
     [double]$SourceCurrentLimitA,
     [double]$SourceVoltageLimitV,
     [string]$Voltage = '5',
@@ -21,6 +21,12 @@ param(
     [string]$Power = '1',
     [string]$LevelA = '0.1',
     [string]$LevelB = '0.2',
+    [string]$VoltageLevelA = '5',
+    [string]$VoltageLevelB = '6',
+    [string]$ResistanceLevelA = '10',
+    [string]$ResistanceLevelB = '1000',
+    [string]$PowerLevelA = '1',
+    [string]$PowerLevelB = '2',
     [string]$RiseSlew = '0.1',
     [string]$FallSlew = '0.1',
     [string]$WidthA = '0.001',
@@ -33,7 +39,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$supportedModes = @('cc', 'cv', 'cr', 'cw', 'transient-cc')
+$supportedModes = @('cc', 'cv', 'cr', 'cw', 'transient-cc', 'transient-cv', 'transient-cr', 'transient-cw')
 $requestedModes = @($Modes | ForEach-Object { $_ -split ',' } |
     ForEach-Object { $_.Trim().ToLowerInvariant() })
 # Keep the established trial order and run each selected mode only once.
@@ -55,6 +61,7 @@ $watch = $null
 $phase = 'plan'
 $inputOnAttempted = $false
 $transientEnableAttempted = $false
+$activeTransientScope = $null
 $commandIndex = 0
 $report = [ordered]@{
     status = 'NOT RUN'
@@ -330,7 +337,7 @@ function Assert-InputOff([object]$Result, [string]$CaseName) {
 
 try {
     if ($requestedModes.Count -eq 0 -or @($requestedModes | Where-Object { $_ -notin $supportedModes }).Count -gt 0) {
-        throw 'Modes must contain one or more of: cc, cv, cr, cw, transient-cc.'
+        throw 'Modes must contain one or more of: cc, cv, cr, cw, transient-cc, transient-cv, transient-cr, transient-cw.'
     }
     if (-not $Target -or -not $Resource) {
         Write-Host 'BLOCKED: explicit -Target and -Resource are required.'
@@ -410,6 +417,30 @@ try {
             if ($item[0] -eq 'pulse') { $configuration.pulse_width=$PulseWidth }
             $trials += @{name="transient-$($item[0])-$($item[1])";scope='transient-cc';settings=$configuration}
         }
+        # Three trials per new scope share the established control sequence.
+        # CR's default A/B span High; use explicit High for the manual trials.
+        foreach ($scope in @('transient-cv', 'transient-cr', 'transient-cw')) {
+            if ($scope -notin $selectedModes) { continue }
+            foreach ($waveform in @('continuous', 'pulse', 'toggle')) {
+                $configuration = @{transient_mode=$waveform}
+                switch ($scope) {
+                    'transient-cv' {
+                        $configuration.level_a=$VoltageLevelA; $configuration.level_b=$VoltageLevelB
+                        $configuration.range=$(if ($waveform -eq 'continuous') { 'auto' } elseif ($waveform -eq 'pulse') { 'low' } else { 'high' })
+                    }
+                    'transient-cr' {
+                        $configuration.level_a=$ResistanceLevelA; $configuration.level_b=$ResistanceLevelB
+                        $configuration.range=$(if ($waveform -eq 'continuous') { 'auto' } else { 'high' })
+                    }
+                    'transient-cw' {
+                        $configuration.level_a=$PowerLevelA; $configuration.level_b=$PowerLevelB
+                    }
+                }
+                if ($waveform -eq 'continuous') { $configuration.width_a=$WidthA; $configuration.width_b=$WidthB }
+                if ($waveform -eq 'pulse') { $configuration.pulse_width=$PulseWidth }
+                $trials += @{name="$scope-$waveform";scope=$scope;settings=$configuration}
+            }
+        }
         foreach ($trial in ($trials | Where-Object { $_.scope -in $selectedModes })) {
             $prefix = $trial.name
             $scopeArgs = @('--hardware-validation', $trial.scope)
@@ -429,18 +460,18 @@ try {
             $expectedArgs = $scopeArgs + @('--validation-settings-json',
                 ($trial.settings | ConvertTo-Json -Compress))
             $planned += @{name="$prefix-setup";command="set-$($trial.scope)";args=$setupArgs}
-            if ($trial.scope -eq 'transient-cc') {
+            if ($trial.scope.StartsWith('transient-')) {
                 $planned += @{name="$prefix-enable";command='transient-enable';args=$expectedArgs}
             }
             $planned += @{name="$prefix-on";command='input-on';args=($expectedArgs + @('--confirm'))}
-            if ($trial.scope -eq 'transient-cc') {
+            if ($trial.scope.StartsWith('transient-')) {
                 $planned += @{name="$prefix-trigger-1";command='transient-trigger';args=$expectedArgs}
                 $planned += @{name="$prefix-trigger-2";command='transient-trigger';args=$expectedArgs}
                 $planned += @{name="$prefix-status-on";command='transient-status';args=$scopeArgs}
             }
             $planned += @{name="$prefix-measure";command='measure';args=@()}
             $planned += @{name="$prefix-off";command='input-off';args=@()}
-            if ($trial.scope -eq 'transient-cc') {
+            if ($trial.scope.StartsWith('transient-')) {
                 $planned += @{name="$prefix-disable";command='transient-disable';args=$scopeArgs}
                 $planned += @{name="$prefix-status-off";command='transient-status';args=$scopeArgs}
             }
@@ -453,7 +484,7 @@ try {
     foreach ($step in $planned) {
         $extras = @($step.args)
         $plan = Invoke-PlanCommand $step.command $extras
-        if ($step.command -in @('set-cc', 'set-cv', 'set-cr') -and 'auto' -in $step.args) {
+        if ($step.command -in @('set-cc', 'set-cv', 'set-cr', 'set-transient-cc', 'set-transient-cv', 'set-transient-cr') -and 'auto' -in $step.args) {
             # The Core plan owns selection; the script only compares later physical readback.
             $resolved = $(if ($step.command -eq 'set-cc') { $plan.result.range } else {
                 $plan.result.expected_configuration.range
@@ -473,7 +504,7 @@ try {
     Write-Host "Plan: Identify, Input State, Measure; selected modes: $($selectedModes -join ', ')."
     Write-Host 'Every selected mode includes explicit ON/OFF and independent OFF confirmation.'
     Write-Host 'Fixed Auto adds Input OFF setup/readback with the existing values; no extra ON/OFF cycles.'
-    if ('transient-cc' -in $selectedModes) {
+    if (@($selectedModes | Where-Object { $_.StartsWith('transient-') }).Count -gt 0) {
         Write-Host 'Transient: Continuous/Pulse/Toggle, Low/High/Auto, repeated triggers, control status and separate disable.'
         Write-Host 'Trigger/status/measure do not establish waveform shape, timing or completion.'
     }
@@ -552,7 +583,10 @@ try {
         Write-Host "Running $($step.name)..."
         # Mark uncertainty before dispatch, including subprocess/JSON/runtime failures.
         if ($step.command -eq 'input-on') { $inputOnAttempted = $true }
-        if ($step.command -eq 'transient-enable') { $transientEnableAttempted = $true }
+        if ($step.command -eq 'transient-enable') {
+            $activeTransientScope = $step.args[[Array]::IndexOf($step.args, '--hardware-validation') + 1]
+            $transientEnableAttempted = $true
+        }
         $result = Invoke-LiveCommand -Command $step.command -CaseName $step.name -ExtraArgs $step.args
         Assert-Runtime $result $step.name
         if ($step.name -eq 'input-state' -and $result.result.input_state -cne 'OFF') {
@@ -560,13 +594,17 @@ try {
             $report.status = 'BLOCKED'
         }
         if ($step.command -in @('input-state', 'input-off', 'set-cc', 'set-cv', 'set-cr', 'set-cw',
-                               'set-transient-cc', 'transient-enable', 'transient-disable')) {
+                               'set-transient-cc', 'set-transient-cv', 'set-transient-cr', 'set-transient-cw',
+                               'transient-enable', 'transient-disable')) {
             Assert-InputOff $result $step.name
         }
         if ($step.command -eq 'input-on' -and $result.result.input_state -cne 'ON') {
             Fail-Case $step.name 'input_on_not_confirmed' 'Input ON was not confirmed.'
         }
-        if ($step.ContainsKey('expected_range') -and $result.result.range -cne $step.expected_range) {
+        $observedRange = $(if ($step.command -eq 'set-cc') { $result.result.range } else {
+            $result.result.configuration.range
+        })
+        if ($step.ContainsKey('expected_range') -and $observedRange -cne $step.expected_range) {
             Fail-Case $step.name 'readback_mismatch' 'Auto Range differs from the Core plan.'
         }
         if ($step.command -eq 'transient-status') {
@@ -625,7 +663,7 @@ try {
             Assert-Runtime $state 'cleanup-input-state'
             Assert-InputOff $state 'cleanup-input-state'
             $disabled = Invoke-LiveCommand -Command 'transient-disable' -CaseName 'cleanup-transient-disable' `
-                -ExtraArgs @('--hardware-validation','transient-cc') -Cleanup
+                -ExtraArgs @('--hardware-validation',$activeTransientScope) -Cleanup
             Assert-Runtime $disabled 'cleanup-transient-disable'
             Assert-InputOff $disabled 'cleanup-transient-disable'
             Write-Host 'PASS Explicit Transient Disable cleanup after confirmed OFF'

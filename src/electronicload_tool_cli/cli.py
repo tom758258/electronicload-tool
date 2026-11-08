@@ -13,7 +13,8 @@ from electronicload_tool_core.identity import MODEL_ID
 from electronicload_tool_core.readonly import COMMANDS, execute as read_execute
 from electronicload_tool_core.control import (CONTROL_COMMANDS, execute as control_execute,
                                               validate_power, TRANSIENT_FIELDS, LIST_COMMANDS,
-                                              FIXED_RANGE_COMMANDS, FIXED_RANGE_CHOICES)
+                                              FIXED_RANGE_COMMANDS, FIXED_RANGE_CHOICES,
+                                              TRANSIENT_SETUP_COMMANDS)
 from .json_input import decode_list_json
 from .worker import manifest, run_worker
 from .worker_client import request as worker_request, wait_ready
@@ -99,7 +100,8 @@ def main(argv: list[str] | None = None) -> int:
         sub.add_argument("--validation-allow-pending-live-support", action="store_true",
                          help=argparse.SUPPRESS)
         if name in CONTROL_COMMANDS and name not in LIST_COMMANDS:
-            sub.add_argument("--hardware-validation", choices=("cv", "cr", "cw", "transient-cc"),
+            sub.add_argument("--hardware-validation", choices=("cv", "cr", "cw", "transient-cc",
+                                                               "transient-cv", "transient-cr", "transient-cw"),
                              help="Explicit contributor hardware-validation scope; not Product LIVE.")
             sub.add_argument("--validation-settings-json",
                              help="Expected complete setup for validation enable, ON and trigger.")
@@ -114,13 +116,18 @@ def main(argv: list[str] | None = None) -> int:
             sub.add_argument("--range", required=True, choices=FIXED_RANGE_CHOICES)
         elif name == "set-cw":
             sub.add_argument("--power", required=True, help="Power in watts (offline only).")
-        elif name == "set-transient-cc":
+        elif name in TRANSIENT_SETUP_COMMANDS:
             sub.add_argument("--transient-mode", required=True,
                              choices=("continuous", "pulse", "toggle"))
-            sub.add_argument("--range", required=True, choices=("auto", "low", "high"))
-            for field in ("level-a", "level-b", "rise-slew", "fall-slew"):
+            if name != "set-transient-cw":
+                sub.add_argument("--range", required=True, choices=FIXED_RANGE_CHOICES)
+            fields = (("level-a", "level-b", "rise-slew", "fall-slew")
+                      if name == "set-transient-cc" else ("level-a", "level-b"))
+            unit = {"CC": "Amperes", "CV": "Volts", "CR": "Ohms",
+                    "CW": "Watts"}[TRANSIENT_SETUP_COMMANDS[name]]
+            for field in fields:
                 sub.add_argument(f"--{field}", required=True,
-                                 help="A/us" if "slew" in field else "Amperes")
+                                 help="A/us" if "slew" in field else unit)
             for field in ("width-a", "width-b", "pulse-width"):
                 sub.add_argument(f"--{field}", default=argparse.SUPPRESS, help="Seconds")
         elif name == "set-list-cc":
@@ -170,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
                         "arguments": arguments, "context": context}
                 if args.job_id is not None:
                     body["job_id"] = args.job_id
-                if args.worker_command in {*FIXED_RANGE_COMMANDS, "set-transient-cc", *LIST_COMMANDS}:
+                if args.worker_command in {*FIXED_RANGE_COMMANDS, *TRANSIENT_SETUP_COMMANDS, *LIST_COMMANDS}:
                     # Forward original numeric tokens; Core in the Worker validates them.
                     # Parsing above already guarantees a complete JSON value.
                     del body["arguments"]
@@ -213,14 +220,14 @@ def main(argv: list[str] | None = None) -> int:
                 voltage=getattr(args, "voltage", None),
                 resistance=getattr(args, "resistance", None),
                 power=getattr(args, "power", None),
-                range_name=(None if args.command == "set-transient-cc"
+                range_name=(None if args.command in TRANSIENT_SETUP_COMMANDS
                             else getattr(args, "range", None)),
                 confirmed=getattr(args, "confirm", False),
                 validation=args.validation_allow_pending_live_support,
                 hardware_validation=getattr(args, "hardware_validation", None),
                 validation_settings=validation_settings,
                 transient={key: value for key, value in vars(args).items()
-                           if key in TRANSIENT_FIELDS} if args.command == "set-transient-cc" else None,
+                           if key in TRANSIENT_FIELDS} if args.command in TRANSIENT_SETUP_COMMANDS else None,
                 list_configuration=list_configuration,
                 slot=getattr(args, "slot", None),
             )

@@ -30,6 +30,7 @@ class ControlSimulator:
         self.power_w = Decimal("0")
         self.remote = False
         self.transient_configuration = None
+        self.transient_function = None
         self.transient_enabled = False
         self.last_trigger = None
         self.list_configuration = None
@@ -58,13 +59,23 @@ class ControlSimulator:
     def transient_status(self) -> dict:
         configuration = self.transient_configuration
         return {"configured": configuration is not None,
+                "function": self.transient_function if configuration else None,
                 "mode": configuration["transient_mode"] if configuration else None,
-                "range": configuration["range"] if configuration else None,
+                "range": configuration.get("range") if configuration else None,
                 "enabled": self.transient_enabled,
                 "last_trigger": dict(self.last_trigger) if self.last_trigger else None,
                 "configuration": self.transient_settings() if configuration else None}
 
     def transient_settings(self) -> dict:
+        if self.transient_function != "CC":
+            unit = {"CV": "v", "CR": "ohm", "CW": "w"}[self.transient_function]
+            units = {"level_a": f"level_a_{unit}", "level_b": f"level_b_{unit}",
+                     "width_a": "width_a_s", "width_b": "width_b_s", "pulse_width": "pulse_width_s"}
+            # Widths and CR levels have no documented decimal step. Keep every digit.
+            return {"range": self.transient_configuration.get("range"),
+                    **{units.get(key, key): (str(value) if "width" in key or unit == "ohm"
+                                            else float(value)) if isinstance(value, Decimal) else value
+                       for key, value in self.transient_configuration.items()}}
         units = {"level_a": "level_a_a", "level_b": "level_b_a", "width_a": "width_a_s",
                  "width_b": "width_b_s", "pulse_width": "pulse_width_s",
                  "rise_slew": "rise_slew_a_per_us", "fall_slew": "fall_slew_a_per_us"}

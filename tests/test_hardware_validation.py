@@ -20,6 +20,10 @@ class ValidationFake(Fake):
                        'CURR:TRAN:MODE': 'CONT', 'CURR:TRAN:ALEV': '.1',
                        'CURR:TRAN:BLEV': '.2', 'CURR:SLEW:POS': '.1', 'CURR:SLEW:NEG': '.1',
                        'CURR:TRAN:AWID': '.001', 'CURR:TRAN:BWID': '.002', 'TRIG:SOUR': 'HOLD'}
+        for prefix in ('VOLT', 'RES', 'POW'):
+            self.values.update({f'{prefix}:TRAN:MODE': 'CONT', f'{prefix}:TRAN:ALEV': '1',
+                                f'{prefix}:TRAN:BLEV': '2', f'{prefix}:TRAN:AWID': '.001',
+                                f'{prefix}:TRAN:BWID': '.002'})
         self.after_remote = None
         self.ignore = None
         self.after_write = None
@@ -47,18 +51,23 @@ class ValidationFake(Fake):
             self.after_write(self, command)
 
 
-def transient(mode='continuous', range_name='auto'):
+def transient(mode='continuous', range_name='auto', function='CC'):
     settings = dict(transient_mode=mode, range=range_name, level_a='.1', level_b='.2',
                     rise_slew='.1', fall_slew='.1')
     if mode == 'continuous':
         settings.update(width_a='.001', width_b='.002')
     if mode == 'pulse':
         settings.update(pulse_width='.001')
+    if function != 'CC':
+        del settings['rise_slew'], settings['fall_slew']
+        settings.update(level_a='10', level_b='10')
+    if function == 'CW':
+        del settings['range']
     return settings
 
 
 def setup(scope, settings, **kwargs):
-    arguments = ({'transient': settings} if scope == 'transient-cc' else
+    arguments = ({'transient': settings} if scope.startswith('transient-') else
                  {'range_name' if key == 'range' else key: value for key, value in settings.items()})
     return control.execute('set-' + scope, resource=RESOURCE, hardware_validation=scope,
                            **arguments, **kwargs)
@@ -72,8 +81,9 @@ TRIALS = [('cv', {'voltage': '5', 'range': r}) for r in ('auto', 'low', 'high')]
     ('cr', {'resistance': '1000' if r == 'high' else '10', 'range': r})
     for r in ('auto', 'low', 'high')
 ] + [('cw', {'power': '1'})] + [
-    ('transient-cc', transient(m, r)) for m in ('continuous', 'pulse', 'toggle')
-    for r in ('auto', 'low', 'high')
+    ('transient-' + f.lower(), transient(m, r, f)) for f in ('CC', 'CV', 'CR', 'CW')
+    for m in ('continuous', 'pulse', 'toggle')
+    for r in (('auto',) if f == 'CW' else ('auto', 'low', 'high'))
 ]
 
 
@@ -85,27 +95,27 @@ def test_validation_complete_cycles_preserve_explicit_off(monkeypatch, scope, se
     assert result['validation_only'] and result['input_state'] == 'OFF'
     assert not fake.input and not fake.transient
     assert 'FUNC:MODE TRAN' not in fake.calls
-    if scope == 'transient-cc':
-        run('transient-enable', validation_settings=settings)
+    if scope.startswith('transient-'):
+        run('transient-enable', scope, validation_settings=settings)
         assert fake.transient and not fake.input
     run('input-on', scope, confirmed=True, validation_settings=settings)
     assert fake.input
-    if scope == 'transient-cc':
+    if scope.startswith('transient-'):
         for _ in range(2):
-            result = run('transient-trigger', validation_settings=settings)
+            result = run('transient-trigger', scope, validation_settings=settings)
             assert result['waveform_completion_known'] is False
         assert fake.calls.count('TRIG:IMM') == 2
         before = len(fake.calls)
-        assert run('transient-status')['enabled']
+        assert run('transient-status', scope)['enabled']
         assert all(command.endswith('?') for command in fake.calls[before:])
         with pytest.raises(LoadError):
-            run('transient-disable')
+            run('transient-disable', scope)
         assert fake.input and fake.transient and 'INP OFF' not in fake.calls
     run('input-off', scope)
     assert not fake.input
-    if scope == 'transient-cc':
+    if scope.startswith('transient-'):
         assert fake.transient  # OFF must not disable Transient.
-        run('transient-disable')
+        run('transient-disable', scope)
         assert not fake.transient
     assert fake.calls.count('INP ON') == fake.calls.count('INP OFF') == 1
     assert not any(command in fake.calls for command in ('*RST', 'SYST:ERR?', 'SYST:LOC'))
@@ -178,14 +188,17 @@ def test_unrecognized_physical_range_blocks_on(monkeypatch, scope, query, reply)
     assert all(call.endswith('?') for call in fake.calls)
 
 
+@pytest.mark.parametrize('function', ['CC', 'CV', 'CR', 'CW'])
 @pytest.mark.parametrize('change', ['input', 'short', 'function', 'enabled', 'level', 'source', 'stop'])
 @pytest.mark.parametrize('after_remote', [False, True])
-def test_input_on_checks_every_condition_before_and_after_remote(monkeypatch, change, after_remote):
+def test_input_on_checks_every_condition_before_and_after_remote(monkeypatch, change, after_remote, function):
     fake = ValidationFake()
     session(fake, monkeypatch)
-    settings = transient()
-    setup('transient-cc', settings)
-    run('transient-enable', validation_settings=settings)
+    scope = 'transient-' + function.lower()
+    prefix = {'CC': 'CURR', 'CV': 'VOLT', 'CR': 'RES', 'CW': 'POW'}[function]
+    settings = transient(function=function)
+    setup(scope, settings)
+    run('transient-enable', scope, validation_settings=settings)
     stop = Event()
 
     def unsafe(f):
@@ -194,11 +207,11 @@ def test_input_on_checks_every_condition_before_and_after_remote(monkeypatch, ch
         elif change == 'short':
             f.short = True
         elif change == 'function':
-            f.function = 'POW'
+            f.function = 'CURR' if function != 'CC' else 'POW'
         elif change == 'enabled':
             f.transient = False
         elif change == 'level':
-            f.values['CURR:TRAN:ALEV'] = '1'
+            f.values[f'{prefix}:TRAN:ALEV'] = '2'
         elif change == 'source':
             f.values['TRIG:SOUR'] = 'BUS'
         else:
@@ -210,7 +223,7 @@ def test_input_on_checks_every_condition_before_and_after_remote(monkeypatch, ch
         unsafe(fake)
     fake.calls.clear()
     with pytest.raises(LoadError):
-        run('input-on', confirmed=True, validation_settings=settings, stop=stop)
+        run('input-on', scope, confirmed=True, validation_settings=settings, stop=stop)
     assert 'INP ON' not in fake.calls and 'INP OFF' not in fake.calls
     if not after_remote:
         assert 'SYST:REM' not in fake.calls
@@ -322,3 +335,37 @@ def test_worker_cannot_select_hardware_validation():
     for field in ('hardware_validation', 'validation_settings'):
         with pytest.raises(LoadError):
             _arguments('set-cw', {'power': 1, field: 'cw'}, None)
+
+
+@pytest.mark.parametrize('scope,prefix', [('transient-cv', 'VOLT'), ('transient-cr', 'RES'),
+                                         ('transient-cw', 'POW')])
+def test_new_transient_validation_scpi_plan_and_mismatch(monkeypatch, scope, prefix):
+    settings = transient('pulse', function=scope[-2:].upper())
+    settings['pulse_width'] = '0.00002000000000000000001'
+    plan = setup(scope, settings, mode='dry-run')
+    writes = plan['planned_writes']
+    assert writes[:3] == ['SYST:REM', 'FUNC:MODE FIX', f'FUNC {prefix}']
+    assert f'{prefix}:TRAN:MODE PULS' in writes
+    assert f'{prefix}:TRAN:ALEV 10' in writes and f'{prefix}:TRAN:BLEV 10' in writes
+    assert f'{prefix}:TRAN:AWID {settings["pulse_width"]}' in writes
+    assert writes[-1] == 'TRIG:SOUR HOLD'
+    assert not any('SLEW' in write or 'BWID' in write or write in ('INP ON', 'TRAN ON')
+                   for write in writes)
+    if scope == 'transient-cw':
+        assert not any('RANG' in write for write in writes)
+    fake = ValidationFake()
+    session(fake, monkeypatch)
+    fake.ignore = f'{prefix}:TRAN:BLEV 10'
+    with pytest.raises(LoadError) as error:
+        setup(scope, settings)
+    assert error.value.code == 'readback_mismatch'
+    assert 'INP ON' not in fake.calls and 'TRAN ON' not in fake.calls
+
+
+@pytest.mark.parametrize('scope', ['transient-cv', 'transient-cr', 'transient-cw'])
+def test_new_transient_validation_refuses_wrong_scope_before_visa(monkeypatch, scope):
+    monkeypatch.setattr(control, 'open_session', lambda *_: pytest.fail('VISA opened'))
+    with pytest.raises(LoadError) as error:
+        control.execute('set-transient-cc', hardware_validation=scope, resource=RESOURCE,
+                        transient=transient())
+    assert error.value.code == 'argument_error'
