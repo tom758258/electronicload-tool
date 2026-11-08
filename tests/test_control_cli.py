@@ -78,6 +78,8 @@ def test_manifest_static(capsys):
         assert p['commands'][command] == {
             'kind': 'async_job', 'range_options': ['auto', 'low', 'high']}
     assert p['commands']['set-cw'] == {'kind': 'async_job'}
+    for command in ('set-von', 'von-status', 'short-on', 'short-off', 'short-status'):
+        assert p['commands'][command] == {'kind': 'async_job'}
 
 
 def test_normal_live_cli_control_dispatches_without_validation_override(monkeypatch, capsys):
@@ -263,3 +265,38 @@ def test_cw_cli_send_command_preserves_power_validation(monkeypatch, capsys, pow
     else:
         assert exit_code == 0 and payload['status'] == 'accepted'
         assert sent[0]['arguments'] == {'power': 12.34}
+
+
+@pytest.mark.parametrize('arguments,expected', [
+    (['set-cc', '--simulate', '--current', '1', '--range', 'auto',
+      '--rise-slew', '0.100000000000000000001', '--fall-slew', '0.2'],
+     {'rise_slew_a_per_us': '0.100000000000000000001', 'fall_slew_a_per_us': '0.2'}),
+    (['set-von', '--simulate', '--voltage', '10.000000000000000000001', '--latch', 'off'],
+     {'threshold_v': '10.000000000000000000001', 'latch': 'off'}),
+    (['von-status', '--simulate'], {'threshold_v': '0', 'latch': 'on'}),
+    (['short-status', '--simulate'], {'short_state': 'OFF'}),
+    (['short-off', '--simulate'], {'short_state': 'OFF'}),
+    (['short-on', '--dry-run'], {'command': 'short-on', 'hardware_access': False}),
+])
+def test_fixed_slew_von_short_cli_results(capsys, arguments, expected):
+    assert main([*arguments, '--json']) == 0
+    output = capsys.readouterr()
+    result = json.loads(output.out)['result']
+    assert {key: result[key] for key in expected} == expected
+    assert output.err == ''
+
+
+@pytest.mark.parametrize('arguments,code', [
+    (['set-cc', '--simulate', '--current', '1', '--range', 'low', '--rise-slew', '0.1'],
+     'argument_error'),
+    (['set-von', '--simulate', '--voltage', '10'], 'argument_error'),
+    (['short-on', '--simulate'], 'input_not_on'),
+    (['set-cc', '--current', '1', '--range', 'low', '--rise-slew', '0.1', '--fall-slew', '0.2',
+      '--hardware-validation', 'cv', '--resource', 'USB0::0xFFFF::0x0001::SYNTHETIC::INSTR'],
+     'unsupported_live_scope'),
+    (['short-off', '--validation-allow-pending-live-support',
+      '--resource', 'USB0::0xFFFF::0x0001::SYNTHETIC::INSTR'], 'unsupported_live_scope'),
+])
+def test_fixed_slew_von_short_cli_refusal(capsys, arguments, code):
+    assert main([*arguments, '--json']) == 2
+    assert json.loads(capsys.readouterr().out)['error']['code'] == code

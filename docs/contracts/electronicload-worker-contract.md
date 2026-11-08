@@ -44,10 +44,15 @@ Common contracts remain authoritative for the HTTP and JSONL envelopes.
 | `identify` | `{}` | Physical/simulated identity |
 | `input-state` | `{}` | `input_state` |
 | `measure` | `{}` | `voltage_v`, `current_a`, `power_w` |
-| `set-cc` | `{"current": <number>, "range": "auto"\|"low"\|"high"}` | Four confirmed CC settings, physical input stays OFF |
+| `set-cc` | `{"current": <number>, "range": "auto"\|"low"\|"high"}`, with optional paired `rise_slew` and `fall_slew` (numbers, offline only) | Fixed CC settings with Input OFF, plus Slew fields when supplied |
 | `set-cv` | `{"voltage": <number>, "range": "auto"\|"low"\|"high"}` | Offline-only CV setpoint simulation; LIVE refused |
 | `set-cr` | `{"resistance": <number>, "range": "auto"\|"low"\|"high"}` | Offline-only CR setpoint/range simulation; LIVE refused |
 | `set-cw` | `{"power": <number>}` | Offline-only Fixed CW setpoint simulation; LIVE refused |
+| `set-von` | `{"voltage": <number>, "latch": "on"\|"off"}` | Offline VON settings, confirmed Input OFF required |
+| `von-status` | `{}` | Read-only simulated VON settings |
+| `short-on` | `{}` | Confirmed simulated Short ON, with Input ON and Fixed CC/CV/CR/CW required |
+| `short-off` | `{}` | Confirmed simulated Short OFF, independent of Input |
+| `short-status` | `{}` | Read-only simulated Short state |
 | `set-transient-cc` | Complete mode-specific configuration below | Offline Transient control status |
 | `set-transient-cv` | `transient_mode`, `range`, `level_a`, `level_b` (V), applicable widths (s) | Offline Transient CV status |
 | `set-transient-cr` | `transient_mode`, `range`, `level_a`, `level_b` (Ω), applicable widths (s) | Offline Transient CR status |
@@ -101,6 +106,32 @@ LIVE support declaration. Common Worker protocol 3, HTTP admission/state error
 timing, result fields, JSONL envelopes, lifecycle and exits remain unchanged.
 CV/CR/CW, Transient and LIST remain Product LIVE blocked. Auto uses the existing
 Fixed CC commands, readbacks and Input OFF/ON gates.
+
+## Offline Fixed CC Slew, VON and Short
+
+For Fixed CC, supply both `rise_slew` and `fall_slew` or omit both. Auto resolves
+the range using current before checking Slew. Low accepts 0.0001–0.25 A/μs and
+High accepts 0.001–2.5 A/μs. Results with the pair add
+`rise_slew_a_per_us` and `fall_slew_a_per_us` as decimal strings. Omission keeps
+the existing result and LIVE write sequence.
+
+VON configuration and status return `threshold_v` as a decimal string and
+`latch` as `"on"|"off"`. The offline IT8812C profile accepts 0–120 V without
+an assumed programming step. The simulated setting persists across mode changes.
+Short operations return `short_state` as `"ON"|"OFF"`. Short ON also requires
+Short OFF and a Worker that is not stopping. An explicit `input-off` remains
+available regardless of Short state. Short OFF leaves Input unchanged, so the
+previous Fixed setting can still load the DUT until explicit Input OFF.
+
+HTTP and CLI forwarding preserve the original JSON numeric tokens for these
+setups. Invalid arguments are rejected before job creation. Simulator state
+checks and refusals of valid LIVE requests occur during the accepted job.
+Dry-run validates arguments and returns `hardware_access: false` without
+checking or changing simulated state. The five new commands appear as
+`kind: "async_job"` in Manifest schema 2. All five and Fixed CC with Slew are
+blocked before VISA, including on contributor validation paths. See the
+[offline controls guide](../fixed-slew-von-short.md)
+([繁體中文](../fixed-slew-von-short.zh-TW.md)).
 
 ## Offline Transient CC / CV / CR / CW
 

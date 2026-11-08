@@ -945,3 +945,85 @@ def test_transient_new_worker_preserves_cr_pulse_width_through_cli_and_jsonl(wor
     assert result['range'] == 'high'
     assert result['configuration']['pulse_width_s'] == width
     assert http(ready['status_url'])[1]['last_job']['result'] == result
+
+
+def test_fixed_slew_von_short_worker_jobs_and_decimal_forwarding(worker, capsys):
+    from electronicload_tool_cli.cli import main
+
+    _, out, ready = worker
+    fixed = {'current': 1, 'range': 'auto'}
+    for command, arguments, expected in [
+        ('set-cc', {**fixed, 'rise_slew': 0.1}, 'argument_error'),
+        ('set-cc', {**fixed, 'rise_slew': '0.1', 'fall_slew': 0.2}, 'argument_error'),
+        ('set-cc', {**fixed, 'rise_slew': None, 'fall_slew': None}, 'argument_error'),
+        ('set-cc', {**fixed, 'rise_slew': 0.251, 'fall_slew': 0.2}, 'slew_out_of_range'),
+        ('set-von', {'voltage': 10}, 'argument_error'),
+        ('set-von', {'voltage': True, 'latch': 'on'}, 'argument_error'),
+        ('set-von', {'voltage': 10, 'latch': True}, 'argument_error'),
+        ('short-status', {'extra': True}, 'argument_error'),
+    ]:
+        code, rejected = http(ready['command_url'], request(command, arguments))
+        assert code == 400 and rejected['worker_job_id'] is None
+        assert rejected['error']['code'] == expected
+    initial = http(ready['status_url'])[1]
+    assert initial['active_job'] is None and initial['last_job'] is None
+
+    def terminal(accepted, error=None):
+        event = wait_finished(out, accepted['worker_job_id'])
+        snapshot = http(ready['status_url'])[1]
+        assert snapshot.keys() == initial.keys()
+        assert snapshot['last_job'] == {key: event[key] for key in snapshot['last_job']}
+        if error:
+            assert event['state'] == 'failed' and event['error']['code'] == error
+        else:
+            assert event['state'] == 'succeeded'
+        return event['result']
+
+    def execute(command, arguments=None, *, dry_run=False, error=None):
+        payload = request(command, arguments)
+        if dry_run:
+            payload['context']['mode'] = 'dry_run'
+        code, accepted = http(ready['command_url'], payload)
+        assert code == 202
+        return terminal(accepted, error)
+
+    precision = '0.100000000000000000000001'
+    for command, raw, key in [
+        ('set-cc', f'{{"current":1,"range":"auto","rise_slew":{precision},"fall_slew":0.2}}',
+         'rise_slew_a_per_us'),
+        ('set-von', f'{{"voltage":{precision},"latch":"off"}}', 'threshold_v'),
+    ]:
+        assert main(['send-command', '--url', ready['command_url'], '--worker-command', command,
+                     '--arguments-json', raw, '--context-json',
+                     json.dumps(request(command)['context']), '--json']) == 0
+        assert terminal(json.loads(capsys.readouterr().out))[key] == precision
+
+    assert execute('set-von', {'voltage': 2, 'latch': 'on'}, dry_run=True)['hardware_access'] is False
+    assert execute('von-status') == {'threshold_v': precision, 'latch': 'off'}
+    execute('short-on', error='input_not_on')
+    execute('input-on', {'confirm_input_on': True})
+    assert execute('short-on', dry_run=True)['hardware_access'] is False
+    assert execute('short-status') == {'short_state': 'OFF'}
+    assert execute('short-on') == {'short_state': 'ON'}
+    assert execute('short-off') == {'short_state': 'OFF'}
+    assert execute('input-state') == {'input_state': 'ON'}
+    assert execute('input-off') == {'input_state': 'OFF'}
+
+
+@pytest.mark.parametrize('command,arguments', [
+    ('set-cc', {'current': 1, 'range': 'low', 'rise_slew': 0.1, 'fall_slew': 0.2}),
+    ('set-von', {'voltage': 10, 'latch': 'on'}),
+    ('short-on', {}),
+])
+def test_fixed_slew_von_short_live_worker_refuses_before_visa(command, arguments, monkeypatch, capsys):
+    from electronicload_tool_cli.worker import Runtime
+    from electronicload_tool_core import control
+
+    monkeypatch.setattr(control, 'open_session', lambda *_: pytest.fail('VISA opened'))
+    runtime = Runtime(mode='live', resource='USB0::0xFFFF::0x0001::SYNTHETIC::INSTR')
+    job = {'worker_job_id': 'offline-control', 'job_id': None, 'command': command}
+    runtime.run_job(job, arguments, {'mode': 'live'})
+    terminal = runtime.snapshot()['last_job']
+    event = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert terminal['state'] == 'failed' and terminal['error']['code'] == 'unsupported_live_scope'
+    assert event['event'] == 'job_finished' and event['error'] == terminal['error']

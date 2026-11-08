@@ -14,7 +14,7 @@ from electronicload_tool_core.readonly import COMMANDS, execute as read_execute
 from electronicload_tool_core.control import (CONTROL_COMMANDS, execute as control_execute,
                                               validate_power, TRANSIENT_FIELDS, LIST_COMMANDS,
                                               FIXED_RANGE_COMMANDS, FIXED_RANGE_CHOICES,
-                                              TRANSIENT_SETUP_COMMANDS)
+                                              TRANSIENT_SETUP_COMMANDS, AUXILIARY_COMMANDS)
 from .json_input import decode_list_json
 from .worker import manifest, run_worker
 from .worker_client import request as worker_request, wait_ready
@@ -99,7 +99,7 @@ def main(argv: list[str] | None = None) -> int:
         sub.add_argument("--json", action="store_true")
         sub.add_argument("--validation-allow-pending-live-support", action="store_true",
                          help=argparse.SUPPRESS)
-        if name in CONTROL_COMMANDS and name not in LIST_COMMANDS:
+        if name in CONTROL_COMMANDS and name not in (*LIST_COMMANDS, *AUXILIARY_COMMANDS):
             sub.add_argument("--hardware-validation", choices=("cv", "cr", "cw", "transient-cc",
                                                                "transient-cv", "transient-cr", "transient-cw"),
                              help="Explicit contributor hardware-validation scope; not Product LIVE.")
@@ -108,6 +108,8 @@ def main(argv: list[str] | None = None) -> int:
         if name == "set-cc":
             sub.add_argument("--current", required=True, type=_current_token)
             sub.add_argument("--range", required=True, choices=FIXED_RANGE_CHOICES)
+            sub.add_argument("--rise-slew", help="Rising slew in A/us; pair with --fall-slew (offline only).")
+            sub.add_argument("--fall-slew", help="Falling slew in A/us; pair with --rise-slew (offline only).")
         elif name == "set-cv":
             sub.add_argument("--voltage", required=True)
             sub.add_argument("--range", required=True, choices=FIXED_RANGE_CHOICES)
@@ -116,6 +118,9 @@ def main(argv: list[str] | None = None) -> int:
             sub.add_argument("--range", required=True, choices=FIXED_RANGE_CHOICES)
         elif name == "set-cw":
             sub.add_argument("--power", required=True, help="Power in watts (offline only).")
+        elif name == "set-von":
+            sub.add_argument("--voltage", required=True, help="VON threshold in volts (offline only).")
+            sub.add_argument("--latch", required=True, choices=("on", "off"))
         elif name in TRANSIENT_SETUP_COMMANDS:
             sub.add_argument("--transient-mode", required=True,
                              choices=("continuous", "pulse", "toggle"))
@@ -177,7 +182,8 @@ def main(argv: list[str] | None = None) -> int:
                         "arguments": arguments, "context": context}
                 if args.job_id is not None:
                     body["job_id"] = args.job_id
-                if args.worker_command in {*FIXED_RANGE_COMMANDS, *TRANSIENT_SETUP_COMMANDS, *LIST_COMMANDS}:
+                if args.worker_command in {*FIXED_RANGE_COMMANDS, *TRANSIENT_SETUP_COMMANDS,
+                                           *LIST_COMMANDS, "set-von"}:
                     # Forward original numeric tokens; Core in the Worker validates them.
                     # Parsing above already guarantees a complete JSON value.
                     del body["arguments"]
@@ -230,6 +236,9 @@ def main(argv: list[str] | None = None) -> int:
                            if key in TRANSIENT_FIELDS} if args.command in TRANSIENT_SETUP_COMMANDS else None,
                 list_configuration=list_configuration,
                 slot=getattr(args, "slot", None),
+                rise_slew=getattr(args, "rise_slew", None) if args.command == "set-cc" else None,
+                fall_slew=getattr(args, "fall_slew", None) if args.command == "set-cc" else None,
+                latch=getattr(args, "latch", None),
             )
         else:
             result = read_execute(args.command, mode=mode, resource=args.resource,

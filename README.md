@@ -287,6 +287,15 @@ runs one async job at a time, reports completion via `job_finished` and
 history. Stop does **not** imply Input OFF. For domain argument shapes and
 permissions, see [Electronic Load Worker Contract](docs/contracts/electronicload-worker-contract.md).
 
+### Offline Fixed CC Slew, VON and Short
+
+Fixed CC accepts optional paired `--rise-slew` and `--fall-slew`. VON has
+independent setup and status commands. Short ON requires confirmed Input ON
+in Fixed CC/CV/CR/CW. Short OFF leaves Input unchanged. These capabilities
+are available for dry-run and simulation. See the
+[offline controls guide](docs/fixed-slew-von-short.md)
+([繁體中文](docs/fixed-slew-von-short.zh-TW.md)) for examples and safe sequencing.
+
 ### Offline Transient CV / CR / CW
 
 `set-transient-cv`, `set-transient-cr` and `set-transient-cw` support Continuous,

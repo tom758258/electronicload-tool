@@ -23,8 +23,9 @@ TRANSIENT_COMMANDS = (*TRANSIENT_SETUP_COMMANDS, "transient-enable", "transient-
 LIST_COMMANDS = ("set-list-cc", "list-save", "list-recall", "list-trigger",
                  "list-status", "list-exit")
 LIST_FIELDS = frozenset({"range", "repeat_count", "steps"})
+AUXILIARY_COMMANDS = ("set-von", "von-status", "short-on", "short-off", "short-status")
 CONTROL_COMMANDS = ("set-cc", "set-cv", "set-cr", "set-cw", "input-on", "input-off",
-                    *TRANSIENT_COMMANDS, *LIST_COMMANDS)
+                    *TRANSIENT_COMMANDS, *LIST_COMMANDS, *AUXILIARY_COMMANDS)
 FIXED_RANGE_COMMANDS = ("set-cc", "set-cv", "set-cr")
 FIXED_RANGE_CHOICES = ("auto", "low", "high")
 TRANSIENT_FIELDS = frozenset({"transient_mode", "range", "level_a", "level_b", "rise_slew",
@@ -41,6 +42,8 @@ RANGE_RESOLUTION = {"low": Decimal("0.0001"), "high": Decimal("0.001")}
 CV_RANGE_LIMITS = {"low": Decimal("18"), "high": Decimal("120")}
 CV_RESOLUTION = {"low": Decimal("0.001"), "high": Decimal("0.01")}
 CV_MIN_VOLTAGE = Decimal("0.1")
+# Offline VON bound: IT8800 VOLT:ON 0..MAX and IT8812C rated input voltage.
+VON_MAX_VOLTAGE = Decimal("120")
 CR_RANGE_LIMITS = {
     "low": (Decimal("0.05"), Decimal("10")),
     "high": (Decimal("10"), Decimal("7500")),
@@ -74,6 +77,36 @@ def validate_current(value: object, range_name: str) -> Decimal:
     if current != current.quantize(RANGE_RESOLUTION[range_name]):
         raise LoadError("invalid_current_resolution", "Current exceeds the range's programming resolution.")
     return current
+
+
+def validate_fixed_cc_slew(range_name: str, rise_slew: object, fall_slew: object) -> dict:
+    if rise_slew is None and fall_slew is None:
+        return {}
+    if rise_slew is None or fall_slew is None:
+        raise LoadError("argument_error", "Supply both rising and falling slew rates.")
+    low, high = SLEW_LIMITS[range_name]
+    settings = {}
+    for field, value in (("rise_slew", rise_slew), ("fall_slew", fall_slew)):
+        try:
+            slew = _decimal(value)
+        except LoadError as exc:
+            raise LoadError("invalid_slew", "Slew must be a finite number.", field=field) from exc
+        if not low <= slew <= high:
+            raise LoadError("slew_out_of_range", "Slew is outside the selected range.", field=field)
+        settings[f"{field}_a_per_us"] = str(slew)
+    return settings
+
+
+def validate_von(voltage: object, latch: object) -> Decimal:
+    if voltage is None or latch not in ("on", "off"):
+        raise LoadError("argument_error", "VON requires voltage and latch (on or off).")
+    try:
+        threshold = _decimal(voltage)
+    except LoadError as exc:
+        raise LoadError("invalid_voltage", "VON threshold must be a finite number.") from exc
+    if not 0 <= threshold <= VON_MAX_VOLTAGE:
+        raise LoadError("voltage_out_of_range", "VON threshold must be 0 through 120 V.")
+    return threshold
 
 
 def validate_transient_cc(arguments: dict) -> dict:
@@ -495,6 +528,29 @@ def _input_off(session) -> None:
         raise LoadError("input_not_off", "Input must be confirmed OFF before configuration.")
 
 
+def _short_simulation(session: ControlSimulator, command: str, stop: Event | None) -> dict:
+    query = "INP:SHOR:STAT?"
+    if command == "short-status":
+        return {"short_state": _flag(session, query)}
+    enable = command == "short-on"
+    if enable:
+        if _flag(session, "INP:STAT?") != "ON":
+            raise LoadError("input_not_on", "Short ON requires confirmed Input ON.")
+        if (session.mode != "FIX" or session.function not in TRANSIENT_FUNCTIONS.values()
+                or _flag(session, "TRAN?") != "OFF"):
+            raise LoadError("unsafe_mode", "Short ON requires Fixed CC, CV, CR or CW.")
+        if _flag(session, query) != "OFF":
+            raise LoadError("already_short_on", "Short is already ON.")
+        if stop is not None and stop.is_set():
+            raise LoadError("stopping", "Short ON was blocked because Worker is stopping.")
+    session.short_on = enable
+    state = _flag(session, query)
+    if state != ("ON" if enable else "OFF"):
+        raise LoadError("short_state_not_confirmed", "Short state was not confirmed.", 3,
+                        short_state="UNKNOWN")
+    return {"short_state": state}
+
+
 def _confirm_input_state(session, expected: str) -> bool:
     """Observe a write's state transition without sending the write again.
 
@@ -751,12 +807,43 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
             stop: Event | None = None, simulator: ControlSimulator | None = None,
             transient: dict | None = None, hardware_validation: str | None = None,
             validation_settings: dict | None = None,
-            list_configuration: dict | None = None, slot: int | None = None) -> dict:
+            list_configuration: dict | None = None, slot: int | None = None,
+            rise_slew: object | None = None, fall_slew: object | None = None,
+            latch: str | None = None) -> dict:
     if command not in CONTROL_COMMANDS or mode not in {"live", "simulate", "dry-run"}:
         raise LoadError("argument_error", "Unknown control command or mode.")
     if model_id != MODEL_ID:
         raise LoadError("unsupported_model", "The requested profile is not registered.")
     validate_connection(resource, backend, required=mode == "live")
+    has_slew = rise_slew is not None or fall_slew is not None
+    if has_slew and command != "set-cc":
+        raise LoadError("argument_error", "Fixed slew arguments require set-cc.")
+    if latch is not None and command != "set-von":
+        raise LoadError("argument_error", "Latch applies only to set-von.")
+    if has_slew or command in AUXILIARY_COMMANDS:
+        if mode == "live":
+            raise LoadError("unsupported_live_scope", "Fixed slew, VON and Short are offline only.")
+        if hardware_validation is not None:
+            raise LoadError("argument_error", "Offline controls do not take hardware-validation scope.")
+    if command in AUXILIARY_COMMANDS:
+        if (any(value is not None for value in (current, resistance, power, range_name, transient,
+                                               validation_settings, list_configuration, slot))
+                or (command != "set-von" and voltage is not None) or confirmed):
+            raise LoadError("argument_error", "Unexpected VON or Short arguments.")
+        threshold = validate_von(voltage, latch) if command == "set-von" else None
+        if mode == "dry-run":
+            result = {"command": command, "hardware_access": False}
+            if threshold is not None:
+                result.update(threshold_v=str(threshold), latch=latch)
+            return result
+        simulated = simulator or ControlSimulator()
+        if threshold is not None:
+            _input_off(simulated)
+            simulated.von_settings = (threshold, latch)
+        if command in {"set-von", "von-status"}:
+            voltage, latch = simulated.von_settings
+            return {"threshold_v": str(voltage), "latch": latch}
+        return _short_simulation(simulated, command, stop)
     if command in LIST_COMMANDS:
         if (any(value is not None for value in (current, voltage, resistance, power, range_name,
                                                 transient, hardware_validation, validation_settings))
@@ -838,6 +925,7 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
     if command in FIXED_RANGE_COMMANDS:
         value = {"set-cc": current, "set-cv": voltage, "set-cr": resistance}[command]
         range_name = resolve_fixed_range(command, value, range_name)
+    slew = validate_fixed_cc_slew(range_name, rise_slew, fall_slew) if has_slew else {}
     if command == "set-cw":
         validate_power(power)
     if mode == "dry-run":
@@ -849,7 +937,7 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
                 "current_a": float(_decimal(current)) if current is not None else None,
                 "voltage_v": float(validate_voltage(voltage, range_name))
                 if command == "set-cv" else None,
-                "input_on_requires_confirmation": command == "input-on"}
+                "input_on_requires_confirmation": command == "input-on", **slew}
         if command == "set-cr":
             result["resistance_ohm"] = float(validate_resistance(resistance, range_name))
         return result
@@ -862,6 +950,9 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
         result = _perform(simulated, command, current=current,
                         voltage=voltage, resistance=resistance, power=power, range_name=range_name,
                         confirmed=confirmed, stop=stop, allow_cv=True, allow_cr=True, allow_cw=True)
+        if slew:
+            simulated.fixed_cc_slew = slew
+            result.update(simulated.fixed_cc_slew)
         if command in {"set-cc", "set-cv", "set-cr", "set-cw"}:
             simulated.transient_configuration = None
             simulated.last_trigger = None

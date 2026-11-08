@@ -29,6 +29,9 @@ class ControlSimulator:
         self.resistance_ohm = Decimal("10")
         self.power_w = Decimal("0")
         self.remote = False
+        self.fixed_cc_slew = {}
+        self.von_settings = (Decimal("0"), "on")
+        self.short_on = False
         self.transient_configuration = None
         self.transient_function = None
         self.transient_enabled = False
@@ -98,7 +101,7 @@ class ControlSimulator:
             "RES?": str(self.resistance_ohm),
             "POW?": str(self.power_w),
             "TRAN?": "1" if self.transient_enabled else "0",
-            "INP:SHOR:STAT?": "0",
+            "INP:SHOR:STAT?": "1" if self.short_on else "0",
             "MEAS:VOLT?": "12.0",
             "MEAS:CURR?": str(self.current_a if self.input_on else 0),
             "FETC:POW?": str(12.0 * self.current_a if self.input_on else 0),
