@@ -289,12 +289,44 @@ permissions, see [Electronic Load Worker Contract](docs/contracts/electronicload
 
 ### Offline Fixed CC Slew, VON and Short
 
-Fixed CC accepts optional paired `--rise-slew` and `--fall-slew`. VON has
-independent setup and status commands. Short ON requires confirmed Input ON
-in Fixed CC/CV/CR/CW. Short OFF leaves Input unchanged. These capabilities
-are available for dry-run and simulation. See the
-[offline controls guide](docs/fixed-slew-von-short.md)
-([繁體中文](docs/fixed-slew-von-short.zh-TW.md)) for examples and safe sequencing.
+These capabilities support simulation and dry-run. Use one simulated Worker to
+retain settings and Input state across commands.
+
+```powershell
+electronicload-tool set-cc --simulate --current 1 --range auto --rise-slew 0.1 --fall-slew 0.2 --json
+electronicload-tool set-von --simulate --voltage 10 --latch on --json
+electronicload-tool von-status --simulate --json
+```
+
+Supply both Slew rates in A/μs or omit both for the original Fixed CC operation.
+Auto selects the range from current first. Low accepts 0.0001–0.25 A/μs and
+High accepts 0.001–2.5 A/μs. VON requires a threshold and Latch (`on` or `off`)
+with confirmed Input OFF. The simulated threshold accepts 0–120 V without an
+assumed step and persists across mode changes. The IT8812C manual describes VON
+as ineffective in CV mode.
+
+In a simulated Worker, `short-on` requires Fixed CC/CV/CR/CW, confirmed Input ON
+and Short OFF. Read state with `short-status`. **After `short-off`, a DUT can
+still be loaded by the previous Fixed setting if Input remains ON. Explicitly
+issue `input-off` and confirm OFF to stop loading.**
+
+這些功能支援模擬與 dry-run。跨指令保留設定和 Input 狀態時，使用同一個模擬
+Worker。兩個斜率須一併提供，單位為 A/μs，也可一併省略以沿用原有 Fixed CC
+操作。Auto 先依電流選量程。Low 接受 0.0001～0.25 A/μs，High 接受
+0.001～2.5 A/μs。設定 VON 須提供 Threshold 與 Latch（`on` 或 `off`），並
+確認 Input OFF。模擬接受 0～120 V，不假設步進，跨模式保留設定。IT8812C 手冊
+說明 VON 在 CV 模式下不起作用。
+
+模擬 Worker 的 `short-on` 限 Fixed CC／CV／CR／CW，須確認 Input ON 與 Short OFF。
+用 `short-status` 查詢。**執行 `short-off` 後，若 Input 仍為 ON，先前的 Fixed 設定
+仍可能對 DUT 帶載。要停止帶載，請明確執行 `input-off` 並確認 OFF。**
+
+See the [Worker contract](docs/contracts/electronicload-worker-contract.md#offline-fixed-cc-slew-von-and-short)
+for argument and result fields. ITECH documents the command mappings as
+`CURR:SLEW:POS` / `CURR:SLEW:NEG`, `VOLT:ON` / `VOLT:LATC` and `INP:SHOR`.
+The offline VON bound uses the documented 0–MAX range and the rated 120 V
+input limit. Physical VON limits and write/readback behavior require separate
+validation. [ITECH Programming Guide](https://cdn.itechate.com/uploadfiles/%E7%94%A8%E6%88%B7%E6%89%8B%E5%86%8C/user%20manual/it8800/IT8800%20Programming%20Guide-EN.pdf) · [IT8812C specifications](https://www.itechate.com/uploadfiles/2019/06/201906211045484548.pdf) · [ITECH User Manual](https://media.digikey.com/pdf/Data%20Sheets/ITech%20Elect%20PDFs/IT8800%20User%20Manual.pdf)
 
 ### Offline Transient CV / CR / CW
 
@@ -403,8 +435,9 @@ count planned cases as physical PASS.
 See [Controlled instrument validation](#controlled-instrument-validation).
 
 `scripts/preflight-cli.ps1` covers the offline CLI and ordinary LIVE refusal
-behavior, including CV/CR/CW/Transient and Manifest exposure. Use
-`-TransientOnly` for focused Transient checks. Preparing hardware scripts and
+behavior and Manifest exposure. Use `-TransientOnly` for focused Transient
+checks or `-FixedSlewVonShortOnly` for the offline Slew, VON and Short cases.
+Preparing hardware scripts and
 executing hardware tests are separate activities: physical runs require the
 operator gates below. Normal CI continues to run no-hardware checks.
 
@@ -433,8 +466,8 @@ Then run the relevant checks:
 For a focused Fixed Auto CLI check, run `scripts/preflight-cli.ps1 -FixedAutoOnly`.
 It covers Auto Low/High in simulation/dry-run, exact-value refusal, required
 Range, explicit High, Product LIVE refusal for CV/CR and Manifest Range options.
-The default preflight includes these checks; `-TransientOnly` stays scoped to
-Transient and cannot be combined with `-FixedAutoOnly`.
+The default preflight includes these checks. Select only one focused switch
+per invocation.
 
 See [Testing Guidelines](docs/testing-guidelines.md) for verification scope and
 installed-wheel checks. Contributor changes follow [AGENTS.md](AGENTS.md).

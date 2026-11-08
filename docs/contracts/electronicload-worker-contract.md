@@ -130,8 +130,7 @@ Dry-run validates arguments and returns `hardware_access: false` without
 checking or changing simulated state. The five new commands appear as
 `kind: "async_job"` in Manifest schema 2. All five and Fixed CC with Slew are
 blocked before VISA, including on contributor validation paths. See the
-[offline controls guide](../fixed-slew-von-short.md)
-([繁體中文](../fixed-slew-von-short.zh-TW.md)).
+[offline CLI usage](../../README.md#offline-fixed-cc-slew-von-and-short).
 
 ## Offline Transient CC / CV / CR / CW
 
