@@ -15,7 +15,10 @@ from .identity import MODEL_ID, parse_identity
 from .visa import open_session, validate_connection
 from .simulator import ControlSimulator
 
-TRANSIENT_COMMANDS = ("set-transient-cc", "transient-enable", "transient-disable",
+TRANSIENT_SETUP_COMMANDS = {"set-transient-cc": "CC", "set-transient-cv": "CV",
+                            "set-transient-cr": "CR", "set-transient-cw": "CW"}
+TRANSIENT_FUNCTIONS = {"CC": "CURR", "CV": "VOLT", "CR": "RES", "CW": "POW"}
+TRANSIENT_COMMANDS = (*TRANSIENT_SETUP_COMMANDS, "transient-enable", "transient-disable",
                       "transient-trigger", "transient-status")
 LIST_COMMANDS = ("set-list-cc", "list-save", "list-recall", "list-trigger",
                  "list-status", "list-exit")
@@ -278,13 +281,14 @@ def _transient_simulation(session, command, configuration, stop):
                                 "source": "software"}
     else:
         _input_off(session)
-        if command == "set-transient-cc":
+        if command in TRANSIENT_SETUP_COMMANDS:
             if session.transient_enabled:
                 raise LoadError("transient_enabled", "Disable Transient before setup.")
             session.transient_configuration = dict(configuration)
             session.last_trigger = None
             session.mode = "TRAN"
-            session.function = "CURR"
+            session.transient_function = TRANSIENT_SETUP_COMMANDS[command]
+            session.function = TRANSIENT_FUNCTIONS[session.transient_function]
         elif command == "transient-enable":
             if session.transient_configuration is None:
                 raise LoadError("transient_not_configured", "Enable requires Transient setup.")
@@ -393,6 +397,58 @@ def validate_power(value: object) -> Decimal:
     if power != power.quantize(CW_RESOLUTION):
         raise LoadError("invalid_power_resolution", "Power must be a multiple of 0.01 W.")
     return power
+
+
+def validate_transient(command: str, arguments: dict) -> dict:
+    """Validate one complete setup; CV/CR/CW have no slew or documented width step."""
+    if command == "set-transient-cc":
+        return validate_transient_cc(arguments)
+    if command not in TRANSIENT_SETUP_COMMANDS or not isinstance(arguments, dict):
+        raise LoadError("argument_error", "Transient setup requires a command and object.")
+    mode = arguments.get("transient_mode")
+    widths = {"continuous": {"width_a", "width_b"}, "pulse": {"pulse_width"}, "toggle": set()}
+    if not isinstance(mode, str) or mode not in widths:
+        raise LoadError("argument_error", "Transient mode must be continuous, pulse or toggle.")
+    required = {"transient_mode", "level_a", "level_b"}
+    if command != "set-transient-cw":
+        required.add("range")
+    if set(arguments) != required | widths[mode]:
+        raise LoadError("argument_error", "Supply exactly the fields required by the transient mode.")
+    selected = arguments.get("range")
+    if command != "set-transient-cw" and (
+            not isinstance(selected, str) or selected not in FIXED_RANGE_CHOICES):
+        raise LoadError("invalid_range", "Transient range must be auto, low or high.")
+    values = {}
+    for field in {"level_a", "level_b"} | widths[mode]:
+        try:
+            values[field] = _decimal(arguments[field])
+        except LoadError as exc:
+            raise LoadError("invalid_transient_value", "Transient values must be finite numbers.",
+                            field=field) from exc
+    for field in widths[mode]:
+        if not Decimal("0.00002") <= values[field] <= Decimal("3600"):
+            raise LoadError("width_out_of_range", "Width must be 0.00002 through 3600 seconds.",
+                            field=field)
+    validator = {"set-transient-cv": validate_voltage, "set-transient-cr": validate_resistance,
+                 "set-transient-cw": validate_power}[command]
+    errors = {}
+    for candidate in ("low", "high") if selected == "auto" else (selected,):
+        try:
+            for field in ("level_a", "level_b"):
+                with localcontext() as context:
+                    context.prec = max(28, len(values[field].as_tuple().digits) + 8)
+                    if command == "set-transient-cw":
+                        validator(values[field])
+                    else:
+                        validator(values[field], candidate)
+        except LoadError as exc:
+            if selected != "auto":
+                raise
+            errors[candidate] = exc.code
+        else:
+            return {"transient_mode": mode, **({"range": candidate} if selected else {}), **values}
+    raise LoadError("no_matching_range", "Neither range accepts the complete transient setup.",
+                    ranges=errors)
 
 
 def _offline_cw_settings(session) -> dict:
@@ -545,14 +601,16 @@ def _check_input_on_conditions(session, stop: Event | None, *, allow_cv: bool,
             raise LoadError("stopping", "Input ON was blocked because Worker is stopping.")
         return {"function_mode": "LIST", "function": "CURR", **session.list_settings()}
     if isinstance(session, ControlSimulator) and session.transient_configuration is not None:
-        if not session.transient_enabled or session.mode != "TRAN" or session.function != "CURR":
+        if (not session.transient_enabled or session.mode != "TRAN"
+                or session.function != TRANSIENT_FUNCTIONS.get(session.transient_function)):
             raise LoadError("transient_not_enabled", "Enable Transient before Input ON.")
-        validate_transient_cc(session.transient_configuration)
+        validate_transient("set-transient-" + session.transient_function.lower(),
+                           session.transient_configuration)
         if _flag(session, "INP:SHOR:STAT?") != "OFF":
             raise LoadError("unsafe_mode", "Short must be OFF.")
         if stop is not None and stop.is_set():
             raise LoadError("stopping", "Input ON was blocked because Worker is stopping.")
-        return {"function_mode": "TRAN", "function": "CURR", **session.transient_settings()}
+        return {"function_mode": "TRAN", "function": session.function, **session.transient_settings()}
     settings = _settings(session, allow_cv=allow_cv, allow_cr=allow_cr, allow_cw=allow_cw)
     _check_settings(session, settings)
     if _flag(session, "TRAN?") != "OFF" or _flag(session, "INP:SHOR:STAT?") != "OFF":
@@ -740,21 +798,24 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
             raise LoadError("argument_error", "Fixed setpoints do not apply to Transient commands.")
         if range_name is not None:
             raise LoadError("argument_error", "Supply Transient range inside the complete setup.")
-        configuration = validate_transient_cc(transient) if command == "set-transient-cc" else None
-        if command != "set-transient-cc" and transient is not None:
+        configuration = (validate_transient(command, transient)
+                         if command in TRANSIENT_SETUP_COMMANDS else None)
+        if command not in TRANSIENT_SETUP_COMMANDS and transient is not None:
             raise LoadError("argument_error", "Transient control takes no setup arguments.")
         if mode == "live":
-            raise LoadError("unsupported_live_scope", "Transient CC is offline only.")
+            raise LoadError("unsupported_live_scope", "Transient control is offline only.")
         if mode == "dry-run":
             result = {"command": command, "hardware_access": False}
             if configuration is not None:
                 preview = ControlSimulator()
                 preview.transient_configuration = configuration
+                preview.transient_function = TRANSIENT_SETUP_COMMANDS[command]
+                result["function"] = preview.transient_function
                 result.update(preview.transient_settings())
             return result
         return _transient_simulation(simulator or ControlSimulator(), command, configuration, stop)
     if transient is not None:
-        raise LoadError("argument_error", "Transient parameters require set-transient-cc.")
+        raise LoadError("argument_error", "Transient parameters require a Transient setup command.")
     if command == "set-cc" and current is None:
         raise LoadError("argument_error", "CC requires current and auto/low/high range.")
     if command == "set-cv" and voltage is None:

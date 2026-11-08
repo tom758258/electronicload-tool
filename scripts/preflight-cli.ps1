@@ -313,6 +313,76 @@ try {
         }
         Write-Host "PASS: Transient argument refusal $($case.Code)"
     }
+    $newTransientCases = @(
+        @{Command='set-transient-cv';Function='CV';A='1';B='2';HighA='24';HighB='25'},
+        @{Command='set-transient-cr';Function='CR';A='1';B='2';HighA='10';HighB='1000'},
+        @{Command='set-transient-cw';Function='CW';A='0';B='250'}
+    )
+    foreach ($case in $newTransientCases) {
+        foreach ($waveform in @('continuous', 'pulse', 'toggle')) {
+            $setup = @('--transient-mode', $waveform, '--level-a', $case.A, '--level-b', $case.B)
+            $expectedRange = 'low'
+            if ($case.Function -eq 'CW') { $expectedRange = $null }
+            else {
+                $selection = $(if ($waveform -eq 'pulse') { 'low' } elseif ($waveform -eq 'toggle') { 'high' } else { 'auto' })
+                $setup += @('--range', $selection)
+                if ($selection -eq 'high') {
+                    $setup += @('--level-a', $case.HighA, '--level-b', $case.HighB)
+                    $expectedRange = 'high'
+                }
+            }
+            if ($waveform -eq 'continuous') { $setup += @('--width-a', '0.0000205', '--width-b', '3600') }
+            if ($waveform -eq 'pulse') { $setup += @('--pulse-width', '0.001000000000000000001') }
+            foreach ($mode in @('simulate', 'dry-run')) {
+                $output = & $cli $case.Command "--$mode" @setup --json
+                $code = $LASTEXITCODE
+                $result = ($output -join "`n") | ConvertFrom-Json
+                if ($code -ne 0 -or $result.ok -ne $true -or
+                    $result.result.range -cne $expectedRange -or $result.result.function -cne $case.Function) {
+                    throw "$($case.Command) $waveform $mode failed."
+                }
+                if ($mode -eq 'simulate' -and ($result.result.enabled -ne $false -or
+                    $result.result.mode -cne $waveform)) { throw 'Invalid Transient setup state.' }
+                if ($mode -eq 'dry-run' -and $result.result.hardware_access -ne $false) {
+                    throw 'Transient dry-run must not access hardware.'
+                }
+                Write-Host "PASS: $($case.Command) $waveform $mode"
+            }
+        }
+        $setup = @('--transient-mode', 'toggle', '--level-a', $case.A, '--level-b', $case.B)
+        if ($case.Function -ne 'CW') { $setup += @('--range', 'auto') }
+        $refusals = @(
+            @{Args=@('--rise-slew', '0.1');Code='argument_error'},
+            @{Args=@('--level-a', 'NaN');Code='invalid_transient_value'},
+            @{Args=@('--width-a', '0.001');Code='argument_error'},
+            @{Args=@('--transient-mode', 'pulse', '--pulse-width', '0.000019');Code='width_out_of_range'}
+        )
+        if ($case.Function -eq 'CV') { $refusals += @{Args=@('--level-a','18.001');Code='no_matching_range'} }
+        if ($case.Function -eq 'CR') { $refusals += @{Args=@('--level-a','5','--level-b','100');Code='no_matching_range'} }
+        if ($case.Function -eq 'CW') {
+            $refusals += @{Args=@('--range','auto');Code='argument_error'}
+            $refusals += @{Args=@('--level-a','1.000000000000000001');Code='invalid_power_resolution'}
+        }
+        foreach ($refusal in $refusals) {
+            $extras = $refusal.Args
+            $output = & $cli $case.Command --dry-run @setup @extras --json
+            $code = $LASTEXITCODE
+            $result = ($output -join "`n") | ConvertFrom-Json
+            if ($code -ne 2 -or $result.error.code -cne $refusal.Code) {
+                throw "$($case.Command) refusal failed: $($refusal.Code)."
+            }
+        }
+        foreach ($override in @($false, $true)) {
+            $extras = @()
+            if ($override) { $extras += '--validation-allow-pending-live-support' }
+            $output = & $cli $case.Command @setup @extras --resource 'USB0::0xFFFF::0x0001::SYNTHETIC::INSTR' --json
+            $code = $LASTEXITCODE
+            $result = ($output -join "`n") | ConvertFrom-Json
+            if ($code -ne 2 -or $result.error.code -cne 'unsupported_live_scope') {
+                throw "$($case.Command) LIVE refusal failed."
+            }
+        }
+    }
     $transientCommands = @('set-transient-cc', 'transient-enable', 'transient-trigger',
         'transient-disable', 'transient-status')
     foreach ($command in $transientCommands) {
@@ -353,7 +423,7 @@ try {
         $manifest.commands.'set-cw'.kind -ne 'async_job') {
         throw 'Worker manifest check failed.'
     }
-    foreach ($command in $transientCommands) {
+    foreach ($command in ($transientCommands + @('set-transient-cv', 'set-transient-cr', 'set-transient-cw'))) {
         if ($manifest.commands.$command.kind -ne 'async_job') {
             throw "Transient Manifest entry missing: $command."
         }

@@ -562,18 +562,23 @@ def test_cw_live_worker_job_fails_without_visa(monkeypatch, capsys):
     assert events[-1]['error'] == terminal['error']
 
 
-def transient_arguments(mode='toggle'):
+def transient_arguments(mode='toggle', function='CC'):
     arguments = {'transient_mode': mode, 'range': 'auto', 'level_a': 1, 'level_b': 2,
                  'rise_slew': .1, 'fall_slew': .1}
     if mode == 'continuous':
         arguments.update(width_a=.001, width_b=.002)
     elif mode == 'pulse':
         arguments['pulse_width'] = .001
+    if function != 'CC':
+        del arguments['rise_slew'], arguments['fall_slew']
+    if function == 'CW':
+        del arguments['range']
     return arguments
 
 
 @pytest.mark.parametrize('mode', ['continuous', 'pulse', 'toggle'])
-def test_transient_worker_control_flow_and_status(worker, mode):
+@pytest.mark.parametrize('function', ['CC', 'CV', 'CR', 'CW'])
+def test_transient_worker_control_flow_and_status(worker, mode, function):
     _, out, ready = worker
     status_keys = set(http(ready['status_url'])[1])
 
@@ -588,8 +593,9 @@ def test_transient_worker_control_flow_and_status(worker, mode):
         assert http(ready['status_url'])[1]['last_job']['result'] == terminal['result']
         return terminal['result']
 
-    setup = execute('set-transient-cc', transient_arguments(mode))
-    assert setup['range'] == 'low' and setup['mode'] == mode
+    setup = execute('set-transient-' + function.lower(), transient_arguments(mode, function))
+    assert setup['range'] == (None if function == 'CW' else 'low') and setup['mode'] == mode
+    assert setup['function'] == function
     assert execute('input-state')['input_state'] == 'OFF'
     assert execute('transient-enable')['enabled']
     assert execute('input-on', {'confirm_input_on': True})['input_state'] == 'ON'
@@ -599,9 +605,9 @@ def test_transient_worker_control_flow_and_status(worker, mode):
         assert execute('transient-status') == triggered
         assert execute('input-state')['input_state'] == 'ON'
     # Every dry-run command is a plan and leaves ongoing control state alone.
-    for command in ('set-transient-cc', 'transient-enable', 'transient-trigger',
+    for command in ('set-transient-' + function.lower(), 'transient-enable', 'transient-trigger',
                     'transient-disable', 'transient-status'):
-        arguments = transient_arguments('pulse') if command == 'set-transient-cc' else {}
+        arguments = transient_arguments('pulse', function) if command == 'set-transient-' + function.lower() else {}
         assert execute(command, arguments, dry_run=True)['hardware_access'] is False
     assert execute('transient-status') == triggered
     assert execute('input-off')['input_state'] == 'OFF'
@@ -680,7 +686,7 @@ def test_transient_worker_preserves_accepted_slew_through_cli_and_jsonl(worker, 
     assert http(ready['status_url'])[1]['last_job']['result'] == terminal['result']
 
 
-@pytest.mark.parametrize('command', ['set-transient-cc', 'transient-enable',
+@pytest.mark.parametrize('command', ['set-transient-cc', 'set-transient-cv', 'set-transient-cr', 'set-transient-cw', 'transient-enable',
                                      'transient-trigger', 'transient-disable', 'transient-status'])
 def test_transient_live_worker_terminal_refuses_before_visa(command, monkeypatch, capsys):
     from electronicload_tool_cli.worker import Runtime
@@ -688,7 +694,7 @@ def test_transient_live_worker_terminal_refuses_before_visa(command, monkeypatch
     monkeypatch.setattr(control, 'open_session', lambda *_: pytest.fail('VISA opened'))
     runtime = Runtime(mode='live', resource='USB0::0xFFFF::0x0001::SYNTHETIC::INSTR')
     job = {'worker_job_id': 'synthetic', 'job_id': None, 'command': command}
-    arguments = transient_arguments() if command == 'set-transient-cc' else {}
+    arguments = transient_arguments(function=command[-2:].upper()) if command.startswith('set-transient-') else {}
     runtime.run_job(job, arguments, {'mode': 'live'})
     events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert events[-1]['event'] == 'job_finished' and not events[-1]['ok']
@@ -846,3 +852,96 @@ def test_list_live_worker_terminal_refuses_before_visa(command, monkeypatch, cap
     assert terminal['state'] == 'failed' and not terminal['ok']
     assert terminal['error']['code'] == 'unsupported_live_scope'
     assert events[-1]['event'] == 'job_finished' and events[-1]['error'] == terminal['error']
+
+
+@pytest.mark.parametrize('function', ['CV', 'CR', 'CW'])
+def test_transient_worker_new_functions_admission_and_precision(worker, function, capsys):
+    from electronicload_tool_cli.cli import main
+    _, out, ready = worker
+    command = 'set-transient-' + function.lower()
+    arguments = transient_arguments('pulse', function)
+    for changes in ({'rise_slew': .1}, {'level_a': '1'}, {'level_b': True},
+                    {'pulse_width': None}, {'hardware_validation': 'transient-' + function.lower()},
+                    {'range': 'auto'} if function == 'CW' else {'range': []}):
+        code, rejected = http(ready['command_url'], request(command, {**arguments, **changes}))
+        assert code == 400 and rejected['worker_job_id'] is None
+    assert http(ready['status_url'])[1]['last_job'] is None
+    raw = json.dumps(arguments).replace('"pulse_width": 0.001',
+                                        '"pulse_width": 0.000020000000000000000001')
+    if function in ('CV', 'CW'):
+        invalid = raw.replace('"level_a": 1', '"level_a": 1.000000000000000000000001')
+        assert main(['send-command', '--url', ready['command_url'], '--worker-command', command,
+                     '--arguments-json', invalid, '--context-json',
+                     json.dumps(request('input-state')['context']), '--json']) == 2
+        rejected = json.loads(capsys.readouterr().out)
+        assert rejected['worker_job_id'] is None
+        assert http(ready['status_url'])[1]['last_job'] is None
+    else:
+        raw = raw.replace('"level_a": 1', '"level_a": 1.000000000000000000000001')
+    assert main(['send-command', '--url', ready['command_url'], '--worker-command', command,
+                 '--arguments-json', raw, '--context-json',
+                 json.dumps(request('input-state')['context']), '--json']) == 0
+    accepted = json.loads(capsys.readouterr().out)
+    result = wait_finished(out, accepted['worker_job_id'])['result']
+    assert result['configuration']['pulse_width_s'] == '0.000020000000000000000001'
+    if function == 'CR':
+        assert result['configuration']['level_a_ohm'] == '1.000000000000000000000001'
+
+
+@pytest.mark.parametrize(
+    'function,changes,error_code',
+    [
+        ('CV', {'level_a': 1, 'level_b': 18.001}, 'no_matching_range'),
+        ('CR', {'level_a': 5, 'level_b': 100}, 'no_matching_range'),
+        ('CW', {'range': 'auto'}, 'argument_error'),
+    ],
+    ids=['CV', 'CR', 'CW'],
+)
+def test_transient_new_worker_rejects_invalid_setup_before_job(worker, function, changes, error_code):
+    _, out, ready = worker
+    code, accepted = http(ready['command_url'], request('input-state'))
+    assert code == 202
+    assert wait_finished(out, accepted['worker_job_id'])['state'] == 'succeeded'
+    before = http(ready['status_url'])[1]
+
+    arguments = {**transient_arguments(function=function), **changes}
+    code, rejected = http(ready['command_url'], request('set-transient-' + function.lower(), arguments))
+    assert code == 400
+    assert rejected['worker_job_id'] is None
+    assert rejected['error']['code'] == error_code
+    after = http(ready['status_url'])[1]
+    assert after['active_job'] is None
+    assert after['last_job'] == before['last_job']
+
+    # Shutdown flushes JSONL so an unexpected job cannot be missed.
+    assert http(ready['stop_url'], {'schema_version': 3})[0] == 202
+    assert out.get(timeout=5)['event'] == 'summary'
+
+
+def test_transient_new_worker_preserves_cr_pulse_width_through_cli_and_jsonl(worker, capsys, monkeypatch):
+    from electronicload_tool_cli import cli
+    from electronicload_tool_cli.worker_client import request as worker_request
+
+    _, out, ready = worker
+    command = 'set-transient-cr'
+    width = '0.000020000000000000000001'
+    arguments = f'{{"transient_mode":"pulse","range":"auto","level_a":10,"level_b":1000,"pulse_width":{width}}}'
+
+    def check_http_status(url, path, payload):
+        code, response = worker_request(url, path, payload)
+        assert code == 202
+        return code, response
+
+    monkeypatch.setattr(cli, 'worker_request', check_http_status)
+    assert cli.main(['send-command', '--url', ready['command_url'],
+                     '--worker-command', command, '--arguments-json', arguments,
+                     '--context-json', json.dumps(request(command)['context']), '--json']) == 0
+    accepted = json.loads(capsys.readouterr().out)
+    terminal = wait_finished(out, accepted['worker_job_id'])
+    assert terminal['state'] == 'succeeded'
+    result = terminal['result']
+    assert result['function'] == 'CR'
+    assert result['mode'] == 'pulse'
+    assert result['range'] == 'high'
+    assert result['configuration']['pulse_width_s'] == width
+    assert http(ready['status_url'])[1]['last_job']['result'] == result

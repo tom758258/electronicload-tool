@@ -60,7 +60,7 @@ affected CLI parser/help/version and read-only CLI contracts:
 
 Worker integration uses a real local simulated subprocess, HTTP and JSONL,
 but never physical hardware. The **single** `live-cli-check.ps1` defaults to
-all five modes: CC, CV, CR, CW and Transient CC. `-Modes` selects one or more
+all eight modes: CC, CV, CR, CW and Transient CC/CV/CR/CW. `-Modes` selects one or more
 modes while retaining common read-only safety prechecks and each selected
 mode's explicit Input ON/OFF flow. Test its `-PlanOnly` operation and unattended
 LIVE refusal with a **fictional** USB Resource. Without `-ConfirmWrites` or
@@ -92,18 +92,20 @@ Dependency/lockfile changes require the focused packaging checks below.
 Report unavailable PowerShell, Ruff, dependencies and hardware as BLOCKED
 or NOT RUN, not PASS.
 
-For offline Transient CC, run only its Core/CLI tests and selected Worker cases:
+For offline Transient CC/CV/CR/CW, run only its Core/CLI tests and selected Worker cases:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_transient_core.py tests/test_transient_cli.py tests/test_worker.py -k transient
 .\scripts\preflight-cli.ps1 -TransientOnly
 ```
 
-Cover complete mode-specific setup, both levels/slew rates, exact resolution,
-Auto Low preference and High fallback, no rounding, atomic refusal, state guards,
+Cover complete mode-specific setup, both levels, CC-only slew rates, exact resolution,
+Auto Low preference and High fallback for both levels together, CW without Range,
+CV/CR/CW without slew, exact width preservation without an invented step,
+no rounding, atomic refusal, state guards,
 repeated software triggers, status snapshots and side-effect-free dry-run.
 Verify one simulated Worker's HTTP/JSONL flow, Manifest entries, decimal-token
-preservation, failed-job terminals, unchanged `GET /status`, and LIVE refusal
+preservation, failed-job terminals, unchanged `GET /status`, function/waveform separation, CW null range, and LIVE refusal
 before VISA even with the CLI override. Trigger terminal success never proves
 waveform completion; Stop never changes Input state.
 
@@ -176,12 +178,19 @@ mode, comma-separated/PowerShell-array selections, invalid-mode refusal,
 unchanged authorization and source-limit gates, selected case totals, and NOT RUN
 for planned cases. Unselected modes must have no cases or PASS counts.
 Keep every existing Transient mode/range, repeated trigger, status and OFF/disable
-step. No unrelated Core/CLI/Worker, local full-suite, release or packaging checks
+step. Check CV/CR/CW Continuous/Pulse/Toggle plans, Core-resolved Auto range,
+mode-specific numeric tokens and no slew/Range where inapplicable. Preserve
+the 30-second command and 900-second total deadlines; more cases do not
+authorize a larger budget. Verify cleanup retains the active Transient scope. No unrelated Core/CLI/Worker, local full-suite, release or packaging checks
 are required for this script-only behavior change.
 Exercise failure cleanup with a fake CLI/VISA process as appropriate: failure
 after a possible ON must attempt explicit OFF, an enabled Transient is disabled
 only after verified OFF, and failures retain FAIL with remaining cases NOT RUN.
 Check redaction and that normal runs do not retain private raw artifacts.
+The fake-CLI cleanup integration uses a POSIX pseudo-terminal to pass the real
+interactive gates without hardware; Windows skips that specific check. It
+stages the unchanged script with a preflight stub to avoid rerunning unrelated
+preflight cases.
 Never bypass interactive gates to test an actual instrument automatically.
 
 Run directly affected existing Input/Fixed, CLI parser and Transient tests when

@@ -49,6 +49,9 @@ Common contracts remain authoritative for the HTTP and JSONL envelopes.
 | `set-cr` | `{"resistance": <number>, "range": "auto"\|"low"\|"high"}` | Offline-only CR setpoint/range simulation; LIVE refused |
 | `set-cw` | `{"power": <number>}` | Offline-only Fixed CW setpoint simulation; LIVE refused |
 | `set-transient-cc` | Complete mode-specific configuration below | Offline Transient control status |
+| `set-transient-cv` | `transient_mode`, `range`, `level_a`, `level_b` (V), applicable widths (s) | Offline Transient CV status |
+| `set-transient-cr` | `transient_mode`, `range`, `level_a`, `level_b` (Ω), applicable widths (s) | Offline Transient CR status |
+| `set-transient-cw` | `transient_mode`, `level_a`, `level_b` (W), applicable widths (s); no Range | Offline Transient CW status |
 | `transient-enable` | `{}` | Offline Transient control status |
 | `transient-disable` | `{}` | Offline Transient control status |
 | `transient-trigger` | `{}` | Status with latest accepted software trigger |
@@ -99,7 +102,18 @@ timing, result fields, JSONL envelopes, lifecycle and exits remain unchanged.
 CV/CR/CW, Transient and LIST remain Product LIVE blocked. Auto uses the existing
 Fixed CC commands, readbacks and Input OFF/ON gates.
 
-## Offline Transient CC
+## Offline Transient CC / CV / CR / CW
+
+The [Transient interface](../transient-modes.md) ([繁體中文](../transient-modes.zh-TW.md))
+defines all four setup commands, limits and units. CV/CR/CW use the same waveform
+modes and width-field requirements as CC, with no slew arguments. CV/CR require
+`auto|low|high` for both levels together, using their Fixed limits/resolution;
+CW rejects Range and uses 0–250 W / 0.01 W. CV/CR/CW widths are finite values
+within 0.00002–3600 s, without a fixed decimal step. Original numeric tokens
+survive CLI/HTTP validation. Invalid/missing/extra fields and non-number values
+receive HTTP 400 before creating a job. State and LIVE refusals retain the
+existing HTTP 202 admission followed by a failed terminal.
+
 
 `set-transient-cc` requires `transient_mode` (`continuous`, `pulse`, `toggle`),
 `range` (`auto`, `low`, `high`), `level_a`, `level_b` in A, and `rise_slew`,
@@ -152,11 +166,12 @@ phase alignment or physical activity/completion state is inferred. No command
 implicitly enables/disables Input or performs rollback. Stop remains a signal,
 never an implicit Input OFF; it blocks new Transient mutations and Input ON.
 
-All five commands return the same simulated domain status shape:
+All eight Transient commands return the same simulated domain status shape:
 
 ```json
 {
   "configured": true,
+  "function": "CC",
   "mode": "continuous",
   "range": "low",
   "enabled": true,
@@ -175,10 +190,14 @@ All five commands return the same simulated domain status shape:
 ```
 
 `configuration` includes only the selected mode's width fields (`pulse_width_s`
-for Pulse, none for Toggle). Levels and widths are JSON numbers; slew fields
-are decimal strings so unrestricted decimal precision is retained. Range is
-always resolved to `low` or `high`. Before setup, `configured` and `enabled`
-are false, and `mode`, `range`, `configuration`, `last_trigger` are null.
+for Pulse, none for Toggle). CC levels/widths remain JSON numbers and its slew
+fields remain exact decimal strings. CV/CW levels use `level_a_v`/`level_b_v`
+and `level_a_w`/`level_b_w` as JSON numbers; CR uses `level_a_ohm`/`level_b_ohm`
+as exact decimal strings. New modes' widths are exact decimal strings with the
+same `_s` suffixes. There are no CV/CR/CW slew fields. `function` is CC/CV/CR/CW;
+`mode` remains the waveform mode. Range resolves to `low`/`high`, or null for
+CW (also in `configuration`). Before setup, `configured` and `enabled` are false,
+and `function`, `mode`, `range`, `configuration`, `last_trigger` are null.
 Before a trigger, `last_trigger` is null; its sequence starts at 1 after setup.
 Status queries and later triggers do not mutate earlier result snapshots.
 
@@ -189,7 +208,7 @@ standalone CLI simulation is fresh for each invocation.
 
 Common `context.mode: "dry_run"` maps to Core `dry-run`: results contain
 `command` and `hardware_access: false`, plus the validated configuration fields
-at the top level for setup. A plan neither inspects nor mutates simulator state.
+at the top level for setup, including `function`. A plan neither inspects nor mutates simulator state.
 A valid LIVE request keeps existing HTTP 202 admission, then terminates with
 `unsupported_live_scope` before VISA access. The CLI contributor override cannot
 enable physical Transient support. Existing physical Fixed CC/Input behavior
@@ -283,7 +302,7 @@ CW results contain `power_w`. Simulation also returns `function_mode: "FIX"`,
 The internal simulated power readback is not a physical POW/POW:RANG SCPI
 contract. Dry-run returns `command: "set-cw"`, `hardware_access: false` and
 `input_on_requires_confirmation: false`; it does not change simulated state.
-No CW result contains a range. These offline settings do not establish a
+No Fixed CW result contains a range. These offline settings do not establish a
 circuit/DUT model or power-derived V/I/P measurement accuracy.
 
 Within the same simulated Worker, CW uses the existing confirmed `input-on`

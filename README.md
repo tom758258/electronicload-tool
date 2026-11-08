@@ -287,6 +287,19 @@ runs one async job at a time, reports completion via `job_finished` and
 history. Stop does **not** imply Input OFF. For domain argument shapes and
 permissions, see [Electronic Load Worker Contract](docs/contracts/electronicload-worker-contract.md).
 
+### Offline Transient CV / CR / CW
+
+`set-transient-cv`, `set-transient-cr` and `set-transient-cw` support Continuous,
+Pulse and Toggle with the shared Transient controls. CV/CR require one
+Auto/Low/High range for both levels; CW has no Range. These modes have no slew
+arguments. Widths accept exact finite values from 20 μs through 3600 s without
+an undocumented step. Status adds `function`; `mode` keeps its waveform meaning
+and CW `range` is null. CC fields and width-step behavior remain compatible.
+See [Transient modes](docs/transient-modes.md)
+([繁體中文](docs/transient-modes.zh-TW.md)) for limits, units, decimal result
+types, examples and the common safe control sequence. Normal Product/Worker
+LIVE Transient remains blocked.
+
 ### Offline Transient CC (Dynamic Mode)
 
 Transient CC supports **Continuous, Pulse and Toggle** in Core, CLI, Simulator
@@ -341,7 +354,7 @@ disable retains the setup. To return to Fixed operation, explicitly disable
 Transient before Fixed setup; successful Fixed setup invalidates the previous
 Transient configuration.
 
-`transient-status` reports configured, mode, resolved range, enabled, configuration
+`transient-status` reports configured, function, mode, resolved range, enabled, configuration
 and the most recent accepted software trigger. Query `input-state` separately.
 The simulator models control state only, with no waveform, pulse timer, current
 transition, DUT physics or physical-running/completion indication. Worker
@@ -349,7 +362,7 @@ transition, DUT physics or physical-running/completion indication. Worker
 the Orchestrator must explicitly attempt and confirm Input OFF before stopping
 the Worker; Stop or process exit never proves Input OFF.
 
-All five Transient commands are blocked for ordinary LIVE before opening VISA,
+All Transient commands are blocked for ordinary LIVE before opening VISA,
 including with the legacy contributor override. Normal physical Input ON remains
 Fixed CC only. The dedicated `--hardware-validation` path below is separate
 from Product LIVE and is unavailable to the Worker.
@@ -372,8 +385,8 @@ Save/Recall 與明確指定的無限循環。設定／Recall、Input ON、Trigge
 ### Unified CLI instrument validation
 
 `scripts/live-cli-check.ps1` is the single hardware validation entry point.
-Its default sequence covers all five modes: CC High/Low, CV Low/High,
-CR Low/High, CW and Transient Continuous/Pulse/Toggle. Use `-Modes` to select
+Its default sequence covers all eight modes: CC High/Low, CV Low/High,
+CR Low/High, CW and Transient CC/CV/CR/CW Continuous/Pulse/Toggle. Use `-Modes` to select
 one or more modes; common read-only safety prechecks always apply.
 CV/CR/CW/Transient use the explicit validation-only Core/CLI path.
 `-PlanOnly` checks every selected CLI request without hardware; it does not
@@ -434,8 +447,8 @@ your own approved resource for a real run:
 ```
 
 `-Modes` is the sole mode selector and replaces `-IncludeValidationModes`.
-Accepted values are `cc`, `cv`, `cr`, `cw`, and `transient-cc`; omit it for all
-five. Select a single mode or a comma-separated list:
+Accepted values are `cc`, `cv`, `cr`, `cw`, `transient-cc`, `transient-cv`,
+`transient-cr` and `transient-cw`; omit it for all eight. Select a single mode or a comma-separated list:
 
 ```powershell
 .\scripts\live-cli-check.ps1 -Target itech-it8812c -Resource '<USB_RESOURCE>' -Modes cc -PlanOnly
@@ -444,8 +457,8 @@ five. Select a single mode or a comma-separated list:
 .\scripts\live-cli-check.ps1 -Target itech-it8812c -Resource '<USB_RESOURCE>' -Modes cc,transient-cc -SourceCurrentLimitA 0.5 -SourceVoltageLimitV 12 -PlanOnly
 ```
 
-The selected modes run once each in the established CC, CV, CR, CW, Transient
-order. Unknown or empty mode names are rejected. Unselected modes have no
+The selected modes run once each in CC, CV, CR, CW, Transient CC, Transient CV,
+Transient CR, Transient CW order. Unknown or empty mode names are rejected. Unselected modes have no
 validation cases or PASS counts; planned but unexecuted cases remain NOT RUN.
 
 Whenever CV, CR, CW or Transient is selected, including the default all-mode
@@ -460,9 +473,15 @@ The mode-specific trials use `-Voltage 5` for both CV ranges,
 `-LevelB 0.2`, `-RiseSlew 0.1`, `-FallSlew 0.1`, `-WidthA 0.001`,
 `-WidthB 0.002` and `-PulseWidth 0.001` by default. Units are V, ohm, W, A,
 A/us and seconds. Override these parameters for your approved setup; Core
-checks exact model limits without rounding, and Transient levels also obey
+checks exact model limits without rounding, and Transient CC levels also obey
 the script's 2 A ceiling. A separate, printed Auto High trial deliberately
 uses **0.5 A/us** for both slew rates while retaining the selected levels.
+New Transient defaults are `-VoltageLevelA 5`, `-VoltageLevelB 6` (V),
+`-ResistanceLevelA 10`, `-ResistanceLevelB 1000` (Ω), `-PowerLevelA 1` and
+`-PowerLevelB 2` (W), sharing the width parameters. CV runs Continuous Auto,
+Pulse Low and Toggle High; CR runs Continuous Auto, Pulse High and Toggle High;
+CW runs all three without Range. No CV/CR/CW slew is supplied. Auto selection
+comes from Core and is recorded as `expected_range` for later readback checks.
 An unsuitable parameter combination fails the offline plan before hardware I/O.
 
 The CV/CR/CW/Transient sequence covers CV Low/High, CR Low/High, CW, Continuous Auto,
@@ -522,7 +541,7 @@ VISA session closure proves Input OFF. No reset, `SYST:LOC`, protection clear,
 SCPI error-queue consumption or automatic reconnect is added.
 
 The CC trial uses normal Product LIVE permissions. CV/CR/CW/Transient trials
-select `--hardware-validation cv|cr|cw|transient-cc` explicitly; the legacy
+select `--hardware-validation cv|cr|cw|transient-cc|transient-cv|transient-cr|transient-cw` explicitly; the legacy
 `--validation-allow-pending-live-support` does not enable these modes. Exact identity/USB/System VISA and Input ON
 confirmation requirements remain unchanged; the 2 A bound is only for
 the controlled validation script. System VISA library/manufacturer
@@ -533,9 +552,14 @@ nonzero-load current/power accuracy.
 Each CLI command has a **30-second** process deadline; the full run has a
 **240-second** I/O budget for CC alone, or **900 seconds** when any other mode
 is selected, beginning at Identify. Each explicit cleanup command has a
-separate 30-second allowance.
+separate 30-second allowance. The all-eight plan contains 192 command invocations
+(191 reported cases plus Identify), leaving an average of about 4.7 seconds per
+invocation within 900 seconds. The 30-second per-command ceiling is not a
+reservation for every command. Slow hardware may exhaust the unchanged total
+budget; use an explicitly selected subset if needed. The script aborts further
+normal operations on deadline and retains bounded cleanup allowances.
 After a possibly attempted Transient enable, cleanup separately checks Input
-OFF before attempting Transient Disable. If OFF cannot be confirmed, disable
+OFF before attempting Transient Disable in the active selected scope. If OFF cannot be confirmed, disable
 is blocked and operator action is reported. Cleanup success never erases an
 earlier failed case. The operator prompt is
 not timed. Instrument VISA timeouts stay at 5000 ms. V/I/P are separate
@@ -555,9 +579,9 @@ Common v3 protocol, Stop behavior or LIVE policy.
 
 The prepared physical command mapping follows the
 [Programming Guide V2.1](https://assets.testequity.com/te1/Documents/pdf/itech/ITECH_IT8800-Programming-Guide-EN.pdf),
-printed pages 40, 46, 48, 50–52, 54 and 56–57. Transient uses `FUNC:MODE FIX`,
-`FUNC CURR`, separate `TRAN ON/OFF`, `TRIG:SOUR HOLD` and `TRIG:IMM`.
-Pulse width maps to `CURR:TRAN:AWID`; Toggle writes neither width.
+printed pages 40, 46, 48 and 50–58. Transient uses `FUNC:MODE FIX`,
+`FUNC CURR|VOLT|RES|POW`, separate `TRAN ON/OFF`, `TRIG:SOUR HOLD` and `TRIG:IMM`.
+Pulse width maps to the selected function’s `:TRAN:AWID`; Toggle writes neither width.
 CV explicitly disables automatic range and selects 18/120 V; CR selects
 10/7500 ohm. The validation path requires those corresponding numeric range
 readbacks and exact requested setpoints before ON; unfamiliar responses fail
