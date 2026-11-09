@@ -255,6 +255,30 @@ PowerShell preflight, full local pytest, release acceptance, packaging checks
 or physical tests. Keep the normal configured CI intact. Physical LIST work
 requires separate authorization and is not established by simulation.
 
+## Input Timer focused checks
+
+Run `tests/test_input_timer.py` and select `input_timer or input-timer` cases in
+`tests/test_worker.py` and `tests/test_live_validation_script.py`. Cover strict
+1–60000 integer seconds, atomic refusal, OFF-before-mutation, status with Input
+ON, Fixed mode restrictions, Short mutual exclusion, Transient/LIST selection
+blocking, VON coexistence, retained Timer on Input OFF/Stop, no simulated
+countdown, and state-free dry-run. Core owns validation and safety rules.
+
+Verify the four async Manifest entries, unchanged protocol/schema and runtime
+status, HTTP argument rejection before jobs, accepted-job failures, CLI forwarding
+and LIVE refusal before VISA even with the legacy override. Record physical
+Timer SCPI with Fake VISA only; verify readback, remote-transition safety
+rechecks, Stop, uncertain ON, and no implicit retry/OFF.
+
+Run `scripts/preflight-cli.ps1 -InputTimerOnly` and Timer-only script PlanOnly /
+missing-gate / noninteractive refusals using a fictional USB resource with VISA
+blocked in child processes. Planned physical cases remain NOT RUN. Verify the
+bounded Fixed CC trial, redacted reports and explicit OFF cleanup. Select
+existing Input/Short/Transient/LIST guard tests and parser/help/version / Worker
+client tests only where shared paths are affected. Run Ruff on modified Python
+files. No unrelated full pytest, default all-mode preflight, release acceptance,
+packaging or physical tests are required; leave normal CI configured checks intact.
+
 ## Packaging checks
 
 For packaging, dependency, or entry-point changes:

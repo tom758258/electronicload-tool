@@ -1,5 +1,6 @@
 [CmdletBinding()]
-param([switch]$TransientOnly, [switch]$FixedAutoOnly, [switch]$FixedSlewVonShortOnly)
+param([switch]$TransientOnly, [switch]$FixedAutoOnly, [switch]$FixedSlewVonShortOnly,
+      [switch]$InputTimerOnly)
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -19,12 +20,41 @@ function Invoke-PreflightCli {
 }
 
 try {
-    if (($TransientOnly -and $FixedAutoOnly) -or
-        ($FixedSlewVonShortOnly -and ($TransientOnly -or $FixedAutoOnly))) {
+    if (@($TransientOnly, $FixedAutoOnly, $FixedSlewVonShortOnly, $InputTimerOnly |
+            Where-Object { $_ }).Count -gt 1) {
         throw 'Select only one focused preflight switch.'
     }
     if (-not (Test-Path -LiteralPath $cli)) {
         throw 'Sync the repository .venv with uv before running preflight.'
+    }
+    if (-not ($TransientOnly -or $FixedAutoOnly -or $FixedSlewVonShortOnly)) {
+        foreach ($mode in @('--simulate', '--dry-run')) {
+            foreach ($seconds in @('1', '60000')) {
+                $result = Invoke-PreflightCli @('set-input-timer', '--seconds', $seconds, $mode)
+                if ($result.result.seconds -ne [int]$seconds) { throw 'Timer seconds mismatch.' }
+            }
+            foreach ($command in @('input-timer-enable', 'input-timer-disable', 'input-timer-status')) {
+                $result = Invoke-PreflightCli @($command, $mode)
+                if ($mode -eq '--dry-run' -and $result.result.hardware_access -ne $false) {
+                    throw 'Timer dry-run accessed hardware.'
+                }
+            }
+        }
+        foreach ($seconds in @('0', '60001', '1.5', 'true', 'NaN')) {
+            $result = Invoke-PreflightCli @('set-input-timer', '--seconds', $seconds, '--simulate') 2
+            if ($result.ok -ne $false) { throw 'Invalid Timer accepted.' }
+        }
+        $manifest = Invoke-PreflightCli @('manifest')
+        foreach ($command in @('set-input-timer', 'input-timer-enable', 'input-timer-disable', 'input-timer-status')) {
+            if ($manifest.commands.$command.kind -cne 'async_job') { throw 'Timer Manifest missing.' }
+            $setting = @($command)
+            if ($command -eq 'set-input-timer') { $setting += @('--seconds', '5') }
+            $refusal = Invoke-PreflightCli ($setting + @('--validation-allow-pending-live-support',
+                '--resource', 'USB0::0xFFFF::0x0001::SYNTHETIC::INSTR')) 2
+            if ($refusal.error.code -cne 'unsupported_live_scope') { throw 'Timer LIVE refusal failed.' }
+        }
+        Write-Host 'PASS: Input Timer preflight'
+        if ($InputTimerOnly) { exit 0 }
     }
     if (-not ($TransientOnly -or $FixedAutoOnly)) {
         $rise = '0.100000000000000000001'

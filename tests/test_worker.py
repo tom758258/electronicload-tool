@@ -1027,3 +1027,72 @@ def test_fixed_slew_von_short_live_worker_refuses_before_visa(command, arguments
     event = json.loads(capsys.readouterr().out.splitlines()[-1])
     assert terminal['state'] == 'failed' and terminal['error']['code'] == 'unsupported_live_scope'
     assert event['event'] == 'job_finished' and event['error'] == terminal['error']
+
+
+def test_input_timer_worker_admission_jobs_state_and_cli_forwarding(worker, capsys):
+    from electronicload_tool_cli.cli import main
+    _, out, ready = worker
+    initial = http(ready['status_url'])[1]
+    for arguments in ({}, {'seconds': True}, {'seconds': 1.0}, {'seconds': '1'},
+                      {'seconds': None}, {'seconds': 0}, {'seconds': 60001},
+                      {'seconds': 1, 'extra': 1}):
+        code, result = http(ready['command_url'], request('set-input-timer', arguments))
+        assert code == 400 and result['worker_job_id'] is None
+    code, result = http(ready['command_url'], request('input-timer-enable', {'seconds': 1}))
+    assert code == 400 and result['worker_job_id'] is None
+    assert http(ready['status_url'])[1]['last_job'] is None
+
+    def run(command, arguments=None, dry_run=False, error=None):
+        payload = request(command, arguments)
+        if dry_run:
+            payload['context']['mode'] = 'dry_run'
+        code, result = http(ready['command_url'], payload)
+        assert code == 202
+        event = wait_finished(out, result['worker_job_id'])
+        assert event['state'] == ('failed' if error else 'succeeded')
+        if error:
+            assert event['error']['code'] == error
+        assert http(ready['status_url'])[1].keys() == initial.keys()
+        return event['result']
+
+    assert main(['send-command', '--url', ready['command_url'], '--worker-command', 'set-input-timer',
+                 '--arguments-json', '{"seconds":60000}', '--context-json',
+                 json.dumps(request('set-input-timer')['context']), '--json']) == 0
+    accepted = json.loads(capsys.readouterr().out)
+    event = wait_finished(out, accepted['worker_job_id'])
+    assert event['result'] == {'seconds': 60000, 'enabled': False}
+    run('set-input-timer', {'seconds': 1}, dry_run=True)
+    assert run('input-timer-enable') == {'seconds': 60000, 'enabled': True}
+    run('input-on', {'confirm_input_on': True})
+    run('input-timer-disable', error='input_not_off')
+    run('short-on', error='input_timer_enabled')
+    assert run('input-timer-status') == {'seconds': 60000, 'enabled': True}
+    run('input-off')
+    assert run('input-timer-status')['enabled'] is True
+    assert run('input-timer-disable')['enabled'] is False
+    # Stop stays I/O-free; no Timer reset or Input mutation is hidden in Stop.
+    from electronicload_tool_cli.worker import Runtime
+    runtime = Runtime(mode='simulate')
+    runtime._execute('input-timer-enable', {}, {'mode': 'simulate'})
+    runtime._execute('input-on', {'confirm_input_on': True}, {'mode': 'simulate'})
+    runtime.stop.set()
+    assert runtime.simulator.input_on and runtime.simulator.input_timer_enabled
+    assert runtime._execute('input-timer-status', {}, {'mode': 'simulate'})['enabled'] is True
+
+
+@pytest.mark.parametrize('command', ['set-input-timer', 'input-timer-enable',
+                                    'input-timer-disable', 'input-timer-status'])
+def test_input_timer_live_worker_terminal_refuses_before_visa(command, monkeypatch, capsys):
+    from electronicload_tool_cli.worker import Runtime, _arguments
+    from electronicload_tool_core import control
+    from electronicload_tool_core.errors import LoadError
+    monkeypatch.setattr(control, 'open_session', lambda *_: pytest.fail('VISA opened'))
+    runtime = Runtime(mode='live', resource='USB0::0xFFFF::0x0001::SYNTHETIC::INSTR')
+    arguments = {'seconds': 5} if command == 'set-input-timer' else {}
+    with pytest.raises(LoadError):
+        _arguments(command, {**arguments, 'hardware_validation': 'input-timer'}, runtime)
+    job = {'worker_job_id': 'timer', 'job_id': None, 'command': command}
+    runtime.run_job(job, arguments, {'mode': 'live'})
+    event = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert event['event'] == 'job_finished' and event['state'] == 'failed'
+    assert event['error']['code'] == 'unsupported_live_scope'

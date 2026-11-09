@@ -2,6 +2,7 @@
 Single, bounded IT8812C CLI hardware validation.
 Default: all eight modes, with common read-only safety prechecks.
 -Modes selects cc, cv, cr, cw and/or transient-cc/cv/cr/cw (comma-separated or an array).
+-InputTimerOnly selects a separate bounded Fixed CC Timer trial; excluded from defaults.
 Requires approved source/DUT limits, write/ON gates and interactive confirmation.
 -PlanOnly validates every planned CLI request without VISA or hardware access.
 #>
@@ -32,6 +33,8 @@ param(
     [string]$WidthA = '0.001',
     [string]$WidthB = '0.002',
     [string]$PulseWidth = '0.001',
+    [switch]$InputTimerOnly,
+    [string]$TimerSeconds = '5',
     [switch]$PlanOnly,
     [switch]$ConfirmWrites,
     [switch]$EnableInputOn,
@@ -40,6 +43,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $supportedModes = @('cc', 'cv', 'cr', 'cw', 'transient-cc', 'transient-cv', 'transient-cr', 'transient-cw')
+if ($InputTimerOnly) {
+    if ($PSBoundParameters.ContainsKey('Modes')) { throw 'InputTimerOnly cannot be combined with Modes.' }
+    $supportedModes = @('input-timer')
+    $Modes = @('input-timer')
+}
 $requestedModes = @($Modes | ForEach-Object { $_ -split ',' } |
     ForEach-Object { $_.Trim().ToLowerInvariant() })
 # Keep the established trial order and run each selected mode only once.
@@ -62,6 +70,8 @@ $phase = 'plan'
 $inputOnAttempted = $false
 $transientEnableAttempted = $false
 $activeTransientScope = $null
+$timerEnableAttempted = $false
+$timerOnStartMs = 0
 $commandIndex = 0
 $report = [ordered]@{
     status = 'NOT RUN'
@@ -114,7 +124,7 @@ function Save-Report {
             if ($entry.command -eq 'set-cc') {
                 $case.current_a = $entry.response.result.current_a
             }
-            foreach ($field in @('configuration', 'enabled', 'validation_only', 'validation_scope',
+            foreach ($field in @('configuration', 'seconds', 'enabled', 'state_source', 'validation_only', 'validation_scope',
                                   'trigger_dispatched_at_utc', 'waveform_completion_known')) {
                 if ($null -ne $entry.response.result.$field) {
                     $case[$field] = $entry.response.result.$field
@@ -346,7 +356,7 @@ try {
     if (-not (Test-Path -LiteralPath $python) -or -not (Test-Path -LiteralPath $cli)) {
         throw 'Sync the repository .venv with uv before running validation.'
     }
-    if ('cc' -in $selectedModes) {
+    if ('cc' -in $selectedModes -or $InputTimerOnly) {
         # Preserve the original token; both manual trials and the script ceiling must pass.
         & $python -c 'from electronicload_tool_core.control import validate_current; import sys; value = validate_current(sys.argv[1], sys.argv[2]); validate_current(sys.argv[1], sys.argv[3]); sys.exit(0 if 0 < value <= 2 else 2)' $currentText low high
         if ($LASTEXITCODE -ne 0) {
@@ -355,6 +365,10 @@ try {
         $report.prechecks.current = 'PASS'
     }
     $report.script_current_ceiling_a = $scriptCurrentCeilingA
+    if ($InputTimerOnly) {
+        & $python -c 'import sys; from electronicload_tool_core.control import validate_input_timer; value=validate_input_timer(int(sys.argv[1])); sys.exit(0 if 3 <= value <= 10 else 2)' $TimerSeconds
+        if ($LASTEXITCODE -ne 0) { throw 'Timer validation seconds must be an integer from 3 through 10.' }
+    }
 
     if ($hasValidationModes) {
         # Script-only operator envelope, not a substitute for source current limiting.
@@ -391,6 +405,23 @@ try {
             @{name='measure-on';command='measure';args=@()},
             @{name='input-off';command='input-off';args=@()},
             @{name='final-input-state';command='input-state';args=@()}
+        )
+    }
+    if ($InputTimerOnly) {
+        $timerScope = @('--hardware-validation', 'input-timer')
+        $timerExpected = '{"current":' + $currentText + ',"range":"low","seconds":' + [int]$TimerSeconds + '}'
+        $planned += @(
+            @{name='timer-initial-disable';command='input-timer-disable';args=$timerScope},
+            @{name='timer-cc-setup';command='set-cc';args=$lowArgs},
+            @{name='timer-setup';command='set-input-timer';args=($timerScope + @('--seconds', $TimerSeconds))},
+            @{name='timer-enable';command='input-timer-enable';args=$timerScope},
+            @{name='timer-status-off';command='input-timer-status';args=$timerScope},
+            @{name='timer-on';command='input-on';args=($timerScope + @('--confirm', '--validation-settings-json', $timerExpected))},
+            @{name='timer-expiry';command='input-timer-status';args=$timerScope},
+            @{name='timer-off';command='input-off';args=@()},
+            @{name='timer-disable';command='input-timer-disable';args=$timerScope},
+            @{name='timer-status-disabled';command='input-timer-status';args=$timerScope},
+            @{name='timer-final-state';command='input-state';args=@()}
         )
     }
     if ($hasValidationModes) {
@@ -538,7 +569,11 @@ try {
         Write-Host 'BLOCKED: controlled LIVE validation requires an interactive console.'
         exit 2
     }
-    & (Join-Path $PSScriptRoot 'preflight-cli.ps1')
+    if ($InputTimerOnly) {
+        & (Join-Path $PSScriptRoot 'preflight-cli.ps1') -InputTimerOnly
+    } else {
+        & (Join-Path $PSScriptRoot 'preflight-cli.ps1')
+    }
     if ($LASTEXITCODE -ne 0) {
         $report.prechecks.preflight = 'FAIL'
         throw 'Preflight failed.'
@@ -583,12 +618,31 @@ try {
         Write-Host "Running $($step.name)..."
         # Mark uncertainty before dispatch, including subprocess/JSON/runtime failures.
         if ($step.command -eq 'input-on') { $inputOnAttempted = $true }
+        if ($step.name -eq 'timer-on') { $timerOnStartMs = $watch.ElapsedMilliseconds }
+        if ($step.command -eq 'input-timer-enable') { $timerEnableAttempted = $true }
+        if ($step.name -eq 'timer-expiry') {
+            # Wait from before ON dispatch; never infer OFF from elapsed time.
+            $waitMs = ([int]$TimerSeconds + 1) * 1000 - ($watch.ElapsedMilliseconds - $timerOnStartMs)
+            if ($waitMs -gt 0) { Start-Sleep -Milliseconds $waitMs }
+        }
         if ($step.command -eq 'transient-enable') {
             $activeTransientScope = $step.args[[Array]::IndexOf($step.args, '--hardware-validation') + 1]
             $transientEnableAttempted = $true
         }
         $result = Invoke-LiveCommand -Command $step.command -CaseName $step.name -ExtraArgs $step.args
         Assert-Runtime $result $step.name
+        if ($InputTimerOnly -and $step.command -in @('set-input-timer', 'input-timer-enable', 'input-timer-disable')) {
+            Assert-InputOff $result $step.name
+        }
+        if ($step.command -eq 'input-timer-status') {
+            if ($result.result.seconds -ne [int]$TimerSeconds -or
+                ($step.name -eq 'timer-status-off' -and $result.result.enabled -ne $true) -or
+                ($step.name -eq 'timer-status-disabled' -and $result.result.enabled -ne $false)) {
+                Fail-Case $step.name 'readback_mismatch' 'Timer status did not match the configured settings.'
+            }
+            # Enabled after expiry is reported as observed, without assuming retention.
+            Assert-InputOff $result $step.name
+        }
         if ($step.name -eq 'input-state' -and $result.result.input_state -cne 'OFF') {
             $report.prechecks.input_off = 'BLOCKED'
             $report.status = 'BLOCKED'
@@ -615,6 +669,7 @@ try {
             }
         }
         if ($step.command -eq 'input-off') { $inputOnAttempted = $false }
+        if ($step.command -eq 'input-timer-disable') { $timerEnableAttempted = $false }
         if ($step.command -eq 'transient-disable') { $transientEnableAttempted = $false }
         if ($step.name -eq 'input-state') { $report.prechecks.input_off = 'PASS' }
         Write-Host "PASS $($step.name)"
@@ -651,6 +706,23 @@ try {
         } catch {
             $report.status = 'FAIL'
             Write-Host 'WARNING: physical Input OFF was not confirmed. Immediate operator action is required.'
+        }
+        if ($report.status -eq 'PASS') { $report.status = 'FAIL' }
+    }
+    if ($timerEnableAttempted) {
+        $report.results += [ordered]@{name='cleanup-timer-state';command='input-state';status='NOT RUN'}
+        $report.results += [ordered]@{name='cleanup-timer-disable';command='input-timer-disable';status='NOT RUN'}
+        try {
+            $state = Invoke-LiveCommand -Command 'input-state' -CaseName 'cleanup-timer-state' -Cleanup
+            Assert-Runtime $state 'cleanup-timer-state'
+            Assert-InputOff $state 'cleanup-timer-state'
+            $disabled = Invoke-LiveCommand -Command 'input-timer-disable' -CaseName 'cleanup-timer-disable' `
+                -ExtraArgs @('--hardware-validation','input-timer') -Cleanup
+            Assert-Runtime $disabled 'cleanup-timer-disable'
+            Assert-InputOff $disabled 'cleanup-timer-disable'
+        } catch {
+            $report.status = 'FAIL'
+            Write-Host 'WARNING: Timer disable cleanup was not confirmed. Operator action is required.'
         }
         if ($report.status -eq 'PASS') { $report.status = 'FAIL' }
     }

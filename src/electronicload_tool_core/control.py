@@ -24,8 +24,10 @@ LIST_COMMANDS = ("set-list-cc", "list-save", "list-recall", "list-trigger",
                  "list-status", "list-exit")
 LIST_FIELDS = frozenset({"range", "repeat_count", "steps"})
 AUXILIARY_COMMANDS = ("set-von", "von-status", "short-on", "short-off", "short-status")
+INPUT_TIMER_COMMANDS = ("set-input-timer", "input-timer-enable", "input-timer-disable",
+                        "input-timer-status")
 CONTROL_COMMANDS = ("set-cc", "set-cv", "set-cr", "set-cw", "input-on", "input-off",
-                    *TRANSIENT_COMMANDS, *LIST_COMMANDS, *AUXILIARY_COMMANDS)
+                    *TRANSIENT_COMMANDS, *LIST_COMMANDS, *AUXILIARY_COMMANDS, *INPUT_TIMER_COMMANDS)
 FIXED_RANGE_COMMANDS = ("set-cc", "set-cv", "set-cr")
 FIXED_RANGE_CHOICES = ("auto", "low", "high")
 TRANSIENT_FIELDS = frozenset({"transient_mode", "range", "level_a", "level_b", "rise_slew",
@@ -95,6 +97,12 @@ def validate_fixed_cc_slew(range_name: str, rise_slew: object, fall_slew: object
             raise LoadError("slew_out_of_range", "Slew is outside the selected range.", field=field)
         settings[f"{field}_a_per_us"] = str(slew)
     return settings
+
+
+def validate_input_timer(seconds: object) -> int:
+    if type(seconds) is not int or not 1 <= seconds <= 60000:
+        raise LoadError("invalid_input_timer", "Timer seconds must be an integer from 1 through 60000.")
+    return seconds
 
 
 def validate_von(voltage: object, latch: object) -> Decimal:
@@ -252,6 +260,8 @@ def _list_simulation(session, command, configuration, slot, stop):
             raise LoadError("stopping", "LIST control was blocked because Worker is stopping.")
 
     check_stop()
+    if command in {"set-list-cc", "list-recall"} and session.input_timer_enabled:
+        raise LoadError("input_timer_enabled", "Disable Input Timer before selecting LIST.")
     if _flag(session, "TRAN?") != "OFF":
         raise LoadError("transient_enabled", "Disable Transient before LIST control.")
     if command == "list-trigger":
@@ -301,6 +311,9 @@ def _transient_simulation(session, command, configuration, stop):
         return session.transient_status()
     if stop is not None and stop.is_set():
         raise LoadError("stopping", "Transient control was blocked because Worker is stopping.")
+    if (command in {*TRANSIENT_SETUP_COMMANDS, "transient-enable"}
+            and session.input_timer_enabled):
+        raise LoadError("input_timer_enabled", "Disable Input Timer before selecting Transient.")
     if session.mode == "LIST":
         raise LoadError("list_selected", "Exit LIST explicitly before Transient control.")
     if command == "transient-trigger":
@@ -534,6 +547,8 @@ def _short_simulation(session: ControlSimulator, command: str, stop: Event | Non
         return {"short_state": _flag(session, query)}
     enable = command == "short-on"
     if enable:
+        if session.input_timer_enabled:
+            raise LoadError("input_timer_enabled", "Disable Input Timer before Short ON.")
         if _flag(session, "INP:STAT?") != "ON":
             raise LoadError("input_not_on", "Short ON requires confirmed Input ON.")
         if (session.mode != "FIX" or session.function not in TRANSIENT_FUNCTIONS.values()
@@ -549,6 +564,24 @@ def _short_simulation(session: ControlSimulator, command: str, stop: Event | Non
         raise LoadError("short_state_not_confirmed", "Short state was not confirmed.", 3,
                         short_state="UNKNOWN")
     return {"short_state": state}
+
+
+def _input_timer_simulation(session, command, seconds, stop):
+    if command != "input-timer-status":
+        if stop is not None and stop.is_set():
+            raise LoadError("stopping", "Input Timer mutation blocked because Worker is stopping.")
+        _input_off(session)
+        if command != "input-timer-disable":
+            if (session.mode != "FIX" or session.function not in TRANSIENT_FUNCTIONS.values()
+                    or _flag(session, "TRAN?") != "OFF"):
+                raise LoadError("unsafe_mode", "Input Timer requires Fixed CC, CV, CR or CW.")
+        if command == "input-timer-enable" and _flag(session, "INP:SHOR:STAT?") != "OFF":
+            raise LoadError("unsafe_mode", "Short must be OFF before enabling Input Timer.")
+        if command == "set-input-timer":
+            session.input_timer_seconds = seconds
+        else:
+            session.input_timer_enabled = command == "input-timer-enable"
+    return {"seconds": session.input_timer_seconds, "enabled": session.input_timer_enabled}
 
 
 def _confirm_input_state(session, expected: str) -> bool:
@@ -809,12 +842,36 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
             validation_settings: dict | None = None,
             list_configuration: dict | None = None, slot: int | None = None,
             rise_slew: object | None = None, fall_slew: object | None = None,
-            latch: str | None = None) -> dict:
+            latch: str | None = None, seconds: int | None = None) -> dict:
     if command not in CONTROL_COMMANDS or mode not in {"live", "simulate", "dry-run"}:
         raise LoadError("argument_error", "Unknown control command or mode.")
     if model_id != MODEL_ID:
         raise LoadError("unsupported_model", "The requested profile is not registered.")
     validate_connection(resource, backend, required=mode == "live")
+    if seconds is not None and command != "set-input-timer":
+        raise LoadError("argument_error", "Seconds applies only to set-input-timer.")
+    if hardware_validation == "input-timer":
+        if any(value is not None for value in (voltage, resistance, power, transient,
+                                               list_configuration, slot, rise_slew, fall_slew, latch)):
+            raise LoadError("argument_error", "Unexpected Timer validation arguments.")
+        from .hardware_validation import execute_input_timer
+
+        return execute_input_timer(command, mode=mode, resource=resource, seconds=seconds,
+                                   current=current, range_name=range_name, expected=validation_settings,
+                                   confirmed=confirmed, stop=stop)
+    if command in INPUT_TIMER_COMMANDS:
+        if mode == "live":
+            raise LoadError("unsupported_live_scope", "Input Timer is offline only.")
+        if (any(value is not None for value in (current, voltage, resistance, power, range_name,
+                transient, hardware_validation, validation_settings, list_configuration, slot,
+                rise_slew, fall_slew, latch)) or confirmed):
+            raise LoadError("argument_error", "Unexpected Input Timer arguments.")
+        if command == "set-input-timer":
+            seconds = validate_input_timer(seconds)
+        if mode == "dry-run":
+            return {"command": command, "hardware_access": False,
+                    **({"seconds": seconds} if seconds is not None else {})}
+        return _input_timer_simulation(simulator or ControlSimulator(), command, seconds, stop)
     has_slew = rise_slew is not None or fall_slew is not None
     if has_slew and command != "set-cc":
         raise LoadError("argument_error", "Fixed slew arguments require set-cc.")
