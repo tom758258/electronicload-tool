@@ -115,7 +115,7 @@ function Save-Report {
         if ($entry.Contains('expected_range')) { $case.expected_range = $entry.expected_range }
         if ($entry.status -eq 'PASS') {
             if ($entry.command -eq 'input-state' -or $entry.command -eq 'input-on' -or
-                $entry.command -eq 'input-off') {
+                $entry.command -eq 'input-off' -or $entry.command -eq 'input-timer-status') {
                 $case.input_state = $entry.response.result.input_state
             }
             if ($entry.command -in @('set-cc', 'set-cv', 'set-cr')) {
