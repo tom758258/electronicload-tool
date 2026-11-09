@@ -96,8 +96,7 @@ Decimal numeric tokens are preserved through `send-command` and HTTP validation;
 values are never rounded or clamped. Software Auto selects once during setup,
 before VISA access, and never switches range during Input ON. The same
 simulated Worker retains the resolved settings across jobs; dry-run does not
-inspect or mutate those settings. See [bounds and examples](../fixed-auto-range.md)
-([繁體中文](../fixed-auto-range.zh-TW.md)).
+inspect or mutate those settings. See [bounds and examples](../cli/README.md#fixed-software-auto-range).
 
 Manifest schema 2 adds the tool-specific `range_options: ["auto", "low", "high"]`
 to these three command entries beside the unchanged `kind: "async_job"`.
@@ -130,11 +129,11 @@ Dry-run validates arguments and returns `hardware_access: false` without
 checking or changing simulated state. The five new commands appear as
 `kind: "async_job"` in Manifest schema 2. All five and Fixed CC with Slew are
 blocked before VISA, including on contributor validation paths. See the
-[offline CLI usage](../../README.md#offline-fixed-cc-slew-von-and-short).
+[offline CLI usage](../cli/README.md#offline-fixed-cc-slew-von-and-short).
 
 ## Offline Transient CC / CV / CR / CW
 
-The [Transient interface](../transient-modes.md) ([繁體中文](../transient-modes.zh-TW.md))
+The [Transient interface](../cli/README.md#transient-modes)
 defines all four setup commands, limits and units. CV/CR/CW use the same waveform
 modes and width-field requirements as CC, with no slew arguments. CV/CR require
 `auto|low|high` for both levels together, using their Fixed limits/resolution;
@@ -176,7 +175,7 @@ steps. Auto tries Low, then High, considering both current levels, their
 resolution and both slew values together. Explicit ranges are never changed.
 No rounding, clamping or undocumented slew step is applied. The HTTP parser and
 `send-command --arguments-json` preserve decimal numeric tokens for validation.
-See the [source manuals and CLI usage](../../README.md#offline-transient-cc-dynamic-mode).
+See the [source manuals and CLI usage](../cli/README.md#transient-modes).
 
 | Operation | Preconditions and effects |
 | --- | --- |
@@ -252,7 +251,7 @@ VISA close are not Input OFF confirmation.
 ## Offline native LIST CC
 
 The complete LIST JSON, limits, status fields and mode guards are defined in
-the [LIST interface](../list-cc.md) ([繁體中文](../list-cc.zh-TW.md)). Worker
+the [LIST interface](../cli/README.md#native-list-cc). Worker
 arguments are that JSON object directly, without a wrapping file/configuration
 field. Only CLI loads files. Unknown/missing/duplicate fields, nonfinite or
 non-numeric Step values, invalid slots/counts and invalid complete-range
@@ -409,4 +408,4 @@ All LIVE refusal and admission/terminal behavior described above remains in
 force, including for the legacy contributor override. The dedicated CLI path
 requires complete expected settings for Enable, Input ON and Trigger and
 compares physical readback; its status describes control state, not waveform
-completion. See the README's controlled instrument validation procedure.
+completion. See the [CLI controlled instrument validation procedure](../cli/README.md#controlled-instrument-validation).
