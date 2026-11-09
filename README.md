@@ -310,17 +310,6 @@ and Short OFF. Read state with `short-status`. **After `short-off`, a DUT can
 still be loaded by the previous Fixed setting if Input remains ON. Explicitly
 issue `input-off` and confirm OFF to stop loading.**
 
-這些功能支援模擬與 dry-run。跨指令保留設定和 Input 狀態時，使用同一個模擬
-Worker。兩個斜率須一併提供，單位為 A/μs，也可一併省略以沿用原有 Fixed CC
-操作。Auto 先依電流選量程。Low 接受 0.0001～0.25 A/μs，High 接受
-0.001～2.5 A/μs。設定 VON 須提供 Threshold 與 Latch（`on` 或 `off`），並
-確認 Input OFF。模擬接受 0～120 V，不假設步進，跨模式保留設定。IT8812C 手冊
-說明 VON 在 CV 模式下不起作用。
-
-模擬 Worker 的 `short-on` 限 Fixed CC／CV／CR／CW，須確認 Input ON 與 Short OFF。
-用 `short-status` 查詢。**執行 `short-off` 後，若 Input 仍為 ON，先前的 Fixed 設定
-仍可能對 DUT 帶載。要停止帶載，請明確執行 `input-off` 並確認 OFF。**
-
 See the [Worker contract](docs/contracts/electronicload-worker-contract.md#offline-fixed-cc-slew-von-and-short)
 for argument and result fields. ITECH documents the command mappings as
 `CURR:SLEW:POS` / `CURR:SLEW:NEG`, `VOLT:ON` / `VOLT:LATC` and `INP:SHOR`.
