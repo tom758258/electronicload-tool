@@ -40,7 +40,7 @@ VISA manager and must never call real `list-resources`. Check
 `live-cli-check.ps1 -PlanOnly` and noninteractive refusal without hardware.
 Use only an explicitly fictional USB resource for offline script verification, and never reuse it for real validation. Real runs follow
 the authorization, interaction, runtime-review, and deadline requirements in
-the [README](../README.md#controlled-instrument-validation).
+the [README](cli/README.md#controlled-instrument-validation).
 
 Changing the parser warrants the existing help/version tests. Read-only changes
 do not by themselves require wheel/release acceptance or tests in other Tool

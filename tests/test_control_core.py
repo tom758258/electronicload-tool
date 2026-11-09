@@ -881,3 +881,168 @@ def test_cw_physical_input_on_refuses_without_writes(monkeypatch, function, vali
         control.execute('input-on', resource=RESOURCE, confirmed=True, validation=validation)
     assert error.value.code == 'unsupported_live_scope'
     assert fake.calls == ['*IDN?', 'INP:STAT?', 'FUNC:MODE?', 'FUNC?']
+
+
+@pytest.mark.parametrize('current,selection,rise,fall,expected', [
+    ('1', 'auto', '0.0001', '0.25', 'low'),
+    ('6.001', 'auto', '0.001', '2.5', 'high'),
+    ('1', 'low', '0.123456789012345678901', '0.2', 'low'),
+])
+def test_fixed_cc_slew_setup_and_preview(current, selection, rise, fall, expected):
+    sim = ControlSimulator()
+    kwargs = dict(current=current, range_name=selection, rise_slew=rise, fall_slew=fall)
+    before = vars(sim).copy()
+    preview = control.execute('set-cc', mode='dry-run', simulator=sim, **kwargs)
+    assert preview['hardware_access'] is False
+    assert vars(sim) == before
+    result = control.execute('set-cc', mode='simulate', simulator=sim, **kwargs)
+    assert result['range'] == preview['range'] == expected
+    assert result['input_state'] == 'OFF'
+    for response in (result, preview):
+        assert response['rise_slew_a_per_us'] == rise
+        assert response['fall_slew_a_per_us'] == fall
+
+
+@pytest.mark.parametrize('rise,fall,code', [
+    ('0.1', None, 'argument_error'), (None, '0.1', 'argument_error'),
+    ('NaN', '0.1', 'invalid_slew'), ('0.1', True, 'invalid_slew'),
+    ('0.25000000000000000001', '0.1', 'slew_out_of_range'),
+    ('0.1', '0.00009999999999999999999', 'slew_out_of_range'),
+])
+def test_fixed_cc_slew_invalid_pair_cannot_change_state_or_select_high(rise, fall, code):
+    sim = ControlSimulator()
+    before = vars(sim).copy()
+    with pytest.raises(LoadError) as error:
+        control.execute('set-cc', mode='simulate', simulator=sim, current='1',
+                        range_name='auto', rise_slew=rise, fall_slew=fall)
+    assert error.value.code == code
+    assert vars(sim) == before
+
+
+@pytest.mark.parametrize('voltage,latch', [('0', 'off'), ('120', 'on'),
+                                          ('0.0001234567890123456789', 'off')])
+def test_von_requires_input_off_and_is_retained_across_fixed_modes(voltage, latch):
+    sim = ControlSimulator()
+
+    def execute(command, **kwargs):
+        return control.execute(command, mode='simulate', simulator=sim, **kwargs)
+
+    initial = execute('von-status')
+    plan = control.execute('set-von', mode='dry-run', simulator=sim, voltage=voltage, latch=latch)
+    assert plan['hardware_access'] is False
+    assert execute('von-status') == initial
+    expected = {'threshold_v': voltage, 'latch': latch}
+    assert execute('set-von', voltage=voltage, latch=latch) == expected
+    execute('set-cv', voltage='12', range_name='low')
+    assert execute('input-on', confirmed=True)['input_state'] == 'ON'
+    assert execute('von-status') == expected
+    with pytest.raises(LoadError) as error:
+        execute('set-von', voltage='1', latch='on')
+    assert error.value.code == 'input_not_off'
+    assert execute('von-status') == expected
+    assert sim.input_on
+
+
+@pytest.mark.parametrize('voltage,latch,code', [
+    (None, 'on', 'argument_error'), ('1', None, 'argument_error'),
+    ('1', True, 'argument_error'), ('Infinity', 'off', 'invalid_voltage'),
+    ('-0.01', 'on', 'voltage_out_of_range'),
+    ('120.0000000000000000001', 'off', 'voltage_out_of_range'),
+])
+def test_von_invalid_configuration_does_not_mutate_simulator(voltage, latch, code):
+    sim = ControlSimulator()
+    before = vars(sim).copy()
+    with pytest.raises(LoadError) as error:
+        control.execute('set-von', mode='simulate', simulator=sim, voltage=voltage, latch=latch)
+    assert error.value.code == code
+    assert vars(sim) == before
+
+
+@pytest.mark.parametrize('setup,kwargs', [
+    ('set-cc', {'current': '1', 'range_name': 'low'}),
+    ('set-cv', {'voltage': '2', 'range_name': 'low'}),
+    ('set-cr', {'resistance': '2', 'range_name': 'low'}),
+    ('set-cw', {'power': '2'}),
+])
+def test_short_fixed_modes_keep_input_and_settings_independent(setup, kwargs):
+    sim = ControlSimulator()
+
+    def execute(command, **arguments):
+        return control.execute(command, mode='simulate', simulator=sim, **arguments)
+
+    execute(setup, **kwargs)
+    with pytest.raises(LoadError) as error:
+        execute('short-on')
+    assert error.value.code == 'input_not_on'
+    assert execute('short-off') == {'short_state': 'OFF'}
+    before = execute('input-on', confirmed=True)
+    assert execute('short-on') == execute('short-status') == {'short_state': 'ON'}
+    with pytest.raises(LoadError) as error:
+        execute('short-on')
+    assert error.value.code == 'already_short_on'
+    assert execute('short-off') == {'short_state': 'OFF'}
+    assert sim.input_on
+    execute('short-on')
+    assert execute('input-off') == {'input_state': 'OFF'}
+    assert execute('short-status') == {'short_state': 'ON'}
+    with pytest.raises(LoadError) as error:
+        execute('input-on', confirmed=True)
+    assert error.value.code == 'unsafe_mode'
+    assert execute('short-off') == {'short_state': 'OFF'}
+    assert execute('input-on', confirmed=True) == before
+
+
+@pytest.mark.parametrize('mode,function,transient', [
+    ('TRAN', 'CURR', True), ('LIST', 'CURR', False),
+    ('FIX', 'UNKNOWN', False), ('FIX', 'CURR', True),
+])
+def test_short_on_rejects_non_fixed_or_unknown_modes(mode, function, transient):
+    sim = ControlSimulator()
+    sim.mode, sim.function, sim.transient_enabled = mode, function, transient
+    sim.input_on = True
+    with pytest.raises(LoadError) as error:
+        control.execute('short-on', mode='simulate', simulator=sim)
+    assert error.value.code == 'unsafe_mode'
+    assert control.execute('short-status', mode='simulate', simulator=sim) == {'short_state': 'OFF'}
+    assert sim.input_on
+
+
+def test_short_on_stop_and_unknown_state_leave_explicit_off_available():
+    class UnknownShort(ControlSimulator):
+        def query(self, command):
+            return 'UNKNOWN' if command == 'INP:SHOR:STAT?' else super().query(command)
+
+    sim = ControlSimulator()
+    sim.input_on = True
+    stop = Event()
+    stop.set()
+    with pytest.raises(LoadError) as error:
+        control.execute('short-on', mode='simulate', simulator=sim, stop=stop)
+    assert error.value.code == 'stopping'
+    assert sim.input_on
+    assert not sim.short_on
+    stop.clear()
+    sim = UnknownShort()
+    sim.input_on = True
+    with pytest.raises(LoadError) as error:
+        control.execute('short-on', mode='simulate', simulator=sim, stop=stop)
+    assert error.value.code == 'invalid_response'
+    assert not sim.short_on
+    with pytest.raises(LoadError) as error:
+        control.execute('short-off', mode='simulate', simulator=sim, stop=stop)
+    assert error.value.code == 'invalid_response'
+    assert control.execute('input-off', mode='simulate', simulator=sim, stop=stop) == {
+        'input_state': 'OFF'}
+
+
+@pytest.mark.parametrize('override', [{}, {'validation': True}, {'hardware_validation': 'cv'}])
+@pytest.mark.parametrize('command,arguments', [
+    ('set-cc', {'current': '1', 'range_name': 'low', 'rise_slew': '0.1', 'fall_slew': '0.1'}),
+    ('set-von', {'voltage': '10', 'latch': 'on'}),
+    ('von-status', {}), ('short-on', {}), ('short-off', {}), ('short-status', {}),
+])
+def test_fixed_slew_von_short_live_refused_before_visa(monkeypatch, override, command, arguments):
+    monkeypatch.setattr(control, 'open_session', lambda *_: pytest.fail('VISA opened'))
+    with pytest.raises(LoadError) as error:
+        control.execute(command, resource=RESOURCE, **arguments, **override)
+    assert error.value.code == 'unsupported_live_scope'

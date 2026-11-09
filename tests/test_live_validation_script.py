@@ -136,6 +136,12 @@ def test_fixed_auto_offline_preflight(run_script):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_fixed_slew_von_short_offline_preflight(run_script):
+    result = run_script(['-FixedSlewVonShortOnly'], preflight=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'PASS: Fixed CC Slew, VON and Short preflight' in result.stdout
+
+
 def test_fixed_auto_script_plan_uses_core_resolution_and_original_values(run_script):
     resistance = '10.000000000000000001'
     result = run_script(['-PlanOnly', '-Modes', 'cv,cr', '-Voltage', '12.0000',
@@ -173,7 +179,7 @@ def test_hardware_script_powershell_mode_array(run_script):
     assert_report(result, 'PLAN ONLY', ('cc', 'transient-cc'))
 
 
-@pytest.mark.parametrize('selection', ['unknown', 'cc,unknown', 'cc,', ''])
+@pytest.mark.parametrize('selection', ['unknown', 'cc,unknown', 'cc,', '', 'cc-slew', 'von', 'short'])
 def test_hardware_script_invalid_modes(run_script, selection):
     result = run_script(['-PlanOnly', '-Modes', selection])
     assert result.returncode == 2, result.stdout + result.stderr

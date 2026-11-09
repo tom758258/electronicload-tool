@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([switch]$TransientOnly, [switch]$FixedAutoOnly)
+param([switch]$TransientOnly, [switch]$FixedAutoOnly, [switch]$FixedSlewVonShortOnly)
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -8,12 +8,95 @@ if (-not (Test-Path -LiteralPath $cli)) {
     $cli = Join-Path $repo '.venv/bin/electronicload-tool'
 }
 
+function Invoke-PreflightCli {
+    param([string[]]$CommandArgs, [int]$ExpectedExit = 0)
+
+    $output = & $cli @CommandArgs --json
+    if ($LASTEXITCODE -ne $ExpectedExit) {
+        throw "$($CommandArgs[0]) returned exit $LASTEXITCODE; expected $ExpectedExit."
+    }
+    return ($output -join "`n") | ConvertFrom-Json
+}
+
 try {
-    if ($TransientOnly -and $FixedAutoOnly) {
-        throw 'Select only one of -TransientOnly and -FixedAutoOnly.'
+    if (($TransientOnly -and $FixedAutoOnly) -or
+        ($FixedSlewVonShortOnly -and ($TransientOnly -or $FixedAutoOnly))) {
+        throw 'Select only one focused preflight switch.'
     }
     if (-not (Test-Path -LiteralPath $cli)) {
         throw 'Sync the repository .venv with uv before running preflight.'
+    }
+    if (-not ($TransientOnly -or $FixedAutoOnly)) {
+        $rise = '0.100000000000000000001'
+        $threshold = '10.000000000000000000001'
+        $slewArgs = @('set-cc', '--current', '1', '--range', 'auto',
+                      '--rise-slew', $rise, '--fall-slew', '0.2')
+        $vonArgs = @('set-von', '--voltage', $threshold, '--latch', 'off')
+        foreach ($mode in @('--simulate', '--dry-run')) {
+            $cc = Invoke-PreflightCli ($slewArgs + $mode)
+            $von = Invoke-PreflightCli ($vonArgs + $mode)
+            if ($cc.result.range -cne 'low' -or $cc.result.rise_slew_a_per_us -cne $rise -or
+                $cc.result.fall_slew_a_per_us -cne '0.2' -or $von.result.threshold_v -cne $threshold -or
+                $von.result.latch -cne 'off') {
+                throw "Fixed CC Slew or VON settings failed in $mode."
+            }
+            if ($mode -eq '--simulate' -and $cc.result.input_state -cne 'OFF') {
+                throw 'Fixed CC Slew setup must leave Input OFF.'
+            }
+            if ($mode -eq '--dry-run' -and ($cc.result.hardware_access -ne $false -or
+                $von.result.hardware_access -ne $false)) {
+                throw 'Fixed CC Slew and VON dry-run must report no hardware access.'
+            }
+        }
+
+        $partialSlew = Invoke-PreflightCli @('set-cc', '--dry-run', '--current', '1',
+                                           '--range', 'auto', '--rise-slew', $rise) 2
+        $invalidSlew = Invoke-PreflightCli @('set-cc', '--dry-run', '--current', '1',
+                                           '--range', 'auto', '--rise-slew', '0.26', '--fall-slew', '0.2') 2
+        $partialVon = Invoke-PreflightCli @('set-von', '--dry-run', '--voltage', $threshold) 2
+        $shortOn = Invoke-PreflightCli @('short-on', '--simulate') 2
+        if ($partialSlew.error.code -cne 'argument_error' -or
+            $invalidSlew.error.code -cne 'slew_out_of_range' -or
+            $partialVon.error.code -cne 'argument_error' -or $shortOn.error.code -cne 'input_not_on') {
+            throw 'Fixed CC Slew, VON or Short argument/state refusal failed.'
+        }
+
+        $von = Invoke-PreflightCli @('von-status', '--simulate')
+        $short = Invoke-PreflightCli @('short-status', '--simulate')
+        $shortOff = Invoke-PreflightCli @('short-off', '--simulate')
+        $shortPlan = Invoke-PreflightCli @('short-on', '--dry-run')
+        if ($von.result.threshold_v -cne '0' -or $von.result.latch -cne 'on' -or
+            $short.result.short_state -cne 'OFF' -or $shortOff.result.short_state -cne 'OFF' -or
+            $shortPlan.result.hardware_access -ne $false) {
+            throw 'Standalone VON or Short check failed.'
+        }
+
+        $manifest = Invoke-PreflightCli @('manifest')
+        if ($manifest.schema_version -ne 2 -or $manifest.worker_protocol.schema_versions[0] -ne 3) {
+            throw 'Fixed CC Slew, VON and Short must retain Manifest 2 and Worker protocol 3.'
+        }
+        $commands = @('set-von', 'von-status', 'short-on', 'short-off', 'short-status')
+        foreach ($command in $commands) {
+            if ($manifest.commands.$command.kind -cne 'async_job') {
+                throw "Manifest entry missing: $command."
+            }
+        }
+
+        # The fictional resource exercises refusal only.
+        foreach ($command in (@('set-cc') + $commands)) {
+            $setting = switch ($command) {
+                'set-cc' { $slewArgs }
+                'set-von' { $vonArgs }
+                default { $command }
+            }
+            $refusal = Invoke-PreflightCli (@($setting) + @('--validation-allow-pending-live-support',
+                '--resource', 'USB0::0xFFFF::0x0001::SYNTHETIC::INSTR')) 2
+            if ($refusal.error.code -cne 'unsupported_live_scope') {
+                throw "$command LIVE refusal failed."
+            }
+        }
+        Write-Host 'PASS: Fixed CC Slew, VON and Short preflight'
+        if ($FixedSlewVonShortOnly) { exit 0 }
     }
     if (-not $TransientOnly) {
         $fixedCases = @(

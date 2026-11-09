@@ -44,10 +44,15 @@ Common contracts remain authoritative for the HTTP and JSONL envelopes.
 | `identify` | `{}` | Physical/simulated identity |
 | `input-state` | `{}` | `input_state` |
 | `measure` | `{}` | `voltage_v`, `current_a`, `power_w` |
-| `set-cc` | `{"current": <number>, "range": "auto"\|"low"\|"high"}` | Four confirmed CC settings, physical input stays OFF |
+| `set-cc` | `{"current": <number>, "range": "auto"\|"low"\|"high"}`, with optional paired `rise_slew` and `fall_slew` (numbers, offline only) | Fixed CC settings with Input OFF, plus Slew fields when supplied |
 | `set-cv` | `{"voltage": <number>, "range": "auto"\|"low"\|"high"}` | Offline-only CV setpoint simulation; LIVE refused |
 | `set-cr` | `{"resistance": <number>, "range": "auto"\|"low"\|"high"}` | Offline-only CR setpoint/range simulation; LIVE refused |
 | `set-cw` | `{"power": <number>}` | Offline-only Fixed CW setpoint simulation; LIVE refused |
+| `set-von` | `{"voltage": <number>, "latch": "on"\|"off"}` | Offline VON settings, confirmed Input OFF required |
+| `von-status` | `{}` | Read-only simulated VON settings |
+| `short-on` | `{}` | Confirmed simulated Short ON, with Input ON and Fixed CC/CV/CR/CW required |
+| `short-off` | `{}` | Confirmed simulated Short OFF, independent of Input |
+| `short-status` | `{}` | Read-only simulated Short state |
 | `set-transient-cc` | Complete mode-specific configuration below | Offline Transient control status |
 | `set-transient-cv` | `transient_mode`, `range`, `level_a`, `level_b` (V), applicable widths (s) | Offline Transient CV status |
 | `set-transient-cr` | `transient_mode`, `range`, `level_a`, `level_b` (Ω), applicable widths (s) | Offline Transient CR status |
@@ -91,8 +96,7 @@ Decimal numeric tokens are preserved through `send-command` and HTTP validation;
 values are never rounded or clamped. Software Auto selects once during setup,
 before VISA access, and never switches range during Input ON. The same
 simulated Worker retains the resolved settings across jobs; dry-run does not
-inspect or mutate those settings. See [bounds and examples](../fixed-auto-range.md)
-([繁體中文](../fixed-auto-range.zh-TW.md)).
+inspect or mutate those settings. See [bounds and examples](../cli/README.md#fixed-software-auto-range).
 
 Manifest schema 2 adds the tool-specific `range_options: ["auto", "low", "high"]`
 to these three command entries beside the unchanged `kind: "async_job"`.
@@ -102,9 +106,34 @@ timing, result fields, JSONL envelopes, lifecycle and exits remain unchanged.
 CV/CR/CW, Transient and LIST remain Product LIVE blocked. Auto uses the existing
 Fixed CC commands, readbacks and Input OFF/ON gates.
 
+## Offline Fixed CC Slew, VON and Short
+
+For Fixed CC, supply both `rise_slew` and `fall_slew` or omit both. Auto resolves
+the range using current before checking Slew. Low accepts 0.0001–0.25 A/μs and
+High accepts 0.001–2.5 A/μs. Results with the pair add
+`rise_slew_a_per_us` and `fall_slew_a_per_us` as decimal strings. Omission keeps
+the existing result and LIVE write sequence.
+
+VON configuration and status return `threshold_v` as a decimal string and
+`latch` as `"on"|"off"`. The offline IT8812C profile accepts 0–120 V without
+an assumed programming step. The simulated setting persists across mode changes.
+Short operations return `short_state` as `"ON"|"OFF"`. Short ON also requires
+Short OFF and a Worker that is not stopping. An explicit `input-off` remains
+available regardless of Short state. Short OFF leaves Input unchanged, so the
+previous Fixed setting can still load the DUT until explicit Input OFF.
+
+HTTP and CLI forwarding preserve the original JSON numeric tokens for these
+setups. Invalid arguments are rejected before job creation. Simulator state
+checks and refusals of valid LIVE requests occur during the accepted job.
+Dry-run validates arguments and returns `hardware_access: false` without
+checking or changing simulated state. The five new commands appear as
+`kind: "async_job"` in Manifest schema 2. All five and Fixed CC with Slew are
+blocked before VISA, including on contributor validation paths. See the
+[offline CLI usage](../cli/README.md#offline-fixed-cc-slew-von-and-short).
+
 ## Offline Transient CC / CV / CR / CW
 
-The [Transient interface](../transient-modes.md) ([繁體中文](../transient-modes.zh-TW.md))
+The [Transient interface](../cli/README.md#transient-modes)
 defines all four setup commands, limits and units. CV/CR/CW use the same waveform
 modes and width-field requirements as CC, with no slew arguments. CV/CR require
 `auto|low|high` for both levels together, using their Fixed limits/resolution;
@@ -146,7 +175,7 @@ steps. Auto tries Low, then High, considering both current levels, their
 resolution and both slew values together. Explicit ranges are never changed.
 No rounding, clamping or undocumented slew step is applied. The HTTP parser and
 `send-command --arguments-json` preserve decimal numeric tokens for validation.
-See the [source manuals and CLI usage](../../README.md#offline-transient-cc-dynamic-mode).
+See the [source manuals and CLI usage](../cli/README.md#transient-modes).
 
 | Operation | Preconditions and effects |
 | --- | --- |
@@ -222,7 +251,7 @@ VISA close are not Input OFF confirmation.
 ## Offline native LIST CC
 
 The complete LIST JSON, limits, status fields and mode guards are defined in
-the [LIST interface](../list-cc.md) ([繁體中文](../list-cc.zh-TW.md)). Worker
+the [LIST interface](../cli/README.md#native-list-cc). Worker
 arguments are that JSON object directly, without a wrapping file/configuration
 field. Only CLI loads files. Unknown/missing/duplicate fields, nonfinite or
 non-numeric Step values, invalid slots/counts and invalid complete-range
@@ -379,4 +408,4 @@ All LIVE refusal and admission/terminal behavior described above remains in
 force, including for the legacy contributor override. The dedicated CLI path
 requires complete expected settings for Enable, Input ON and Trigger and
 compares physical readback; its status describes control state, not waveform
-completion. See the README's controlled instrument validation procedure.
+completion. See the [CLI controlled instrument validation procedure](../cli/README.md#controlled-instrument-validation).

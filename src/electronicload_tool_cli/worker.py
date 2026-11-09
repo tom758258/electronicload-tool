@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 
 from electronicload_tool_core.control import (CONTROL_COMMANDS, execute as control_execute,
                                               resolve_fixed_range, validate_power,
+                                              validate_fixed_cc_slew, validate_von,
                                               FIXED_RANGE_COMMANDS, FIXED_RANGE_CHOICES,
                                               TRANSIENT_FIELDS, TRANSIENT_SETUP_COMMANDS, validate_transient,
                                               LIST_COMMANDS, LIST_FIELDS,
@@ -108,6 +109,9 @@ class Runtime:
                 transient=arguments if command in TRANSIENT_SETUP_COMMANDS else None,
                 list_configuration=arguments if command == "set-list-cc" else None,
                 slot=arguments.get("slot"),
+                rise_slew=arguments.get("rise_slew") if command == "set-cc" else None,
+                fall_slew=arguments.get("fall_slew") if command == "set-cc" else None,
+                latch=arguments.get("latch"),
             )
         if context["mode"] == "simulate":
             return _read(self.simulator, command)
@@ -178,10 +182,11 @@ def _context(request, mode):
 def _arguments(command, raw, runtime):
     if not isinstance(raw, dict):
         raise LoadError("argument_error", "Arguments must be an object.")
-    permitted = ({"current", "range"} if command == "set-cc" else
+    permitted = ({"current", "range", "rise_slew", "fall_slew"} if command == "set-cc" else
                  {"voltage", "range"} if command == "set-cv" else
                  {"resistance", "range"} if command == "set-cr" else
                  {"power"} if command == "set-cw" else
+                 {"voltage", "latch"} if command == "set-von" else
                  TRANSIENT_FIELDS if command in TRANSIENT_SETUP_COMMANDS else
                  LIST_FIELDS if command == "set-list-cc" else
                  {"slot"} if command in {"list-save", "list-recall"} else
@@ -198,10 +203,18 @@ def _arguments(command, raw, runtime):
                 raise LoadError("argument_error", "Transient values must be JSON numbers.")
         validate_transient(command, raw)
     if command == "set-cc":
-        if (set(raw) != permitted or not isinstance(raw["range"], str)
-                or type(raw["current"]) not in (int, float, Decimal)):
+        if (not isinstance(raw.get("range"), str)
+                or type(raw.get("current")) not in (int, float, Decimal)):
             raise LoadError("argument_error", "CC requires current and range.")
-        resolve_fixed_range(command, raw["current"], raw["range"])
+        for field in ("rise_slew", "fall_slew"):
+            if field in raw and type(raw[field]) not in (int, float, Decimal):
+                raise LoadError("argument_error", "Slew rates must be JSON numbers.")
+        range_name = resolve_fixed_range(command, raw["current"], raw["range"])
+        validate_fixed_cc_slew(range_name, raw.get("rise_slew"), raw.get("fall_slew"))
+    if command == "set-von":
+        if set(raw) != permitted or type(raw["voltage"]) not in (int, float, Decimal):
+            raise LoadError("argument_error", "VON requires voltage as a JSON number and latch.")
+        validate_von(raw["voltage"], raw["latch"])
     if command == "set-cv":
         if (set(raw) != permitted or not isinstance(raw["range"], str)
                 or type(raw["voltage"]) not in (int, float, Decimal)):
@@ -250,9 +263,9 @@ def _handler(runtime):
                     if type(value["arguments"].get("power")) is float:
                         value["arguments"]["power"] = json.loads(
                             body, parse_float=Decimal)["arguments"]["power"]
-                if (value.get("command") in (*FIXED_RANGE_COMMANDS, *TRANSIENT_SETUP_COMMANDS)
+                if (value.get("command") in (*FIXED_RANGE_COMMANDS, *TRANSIENT_SETUP_COMMANDS, "set-von")
                         and isinstance(value.get("arguments"), dict)):
-                    # Fixed and Transient validation must see the original decimal tokens.
+                    # Core must validate the original decimal tokens.
                     value["arguments"] = json.loads(body, parse_float=Decimal)["arguments"]
                 if value.get("command") in LIST_COMMANDS:
                     # Preserve nested numeric tokens; reject duplicate fields/nonfinite JSON.
