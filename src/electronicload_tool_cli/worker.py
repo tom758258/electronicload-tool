@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 
 from electronicload_tool_core.control import (CONTROL_COMMANDS, execute as control_execute,
                                               resolve_fixed_range, validate_power,
-                                              validate_fixed_cc_slew, validate_von,
+                                              validate_fixed_cc_slew, validate_von, validate_input_timer,
                                               FIXED_RANGE_COMMANDS, FIXED_RANGE_CHOICES,
                                               TRANSIENT_FIELDS, TRANSIENT_SETUP_COMMANDS, validate_transient,
                                               LIST_COMMANDS, LIST_FIELDS,
@@ -112,6 +112,7 @@ class Runtime:
                 rise_slew=arguments.get("rise_slew") if command == "set-cc" else None,
                 fall_slew=arguments.get("fall_slew") if command == "set-cc" else None,
                 latch=arguments.get("latch"),
+                seconds=arguments.get("seconds"),
             )
         if context["mode"] == "simulate":
             return _read(self.simulator, command)
@@ -187,12 +188,15 @@ def _arguments(command, raw, runtime):
                  {"resistance", "range"} if command == "set-cr" else
                  {"power"} if command == "set-cw" else
                  {"voltage", "latch"} if command == "set-von" else
+                 {"seconds"} if command == "set-input-timer" else
                  TRANSIENT_FIELDS if command in TRANSIENT_SETUP_COMMANDS else
                  LIST_FIELDS if command == "set-list-cc" else
                  {"slot"} if command in {"list-save", "list-recall"} else
                  {"confirm_input_on"} if command == "input-on" else set())
     if set(raw) - permitted:
         raise LoadError("argument_error", "Unsupported command arguments.")
+    if command == "set-input-timer":
+        validate_input_timer(raw.get("seconds"))
     if command == "set-list-cc":
         validate_list_cc(raw)
     if command in {"list-save", "list-recall"}:

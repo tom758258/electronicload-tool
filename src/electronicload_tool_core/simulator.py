@@ -32,6 +32,8 @@ class ControlSimulator:
         self.fixed_cc_slew = {}
         self.von_settings = (Decimal("0"), "on")
         self.short_on = False
+        self.input_timer_seconds = 10
+        self.input_timer_enabled = False
         self.transient_configuration = None
         self.transient_function = None
         self.transient_enabled = False

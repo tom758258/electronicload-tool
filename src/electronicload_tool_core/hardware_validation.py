@@ -24,6 +24,97 @@ TRANSIENT_QUERIES = {"level_a": "CURR:TRAN:ALEV", "level_b": "CURR:TRAN:BLEV",
                      "rise_slew": "CURR:SLEW:POS", "fall_slew": "CURR:SLEW:NEG"}
 
 
+def _input_timer_snapshot(session):
+    # IT8800 Programming Guide V2.1 printed pp.45–46, including IT8812C.
+    # DELay's command-syntax line omits :DELay; its example and query include it.
+    value = _number(session, "INP:TIM:DEL?")
+    if value != value.to_integral_value() or not 1 <= value <= 60000:
+        raise LoadError("invalid_response", "Invalid Input Timer seconds readback.", 3)
+    return {"seconds": int(value), "enabled": c._flag(session, "INP:TIM?") == "ON",
+            "input_state": c._flag(session, "INP:STAT?"),
+            "state_source": "instrument_readback"}
+
+
+def execute_input_timer(command, *, mode, resource, seconds, current, range_name,
+                        expected, confirmed, stop):
+    """CLI-only bounded CC validation. Normal Product/Worker Timer LIVE stays closed."""
+    if mode not in {"live", "dry-run"} or command not in {*c.INPUT_TIMER_COMMANDS,
+                                                           "input-on", "input-off"}:
+        raise LoadError("argument_error", "Command/mode does not match Input Timer validation.")
+    if current is not None or range_name is not None:
+        raise LoadError("argument_error", "Use expected validation settings for Timer Input ON.")
+    if command == "set-input-timer":
+        seconds = c.validate_input_timer(seconds)
+    if command == "input-on":
+        if not confirmed:
+            raise LoadError("confirmation_required", "Input ON requires explicit confirmation.")
+        if not isinstance(expected, dict) or set(expected) != {"current", "range", "seconds"}:
+            raise LoadError("argument_error", "Timer Input ON requires current, range and seconds.")
+        selected = c.resolve_fixed_range("set-cc", expected["current"], expected["range"])
+        expected = {"current": c.validate_current(expected["current"], selected),
+                    "range": selected, "seconds": c.validate_input_timer(expected["seconds"])}
+    elif expected is not None or confirmed:
+        raise LoadError("argument_error", "Expected settings/confirmation apply only to Input ON.")
+    writes = {"set-input-timer": f"INP:TIM:DEL {seconds}",
+              "input-timer-enable": "INP:TIM 1", "input-timer-disable": "INP:TIM 0",
+              "input-on": "INP ON", "input-off": "INP OFF"}
+    marker = {"validation_only": True, "validation_scope": "input-timer"}
+    if mode == "dry-run":
+        return {**marker, "command": command, "hardware_access": False,
+                "planned_writes": ["SYST:REM", writes[command]] if command in writes else [],
+                "expected_configuration": _serial(expected) if expected else None}
+
+    def guard(session):
+        _stopping(stop)
+        c._input_off(session)
+        if command != "input-timer-disable":
+            settings = c._settings(session)
+            c._check_settings(session, settings)
+            if (c._flag(session, "TRAN?") != "OFF"
+                    or c._flag(session, "INP:SHOR:STAT?") != "OFF"):
+                raise LoadError("unsafe_mode", "Timer validation requires Fixed CC, Short/Transient OFF.")
+            if command == "input-on":
+                timer = _input_timer_snapshot(session)
+                if (timer["input_state"] != "OFF" or not timer["enabled"]
+                        or timer["seconds"] != expected["seconds"]
+                        or settings["range"] != expected["range"]
+                        or Decimal(str(settings["current_a"])) != expected["current"]):
+                    raise LoadError("readback_mismatch", "Timer/CC differs from authorized settings.", 3)
+        _stopping(stop)
+
+    with c.open_session(resource) as (session, runtime):
+        parse_identity(c._query(session, "*IDN?"))
+        if command == "input-off":
+            result = c._perform(session, command, current=None, voltage=None, resistance=None,
+                                power=None, range_name=None, confirmed=False, stop=stop,
+                                allow_cv=False, allow_cr=False, allow_cw=False)
+        elif command == "input-timer-status":
+            result = _input_timer_snapshot(session)
+        else:
+            guard(session)
+            c._write(session, "SYST:REM")
+            guard(session)
+            _stopping(stop)
+            if command == "input-on":
+                try:
+                    c._write(session, writes[command])
+                    if not c._confirm_input_state(session, "ON"):
+                        raise LoadError("input_on_not_confirmed", "Input ON was not confirmed.", 3)
+                except LoadError as exc:
+                    exc.details.update(input_state="UNKNOWN", input_on_attempted=True)
+                    raise
+                result = {"input_state": "ON"}
+            else:
+                c._write(session, writes[command])
+                result = _input_timer_snapshot(session)
+                if ((command == "set-input-timer" and result["seconds"] != seconds)
+                        or (command != "set-input-timer"
+                            and result["enabled"] != (command == "input-timer-enable"))):
+                    raise LoadError("readback_mismatch", "Timer readback did not match.", 3)
+                c._input_off(session)
+        return {**result, **marker, "visa": runtime}
+
+
 def _configuration(scope, settings):
     if not isinstance(settings, dict):
         raise LoadError("argument_error", "Supply the complete expected validation settings.")

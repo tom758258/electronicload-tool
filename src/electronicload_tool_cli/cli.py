@@ -100,12 +100,14 @@ def main(argv: list[str] | None = None) -> int:
         sub.add_argument("--validation-allow-pending-live-support", action="store_true",
                          help=argparse.SUPPRESS)
         if name in CONTROL_COMMANDS and name not in (*LIST_COMMANDS, *AUXILIARY_COMMANDS):
-            sub.add_argument("--hardware-validation", choices=("cv", "cr", "cw", "transient-cc",
+            sub.add_argument("--hardware-validation", choices=("input-timer", "cv", "cr", "cw", "transient-cc",
                                                                "transient-cv", "transient-cr", "transient-cw"),
                              help="Explicit contributor hardware-validation scope; not Product LIVE.")
             sub.add_argument("--validation-settings-json",
                              help="Expected complete setup for validation enable, ON and trigger.")
-        if name == "set-cc":
+        if name == "set-input-timer":
+            sub.add_argument("--seconds", required=True, type=int, help="Integer seconds, 1 through 60000.")
+        elif name == "set-cc":
             sub.add_argument("--current", required=True, type=_current_token)
             sub.add_argument("--range", required=True, choices=FIXED_RANGE_CHOICES)
             sub.add_argument("--rise-slew", help="Rising slew in A/us; pair with --fall-slew (offline only).")
@@ -239,6 +241,7 @@ def main(argv: list[str] | None = None) -> int:
                 rise_slew=getattr(args, "rise_slew", None) if args.command == "set-cc" else None,
                 fall_slew=getattr(args, "fall_slew", None) if args.command == "set-cc" else None,
                 latch=getattr(args, "latch", None),
+                seconds=getattr(args, "seconds", None),
             )
         else:
             result = read_execute(args.command, mode=mode, resource=args.resource,

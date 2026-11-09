@@ -17,6 +17,7 @@ deliberate confirmation. Simulation and dry-run never grant hardware authorizati
 - Fixed CC and deliberate Input ON/OFF with the existing hardware safety gates.
 - Offline Fixed CV/CR/CW and software Auto Range for Fixed CC/CV/CR.
 - Offline Fixed CC paired optional Slew, standalone VON setup/status, and Fixed-mode Short ON/OFF/status.
+- Offline Fixed Input Timer setup/enable/disable/status, with Short and dynamic-mode exclusions.
 - Offline Transient CC/CV/CR/CW (Continuous, Pulse, Toggle) and native LIST CC.
 - Hardware-free simulation and dry-run; Common v3 Worker with JSON/JSONL for automation.
 - Fail-closed model, command, transport and backend permissions; no implicit Input ON.

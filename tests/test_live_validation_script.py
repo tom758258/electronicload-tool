@@ -251,8 +251,9 @@ def test_new_transient_script_refuses_invalid_setup(run_script, scope, args):
 
 @pytest.mark.skipif(os.name == 'nt', reason='Requires a POSIX pseudo-terminal for fake operator input.')
 @pytest.mark.parametrize('scope,off_failure', [('transient-cv', False), ('transient-cr', True),
-                                              ('transient-cw', False)])
-def test_transient_script_failure_cleanup_uses_active_scope(run_script, tmp_path, scope, off_failure):
+                                              ('transient-cw', False),
+                                              ('input-timer', False), ('input-timer', True)])
+def test_validation_script_failure_cleanup_uses_active_scope(run_script, tmp_path, scope, off_failure):
     # Run the actual script through its interactive gates, with every LIVE CLI
     # replaced by a stateful fake. The existing VISA blocker remains installed.
     import pty
@@ -275,7 +276,8 @@ def test_transient_script_failure_cleanup_uses_active_scope(run_script, tmp_path
         with transcript.open('w', encoding='utf-8') as output:
             process = subprocess.Popen(
                 [run_script.powershell, '-NoProfile', '-File', str(scripts / 'live-cli-check.ps1'),
-                 '-Target', 'itech-it8812c', '-Resource', RESOURCE, '-Modes', scope,
+                 '-Target', 'itech-it8812c', '-Resource', RESOURCE,
+                 *(['-InputTimerOnly'] if scope == 'input-timer' else ['-Modes', scope]),
                  '-SourceCurrentLimitA', '0.5', '-SourceVoltageLimitV', '12',
                  '-ConfirmWrites', '-EnableInputOn'], cwd=ROOT, env=run_script.env,
                 stdin=slave, stdout=output, stderr=subprocess.STDOUT)
@@ -303,18 +305,24 @@ def test_transient_script_failure_cleanup_uses_active_scope(run_script, tmp_path
     names = [command[0] for command in commands]
     assert names.count('input-on') == names.count('input-off') == 1
     if off_failure:
-        assert 'transient-disable' not in names
+        disable_command = 'input-timer-disable' if scope == 'input-timer' else 'transient-disable'
+        assert disable_command not in names[names.index('input-on') + 1:]
         assert 'Immediate operator action is required' in text
     else:
-        assert names[-3:] == ['input-off', 'input-state', 'transient-disable']
+        assert names[-3:] == ['input-off', 'input-state',
+                              'input-timer-disable' if scope == 'input-timer' else 'transient-disable']
         disable = commands[-1]
         assert disable[disable.index('--hardware-validation') + 1] == scope
     paths = re.findall(r'Report: (.+?/shareable/report\.json)', text)
     report = json.loads(Path(paths[-1]).read_text(encoding='utf-8-sig'))
     cases = {case['name']: case for case in report['cases']}
     assert report['overall_status'] == 'FAIL'
-    assert cases[f'{scope}-continuous-trigger-1']['status'] == 'FAIL'
-    assert cases[f'{scope}-pulse-setup']['status'] == 'NOT RUN'
+    if scope == 'input-timer':
+        assert cases['timer-expiry']['status'] == 'FAIL'
+        assert cases['timer-off']['status'] == 'NOT RUN'
+    else:
+        assert cases[f'{scope}-continuous-trigger-1']['status'] == 'FAIL'
+        assert cases[f'{scope}-pulse-setup']['status'] == 'NOT RUN'
     assert cases['cleanup-input-off']['status'] == ('FAIL' if off_failure else 'PASS')
     assert RESOURCE not in Path(paths[-1]).read_text(encoding='utf-8-sig')
     assert not (Path(paths[-1]).parents[1] / 'private').exists()
@@ -333,14 +341,16 @@ def fake_main(argv=None):
     with open(TRACE, 'a', encoding='utf-8') as trace:
         trace.write(json.dumps(args) + '\n')
     state = json.loads(Path(STATE).read_text()) if Path(STATE).exists() else {'on': False}
-    failed = command == 'transient-trigger' or (command == 'input-off' and OFF_FAILURE)
+    failed = (command == 'transient-trigger'
+              or (command == 'input-timer-status' and state['on'])
+              or (command == 'input-off' and OFF_FAILURE))
     if command == 'input-on':
         state['on'] = True
     if command == 'input-off' and not failed:
         state['on'] = False
-    if command == 'transient-enable':
+    if command in ('transient-enable', 'input-timer-enable'):
         state['enabled'] = True
-    if command == 'transient-disable':
+    if command in ('transient-disable', 'input-timer-disable'):
         state['enabled'] = False
     Path(STATE).write_text(json.dumps(state))
     if command.startswith('set-transient-'):
@@ -349,7 +359,7 @@ def fake_main(argv=None):
             selected = 'low' if command == 'set-transient-cv' else 'high'
         state['configuration'] = {'range': selected}
         Path(STATE).write_text(json.dumps(state))
-    result = {'configuration': state.get('configuration'),
+    result = {'seconds': 5, 'configuration': state.get('configuration'),
               'input_state': 'ON' if state['on'] else 'OFF',
               'enabled': state.get('enabled', False),
               'visa': {'library': 'FAKE', 'manufacturer': 'FAKE'}}
@@ -358,3 +368,46 @@ def fake_main(argv=None):
     return 3 if failed else 0
 cli.main = fake_main
 '''
+
+
+def test_input_timer_offline_preflight(run_script):
+    result = run_script(['-InputTimerOnly'], preflight=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'PASS: Input Timer preflight' in result.stdout
+
+
+@pytest.mark.parametrize('gates', [[], ['-ConfirmWrites'], ['-EnableInputOn'],
+                                   ['-ConfirmWrites', '-EnableInputOn']])
+def test_input_timer_script_plan_and_live_refusal(run_script, gates):
+    planned = not gates
+    result = run_script(['-InputTimerOnly', *(['-PlanOnly'] if planned else []), *gates])
+    assert result.returncode == (0 if planned else 2), result.stdout + result.stderr
+    paths = re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)
+    assert paths
+    text = Path(paths[-1]).read_text(encoding='utf-8-sig')
+    report = json.loads(text)
+    assert report['overall_status'] == ('PLAN ONLY' if planned else 'BLOCKED')
+    assert report['hardware_touched'] is False
+    assert report['summary_counts']['passed'] == report['summary_counts']['failed'] == 0
+    assert all(c['status'] == 'NOT RUN' for c in report['cases'])
+    assert RESOURCE not in text
+    assert not (Path(paths[-1]).parents[1] / 'private').exists()
+    commands = [c['command'] for c in report['cases']]
+    assert commands.count('input-on') == commands.count('input-off') == 1
+    assert 'set-input-timer' in commands and commands.count('input-timer-status') == 3
+    assert 'transient-enable' not in commands and 'set-cv' not in commands
+    on = next(c for c in report['cases'] if c['command'] == 'input-on')
+    assert '--confirm' in on['arguments'] and 'input-timer' in on['arguments']
+
+
+@pytest.mark.parametrize('extra', [[], ['-Modes', 'cc'], ['-TimerSeconds', '0'],
+                                   ['-TimerSeconds', '11'], ['-TimerSeconds', '1.5'],
+                                   ['-Current', '3']])
+def test_input_timer_script_missing_gates_and_invalid_settings(run_script, extra):
+    result = run_script(['-InputTimerOnly', *extra])
+    assert result.returncode != 0, result.stdout + result.stderr
+
+
+def test_input_timer_script_requires_source_limits(run_script):
+    result = run_script(['-InputTimerOnly', '-PlanOnly'], source_limits=False)
+    assert result.returncode == 2, result.stdout + result.stderr

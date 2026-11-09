@@ -330,6 +330,80 @@ The offline VON bound uses the documented 0–MAX range and the rated 120 V
 input limit. Physical VON limits and write/readback behavior require separate
 validation. [ITECH Programming Guide](https://cdn.itechate.com/uploadfiles/%E7%94%A8%E6%88%B7%E6%89%8B%E5%86%8C/user%20manual/it8800/IT8800%20Programming%20Guide-EN.pdf) · [IT8812C specifications](https://www.itechate.com/uploadfiles/2019/06/201906211045484548.pdf) · [ITECH User Manual](https://media.digikey.com/pdf/Data%20Sheets/ITech%20Elect%20PDFs/IT8800%20User%20Manual.pdf)
 
+## Offline Input Timer
+
+Input Timer supports Fixed CC/CV/CR/CW in Core, CLI, Simulator and Worker.
+It accepts integer seconds **1–60000 inclusive**, without rounding or clamping.
+
+| Command | CLI arguments | Simulated result |
+| --- | --- | --- |
+| `set-input-timer` | `--seconds <integer>` | `seconds`, `enabled` |
+| `input-timer-enable` | None | `seconds`, `enabled` |
+| `input-timer-disable` | None | `seconds`, `enabled` |
+| `input-timer-status` | None | `seconds`, `enabled` |
+
+Setting seconds, enabling and disabling require confirmed Input OFF. Setting
+and enabling also require Fixed mode with Transient disabled. Enabling requires
+Short OFF. While Timer is enabled, Short ON, Transient setup/enable and LIST
+setup/recall are refused. Explicitly disable Timer before selecting those modes.
+VON and Timer can coexist. Setting seconds preserves the current enabled state.
+
+Status is read-only and may be queried with Input ON. Simulator defaults to
+10 seconds, disabled; it stores settings only, without countdown, elapsed time,
+or automatic Input OFF. Manual Input OFF preserves Timer settings and enable
+state. Worker Stop remains I/O-free and changes neither Input nor Timer.
+Standalone simulated CLI invocations each start fresh; use one Worker for a
+multi-command cycle. Dry-run validates arguments without inspecting/changing state.
+
+```powershell
+.\.venv\Scripts\electronicload-tool.exe set-input-timer --seconds 60 --simulate --json
+.\.venv\Scripts\electronicload-tool.exe input-timer-enable --dry-run --json
+.\.venv\Scripts\electronicload-tool.exe input-timer-status --simulate --json
+```
+
+All four commands, including Status, are blocked before physical VISA access
+on normal Product LIVE and Worker LIVE paths, including the legacy contributor
+override. Input Timer does not expand Product LIVE support.
+
+### Controlled Timer validation
+
+Use the existing script's separate `-InputTimerOnly` switch, without `-Modes`.
+It is excluded from the default eight-mode run. Preview with a fictional USB
+resource for offline checks; supply an approved resource only for a separately
+authorized physical run:
+
+```powershell
+.\scripts\preflight-cli.ps1 -InputTimerOnly
+.\scripts\live-cli-check.ps1 -Target itech-it8812c -Resource '<USB_RESOURCE>' -InputTimerOnly -Current 0.1 -TimerSeconds 5 -SourceCurrentLimitA 0.5 -SourceVoltageLimitV 12 -PlanOnly
+```
+
+The Timer-only script accepts 3–10 seconds (default 5) and positive CC up to
+2 A (default 0.1 A), valid for both CC ranges. Declared source limits must be
+positive and at most 2 A / 18 V; the operator configures and verifies the source.
+It retains the common approved setup/manual OFF contingency, `-ConfirmWrites`,
+`-EnableInputOn`, interactive confirmation, runtime checks, process deadlines,
+redaction and explicit OFF cleanup requirements described below.
+
+The planned physical trial confirms Input OFF, explicitly disables Timer,
+sets low-range Fixed CC, configures/enables Timer, reads status while OFF,
+then confirms Input ON through `--hardware-validation input-timer` with complete
+expected `current`, `range` and integer `seconds`. Before and after remote
+transition Core rechecks physical OFF, CC settings, Short/Transient OFF and Timer
+readback. After the bounded wait the script queries actual Timer/Input state;
+only observed Input OFF passes expiry. It then explicitly sends/verifies Input
+OFF, separately disables Timer and reads final Timer/Input state. Failure stops
+further trials; a possible ON attempt gets one bounded OFF cleanup attempt.
+Timer-disable cleanup is a separate operation after confirmed OFF.
+
+The validation-only Core/CLI scope uses `INP:TIM:DEL <seconds>`, `INP:TIM 0|1`,
+`INP:TIM:DEL?` and `INP:TIM?` from the
+[IT8800 Programming Guide V2.1, printed pp.45–46](https://assets.testequity.com/te1/Documents/pdf/itech/ITECH_IT8800-Programming-Guide-EN.pdf),
+which lists IT8812C. The DELay syntax line omits `:DELay`; its example and query
+include it. Readback must match. The trial reports the observed Enabled value
+after expiry without assuming retention, and does not establish timing accuracy,
+VON interaction, CV/CR/CW physical compatibility or Worker LIVE behavior.
+PlanOnly leaves every physical case NOT RUN and cannot promote Product LIVE.
+
 ## Transient Modes
 
 Core, CLI, Simulator and the Common v3 Worker support Continuous, Pulse and
@@ -617,7 +691,8 @@ See [Controlled instrument validation](#controlled-instrument-validation).
 
 `scripts/preflight-cli.ps1` covers the offline CLI and ordinary LIVE refusal
 behavior and Manifest exposure. Use `-TransientOnly` for focused Transient
-checks or `-FixedSlewVonShortOnly` for the offline Slew, VON and Short cases.
+checks, `-FixedSlewVonShortOnly` for the offline Slew, VON and Short cases,
+or `-InputTimerOnly` for Timer.
 Preparing hardware scripts and
 executing hardware tests are separate activities: physical runs require the
 operator gates below. Normal CI continues to run no-hardware checks.

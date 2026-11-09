@@ -53,6 +53,10 @@ Common contracts remain authoritative for the HTTP and JSONL envelopes.
 | `short-on` | `{}` | Confirmed simulated Short ON, with Input ON and Fixed CC/CV/CR/CW required |
 | `short-off` | `{}` | Confirmed simulated Short OFF, independent of Input |
 | `short-status` | `{}` | Read-only simulated Short state |
+| `set-input-timer` | `{"seconds": <integer 1–60000>}` | Offline Timer seconds and enabled state; confirmed Input OFF and Fixed mode required |
+| `input-timer-enable` | `{}` | Offline Timer state; confirmed Input OFF, Fixed mode and Short OFF required |
+| `input-timer-disable` | `{}` | Offline Timer state; confirmed Input OFF required |
+| `input-timer-status` | `{}` | Read-only offline Timer state; allowed with Input ON |
 | `set-transient-cc` | Complete mode-specific configuration below | Offline Transient control status |
 | `set-transient-cv` | `transient_mode`, `range`, `level_a`, `level_b` (V), applicable widths (s) | Offline Transient CV status |
 | `set-transient-cr` | `transient_mode`, `range`, `level_a`, `level_b` (Ω), applicable widths (s) | Offline Transient CR status |
@@ -130,6 +134,35 @@ checking or changing simulated state. The five new commands appear as
 `kind: "async_job"` in Manifest schema 2. All five and Fixed CC with Slew are
 blocked before VISA, including on contributor validation paths. See the
 [offline CLI usage](../cli/README.md#offline-fixed-cc-slew-von-and-short).
+
+## Offline Input Timer
+
+The four Timer commands are ordinary async jobs in Manifest schema 2 / Worker
+protocol 3. `seconds` requires a JSON integer token from 1 through 60000;
+missing, fractional (including `1.0` or `1e0`), boolean, string, nonfinite,
+out-of-range and extra arguments fail before job creation (HTTP 400).
+State failures retain HTTP 202 followed by a failed `job_finished`.
+
+Simulation returns `{"seconds": 60, "enabled": true}`. The setting persists
+across jobs and Fixed mode changes. The simulator starts at 10 seconds, disabled,
+and never counts down or turns Input OFF automatically. Status is read-only,
+including with Input ON; `GET /status` retains its Worker/job shape without
+device queries. Dry-run returns `command`, `hardware_access: false`, and
+validated `seconds` for Set, without checking or changing simulated state.
+
+Set, Enable and Disable require confirmed Input OFF. Set/Enable require Fixed
+CC/CV/CR/CW with Transient disabled. Enable requires Short OFF. Enabled Timer
+blocks Short ON, Transient setup/enable, LIST setup and LIST recall. Disable
+Timer explicitly before selecting those modes. VON can coexist. Setting seconds
+preserves enabled state; Input OFF and Stop do not disable Timer. Stop blocks
+Timer mutations, while status remains readable; Stop performs no device I/O.
+
+All four commands, including Status, remain Product/Worker LIVE blocked before
+VISA access. Valid LIVE jobs are admitted and then fail with
+`unsupported_live_scope`. Neither legacy override nor Input ON authorization
+opens Timer LIVE. The separate CLI-only `input-timer` hardware-validation scope
+and expected settings cannot be selected through Worker arguments/context.
+See [Timer CLI and validation procedure](../cli/README.md#offline-input-timer).
 
 ## Offline Transient CC / CV / CR / CW
 
