@@ -7,6 +7,7 @@ from .errors import LoadError, communication_error
 
 TIMEOUT_MS = 5000
 TERMINATION = "\n"
+QUERY_DELAY_S = 0.150
 
 
 def validate_connection(resource: str | None, backend: str, *, required: bool) -> None:
@@ -75,6 +76,7 @@ def open_session(resource: str):
             session.timeout = TIMEOUT_MS
             session.read_termination = TERMINATION
             session.write_termination = TERMINATION
+            session.query_delay = QUERY_DELAY_S
         except Exception as exc:
             raise communication_error(
                 "visa_configure_failed", "Cannot configure the VISA session.", exc
