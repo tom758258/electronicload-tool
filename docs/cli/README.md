@@ -36,14 +36,22 @@ and version separately from `--json`.
 `--dry-run` and `--simulate` are mutually exclusive. There is no `--live` flag
 and no implicit simulation. For example, `measure` alone fails because the
 resource is missing. Read-only LIVE requests require an explicit USB INSTR
-resource and exact IT8812C identity. Replace placeholders only for authorized
-use. Operation commands never discover, guess, or select resources automatically.
+resource and exact IT8812C identity. Set the operator-selected VISA resource
+once in PowerShell and pass it explicitly to every LIVE command:
+
+```powershell
+$env:ELECTRONICLOAD_TOOL_RESOURCE = "USB0::...::INSTR"
+```
+
+This variable is a documentation convenience; the validation Script does not
+read it automatically. Operation commands never discover, guess, or select
+resources automatically.
 Only the explicit `list-resources` diagnostic enumerates them.
 
 For an authorized identification diagnostic:
 
 ```powershell
-.\.venv\Scripts\electronicload-tool.exe identify --resource '<USB_RESOURCE>' --backend system --json
+.\.venv\Scripts\electronicload-tool.exe identify --resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" --backend system --json
 ```
 
 Identification sends only `*IDN?`. It checks the full manufacturer and model
@@ -87,8 +95,8 @@ A LIVE request without a resource is refused:
 For authorized read-only LIVE use:
 
 ```powershell
-.\.venv\Scripts\electronicload-tool.exe input-state --resource '<USB_RESOURCE>' --backend system --json
-.\.venv\Scripts\electronicload-tool.exe measure --resource '<USB_RESOURCE>' --backend system --json
+.\.venv\Scripts\electronicload-tool.exe input-state --resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" --backend system --json
+.\.venv\Scripts\electronicload-tool.exe measure --resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" --backend system --json
 ```
 
 Modes are `live`, `dry-run`, and `simulate`. `identify` results contain
@@ -374,15 +382,15 @@ authorized physical run:
 
 ```powershell
 .\scripts\preflight-cli.ps1 -InputTimerOnly
-.\scripts\live-cli-check.ps1 -Target itech-it8812c -Resource '<USB_RESOURCE>' -InputTimerOnly -Current 0.1 -TimerSeconds 5 -SourceCurrentLimitA 0.5 -SourceVoltageLimitV 12 -PlanOnly
+.\scripts\live-cli-check.ps1 -Target itech-it8812c -Resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" -InputTimerOnly -Current 0.1 -TimerSeconds 5 -SourceCurrentLimitA 0.5 -SourceVoltageLimitV 12 -PlanOnly
 ```
 
 The Timer-only script accepts 3–10 seconds (default 5) and positive CC up to
 2 A (default 0.1 A), valid for both CC ranges. Declared source limits must be
 positive and at most 2 A / 18 V; the operator configures and verifies the source.
-It retains the common approved setup/manual OFF contingency, `-ConfirmWrites`,
-`-EnableInputOn`, interactive confirmation, runtime checks, process deadlines,
-redaction and explicit OFF cleanup requirements described below.
+It retains the common approved setup/manual OFF contingency, interactive
+confirmation, runtime checks, process deadlines, redaction and explicit OFF
+cleanup requirements described below.
 
 The planned physical trial confirms Input OFF, explicitly disables Timer,
 sets low-range Fixed CC, configures/enables Timer, reads status while OFF,
@@ -514,8 +522,8 @@ The existing width parameters are shared; CC keeps its separate levels/slew.
 CV uses Continuous Auto / Pulse Low / Toggle High; CR uses Continuous Auto /
 Pulse High / Toggle High; CW has all three without Range or slew.
 Auto expected ranges come from Core. Real execution retains explicit Resource,
-write/ON opt-ins, interactive confirmation, source limits (>0 to 2 A / >0 to
-18 V), manual OFF contingency and private/redacted reporting. Cleanup uses the
+interactive confirmation, source limits (>0 to 2 A / >0 to 18 V),
+manual OFF contingency and private/redacted reporting. Cleanup uses the
 active Transient scope and verifies OFF before Disable. The unchanged 30-second
 command and 900-second total budgets apply; the default 192 invocations allow
 about 4.7 seconds each on average. Slow hardware may require selected subsets;
@@ -706,11 +714,12 @@ approved hardware validation workflow, **not** a general unattended control
 command and not automatic Product LIVE promotion.
 
 Preview the default **all-mode** plan without opening VISA or touching hardware.
-Use a fictional resource only for offline checks; replace `<USB_RESOURCE>` with
-your own approved resource for a real run:
+For offline checks, set `ELECTRONICLOAD_TOOL_RESOURCE` to a **fictional** USB
+resource. For an approved real run, set it to the exact operator-selected USB
+INSTR resource (see the PowerShell setup above):
 
 ```powershell
-.\scripts\live-cli-check.ps1 -Target itech-it8812c -Resource '<USB_RESOURCE>' -SourceCurrentLimitA 0.5 -SourceVoltageLimitV 12 -PlanOnly
+.\scripts\live-cli-check.ps1 -Target itech-it8812c -Resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" -SourceCurrentLimitA 0.5 -SourceVoltageLimitV 12 -PlanOnly
 ```
 
 `-Modes` is the sole mode selector and replaces `-IncludeValidationModes`.
@@ -718,10 +727,10 @@ Accepted values are `cc`, `cv`, `cr`, `cw`, `transient-cc`, `transient-cv`,
 `transient-cr` and `transient-cw`; omit it for all eight. Select a single mode or a comma-separated list:
 
 ```powershell
-.\scripts\live-cli-check.ps1 -Target itech-it8812c -Resource '<USB_RESOURCE>' -Modes cc -PlanOnly
-.\scripts\live-cli-check.ps1 -Target itech-it8812c -Resource '<USB_RESOURCE>' -Modes transient-cc -SourceCurrentLimitA 0.5 -SourceVoltageLimitV 12 -PlanOnly
-.\scripts\live-cli-check.ps1 -Target itech-it8812c -Resource '<USB_RESOURCE>' -Modes cc,cv -SourceCurrentLimitA 0.5 -SourceVoltageLimitV 12 -PlanOnly
-.\scripts\live-cli-check.ps1 -Target itech-it8812c -Resource '<USB_RESOURCE>' -Modes cc,transient-cc -SourceCurrentLimitA 0.5 -SourceVoltageLimitV 12 -PlanOnly
+.\scripts\live-cli-check.ps1 -Target itech-it8812c -Resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" -Modes cc -PlanOnly
+.\scripts\live-cli-check.ps1 -Target itech-it8812c -Resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" -Modes transient-cc -SourceCurrentLimitA 0.5 -SourceVoltageLimitV 12 -PlanOnly
+.\scripts\live-cli-check.ps1 -Target itech-it8812c -Resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" -Modes cc,cv -SourceCurrentLimitA 0.5 -SourceVoltageLimitV 12 -PlanOnly
+.\scripts\live-cli-check.ps1 -Target itech-it8812c -Resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" -Modes cc,transient-cc -SourceCurrentLimitA 0.5 -SourceVoltageLimitV 12 -PlanOnly
 ```
 
 The selected modes run once each in CC, CV, CR, CW, Transient CC, Transient CV,
@@ -750,6 +759,9 @@ Pulse Low and Toggle High; CR runs Continuous Auto, Pulse High and Toggle High;
 CW runs all three without Range. No CV/CR/CW slew is supplied. Auto selection
 comes from Core and is recorded as `expected_range` for later readback checks.
 An unsuitable parameter combination fails the offline plan before hardware I/O.
+By default the Script prints a concise PlanOnly summary; use `-Verbose` to
+inspect every planned CLI step and its arguments. Full case details remain in
+the redacted `report.json` and `summary.md`.
 
 The CV/CR/CW/Transient sequence covers CV Low/High, CR Low/High, CW, Continuous Auto,
 Pulse Low, Toggle High, Continuous High and Pulse Auto High. Each trial
@@ -771,13 +783,13 @@ For a separately approved, safe IT8812C + bounded source/DUT setup, run once
 in an interactive Windows console:
 
 ```powershell
-.\scripts\live-cli-check.ps1 -Target itech-it8812c -Connection usb -Resource '<USB_RESOURCE>' -Backend system -SourceCurrentLimitA 0.5 -SourceVoltageLimitV 12 -ConfirmWrites -EnableInputOn
+.\scripts\live-cli-check.ps1 -Target itech-it8812c -Connection usb -Resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" -Backend system -SourceCurrentLimitA 0.5 -SourceVoltageLimitV 12
 ```
 
 For a selected-mode run, keep the desired `-Modes` and source limits from the
-preview command and replace `-PlanOnly` with `-ConfirmWrites -EnableInputOn`,
-after separate approval of the physical setup. The same interactive
-confirmation and failure handling apply to every selection.
+preview command and remove `-PlanOnly` after separate approval of the physical
+setup. The Script itself supplies the CLI's per-command Input ON `--confirm`.
+The same interactive confirmation and failure handling apply to every selection.
 
 The CC trial defaults to 0.1 A, with a script-only maximum of 2 A.
 Both low/high configurations must satisfy the model range and programming resolution.
@@ -785,11 +797,10 @@ Both low/high configurations must satisfy the model range and programming resolu
 the script's positive/2 A bounds. The single value applies to both ranges; low is selected last for the
 bounded ON/OFF trial. These limits do not alter normal product CC support.
 
-The complete LIVE validation requires **both** `-ConfirmWrites` and
-`-EnableInputOn`, a user-supplied explicit USB INSTR Resource, interactive
-operator confirmation, verified physical Input OFF, a safe source/DUT and
-a manual OFF contingency. The script blocks missing gates/noninteractive
-runs before any physical VISA connection. After offline preflight, the operator
+The complete LIVE validation requires a user-supplied explicit USB INSTR
+Resource, interactive operator confirmation, verified physical Input OFF,
+a safe source/DUT and a manual OFF contingency. The Script blocks
+noninteractive runs before any physical VISA connection. After offline preflight, the operator
 presses **Enter once** to run; Ctrl+C cancels. No magic words, Suite, Stage
 or extra prompt are required.
 

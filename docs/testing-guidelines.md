@@ -63,9 +63,9 @@ but never physical hardware. The **single** `live-cli-check.ps1` defaults to
 all eight modes: CC, CV, CR, CW and Transient CC/CV/CR/CW. `-Modes` selects one or more
 modes while retaining common read-only safety prechecks and each selected
 mode's explicit Input ON/OFF flow. Test its `-PlanOnly` operation and unattended
-LIVE refusal with a **fictional** USB Resource. Without `-ConfirmWrites` or
-`-EnableInputOn`, and in noninteractive LIVE runs, verify it refuses before
-opening any VISA session or sending SCPI. CC defaults to 0.1 A, with a
+LIVE refusal with a **fictional** USB Resource. In noninteractive LIVE runs, verify it refuses before opening any VISA
+session or sending SCPI. The Script supplies the CLI's per-command
+`input-on --confirm` during approved interactive execution. CC defaults to 0.1 A, with a
 2 A script-only hard ceiling.
 Verify redacted shareable case totals and normal mode's lack of private raw
 logs; `-DebugArtifacts` uses the existing private/raw location without
@@ -78,8 +78,8 @@ between remote transition and Input ON. Read-only commands must not send
 `SYST:REM` or other setup writes.
 
 Run the **single** `live-cli-check.ps1` full LIVE command only with
-separately approved model/Resource, bounded DUT/source, explicit two-layer
-write/Input ON opt-in, and a manual OFF contingency. Check physical Input
+separately approved model/Resource, bounded DUT/source, explicit interactive
+operator confirmation, CLI Input ON confirmation, and a manual OFF contingency. Check physical Input
 OFF before any selected mode; CC high and low range use the same bounded current
 before one authorized ON/OFF trial. Reject further normal tests on any failure.
 After a potentially attempted Input ON, make one explicit bounded OFF cleanup
@@ -175,7 +175,7 @@ unavailable PowerShell is reported as SKIP, not a successful script check.
 For mode-selection changes alone, run only `tests/test_live_validation_script.py`
 and Ruff on that modified Python file. Verify default all-mode, every single
 mode, comma-separated/PowerShell-array selections, invalid-mode refusal,
-unchanged authorization and source-limit gates, selected case totals, and NOT RUN
+unchanged interactive confirmation and source-limit gates, selected case totals, and NOT RUN
 for planned cases. Unselected modes must have no cases or PASS counts.
 Keep every existing Transient mode/range, repeated trigger, status and OFF/disable
 step. Check CV/CR/CW Continuous/Pulse/Toggle plans, Core-resolved Auto range,
@@ -271,7 +271,7 @@ Timer SCPI with Fake VISA only; verify readback, remote-transition safety
 rechecks, Stop, uncertain ON, and no implicit retry/OFF.
 
 Run `scripts/preflight-cli.ps1 -InputTimerOnly` and Timer-only script PlanOnly /
-missing-gate / noninteractive refusals using a fictional USB resource with VISA
+noninteractive refusals using a fictional USB resource with VISA
 blocked in child processes. Planned physical cases remain NOT RUN. Verify the
 bounded Fixed CC trial, redacted reports and explicit OFF cleanup. Select
 existing Input/Short/Transient/LIST guard tests and parser/help/version / Worker

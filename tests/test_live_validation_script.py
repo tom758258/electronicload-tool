@@ -174,6 +174,22 @@ def test_hardware_script_mode_plans(run_script, selection, modes):
     assert_report(run_script(extra), 'PLAN ONLY', modes)
 
 
+def test_plan_only_console_summary_and_verbose_steps(run_script):
+    normal = run_script(['-PlanOnly'])
+    assert normal.returncode == 0, normal.stdout + normal.stderr
+    assert 'PLAN ONLY COMPLETE' in normal.stdout
+    assert 'Selected modes:' in normal.stdout
+    assert 'transient-continuous-auto-setup:' not in normal.stdout
+    assert '--validation-settings-json' not in normal.stdout
+    assert normal.stdout.count('Report: ') == 1
+
+    verbose = run_script(['-PlanOnly', '-Verbose', '-Modes', 'transient-cv'])
+    assert verbose.returncode == 0, verbose.stdout + verbose.stderr
+    assert 'transient-cv-continuous-setup:' in verbose.stdout
+    assert '--validation-settings-json' in verbose.stdout
+    assert verbose.stdout.count('Report: ') == 1
+
+
 def test_hardware_script_powershell_mode_array(run_script):
     result = run_script(['-PlanOnly'], mode_array='cc,transient-cc')
     assert_report(result, 'PLAN ONLY', ('cc', 'transient-cc'))
@@ -187,19 +203,13 @@ def test_hardware_script_invalid_modes(run_script, selection):
     assert 'Report:' not in result.stdout  # Rejected before planning any cases.
 
 
-@pytest.mark.parametrize('selection,gates', [
-    ('cc', []), ('cv', ['-ConfirmWrites']), ('transient-cc', ['-EnableInputOn']),
-    ('transient-cc', ['-ConfirmWrites', '-EnableInputOn']),
-    ('transient-cv', []), ('transient-cr', ['-ConfirmWrites']),
-    ('transient-cw', ['-ConfirmWrites', '-EnableInputOn']),
+@pytest.mark.parametrize('selection', [
+    'cc', 'cv', 'transient-cc', 'transient-cv', 'transient-cr', 'transient-cw',
 ])
-def test_hardware_script_unattended_gates(run_script, selection, gates):
-    result = run_script(['-Modes', selection, *gates])
+def test_hardware_script_unattended_refusal(run_script, selection):
+    result = run_script(['-Modes', selection])
     assert_report(result, 'BLOCKED', (selection,))
-    if len(gates) == 2:
-        assert 'requires an interactive console' in result.stdout
-    else:
-        assert 'requires -ConfirmWrites and -EnableInputOn' in result.stdout
+    assert 'requires an interactive console' in result.stdout
 
 
 def test_hardware_script_selected_parameter_checks(run_script):
@@ -278,8 +288,8 @@ def test_validation_script_failure_cleanup_uses_active_scope(run_script, tmp_pat
                 [run_script.powershell, '-NoProfile', '-File', str(scripts / 'live-cli-check.ps1'),
                  '-Target', 'itech-it8812c', '-Resource', RESOURCE,
                  *(['-InputTimerOnly'] if scope == 'input-timer' else ['-Modes', scope]),
-                 '-SourceCurrentLimitA', '0.5', '-SourceVoltageLimitV', '12',
-                 '-ConfirmWrites', '-EnableInputOn'], cwd=ROOT, env=run_script.env,
+                 '-SourceCurrentLimitA', '0.5', '-SourceVoltageLimitV', '12'],
+                cwd=ROOT, env=run_script.env,
                 stdin=slave, stdout=output, stderr=subprocess.STDOUT)
             try:
                 deadline = time.monotonic() + 180
@@ -376,11 +386,9 @@ def test_input_timer_offline_preflight(run_script):
     assert 'PASS: Input Timer preflight' in result.stdout
 
 
-@pytest.mark.parametrize('gates', [[], ['-ConfirmWrites'], ['-EnableInputOn'],
-                                   ['-ConfirmWrites', '-EnableInputOn']])
-def test_input_timer_script_plan_and_live_refusal(run_script, gates):
-    planned = not gates
-    result = run_script(['-InputTimerOnly', *(['-PlanOnly'] if planned else []), *gates])
+@pytest.mark.parametrize('planned', [True, False])
+def test_input_timer_script_plan_and_live_refusal(run_script, planned):
+    result = run_script(['-InputTimerOnly', *(['-PlanOnly'] if planned else [])])
     assert result.returncode == (0 if planned else 2), result.stdout + result.stderr
     paths = re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)
     assert paths
@@ -400,10 +408,10 @@ def test_input_timer_script_plan_and_live_refusal(run_script, gates):
     assert '--confirm' in on['arguments'] and 'input-timer' in on['arguments']
 
 
-@pytest.mark.parametrize('extra', [[], ['-Modes', 'cc'], ['-TimerSeconds', '0'],
+@pytest.mark.parametrize('extra', [['-Modes', 'cc'], ['-TimerSeconds', '0'],
                                    ['-TimerSeconds', '11'], ['-TimerSeconds', '1.5'],
                                    ['-Current', '3']])
-def test_input_timer_script_missing_gates_and_invalid_settings(run_script, extra):
+def test_input_timer_script_invalid_settings_and_selection(run_script, extra):
     result = run_script(['-InputTimerOnly', *extra])
     assert result.returncode != 0, result.stdout + result.stderr
 
