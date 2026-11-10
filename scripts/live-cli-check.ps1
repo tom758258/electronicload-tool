@@ -3,7 +3,7 @@ Single, bounded IT8812C CLI hardware validation.
 Default: all eight modes, with common read-only safety prechecks.
 -Modes selects cc, cv, cr, cw and/or transient-cc/cv/cr/cw (comma-separated or an array).
 -InputTimerOnly selects a separate bounded Fixed CC Timer trial; excluded from defaults.
-Requires approved source/DUT limits, write/ON gates and interactive confirmation.
+Requires approved source/DUT limits and interactive confirmation before hardware access.
 -PlanOnly validates every planned CLI request without VISA or hardware access.
 #>
 [CmdletBinding()]
@@ -36,8 +36,6 @@ param(
     [switch]$InputTimerOnly,
     [string]$TimerSeconds = '5',
     [switch]$PlanOnly,
-    [switch]$ConfirmWrites,
-    [switch]$EnableInputOn,
     [switch]$DebugArtifacts
 )
 
@@ -532,7 +530,11 @@ try {
         [Guid]::NewGuid().ToString('N').Substring(0, 8)
     $reportDirectory = Join-Path $repo ".tmp_tests/$name"
     [void][IO.Directory]::CreateDirectory($reportDirectory)
-    Write-Host "Plan: Identify, Input State, Measure; selected modes: $($selectedModes -join ', ')."
+    Write-Host "ElectronicLoad Tool - CLI Validation"
+    Write-Host "Target: $Target | Connection: $Connection | Backend: $Backend | Resource: <redacted>"
+    Write-Host "Mode: $(if ($PlanOnly) { 'PLAN ONLY' } else { 'LIVE' })"
+    Write-Host "Selected modes: $($selectedModes -join ', ')."
+    Write-Host "Plan: Identify, Input State, Measure."
     Write-Host 'Every selected mode includes explicit ON/OFF and independent OFF confirmation.'
     Write-Host 'Fixed Auto adds Input OFF setup/readback with the existing values; no extra ON/OFF cycles.'
     if (@($selectedModes | Where-Object { $_.StartsWith('transient-') }).Count -gt 0) {
@@ -542,7 +544,7 @@ try {
     if ($hasValidationModes) {
         Write-Host "Declared source limits: $SourceCurrentLimitA A / $SourceVoltageLimitV V; configure these on the source first."
     }
-    foreach ($step in $planned) { Write-Host ("  {0}: {1} {2}" -f $step.name, $step.command, ($step.args -join ' ')) }
+    foreach ($step in $planned) { Write-Verbose ("  {0}: {1} {2}" -f $step.name, $step.command, ($step.args -join ' ')) }
     if ('cc' -in $selectedModes) { Write-Host "CC Current=$currentText A." }
     Write-Host "Script ceiling=$($report.script_current_ceiling_a) A; USB System VISA."
     Write-Host 'No reset, SYST:ERR? consumption, automatic local switch, or implicit Input ON.'
@@ -552,15 +554,8 @@ try {
         $report.status = 'PLAN ONLY'
         Save-Report
         Show-Summary
-        Write-Host "PASS: no hardware accessed. Report: $reportDirectory/shareable/report.json"
+        Write-Host 'PLAN ONLY COMPLETE: no hardware accessed.'
         exit 0
-    }
-    if (-not $ConfirmWrites -or -not $EnableInputOn) {
-        $report.status = 'BLOCKED'
-        Save-Report
-        Show-Summary
-        Write-Host 'BLOCKED: complete LIVE CLI validation requires -ConfirmWrites and -EnableInputOn.'
-        exit 2
     }
     if ([Console]::IsInputRedirected -or -not [Environment]::UserInteractive) {
         $report.status = 'BLOCKED'
@@ -579,9 +574,9 @@ try {
         throw 'Preflight failed.'
     }
     $report.prechecks.preflight = 'PASS'
-    Write-Host "Target: $Target; resource: $Resource; backend: $Backend"
+    Write-Host "Operator resource check (LIVE): Target: $Target; Resource: $Resource; Backend: $Backend"
     Write-Host 'Confirm safe, bounded source/DUT, current limit and a manual Input OFF contingency.'
-    Write-Host 'Each trial deliberately tests Input ON and explicitly commands/verifies OFF; source/DUT must tolerate every printed setting.'
+    Write-Host 'Each trial deliberately tests Input ON and explicitly commands/verifies OFF; source/DUT must tolerate every planned setting (use -Verbose or the report to review details).'
     $ack = Read-Host 'With approved hardware setup, press Enter to run selected CLI cases (Ctrl+C to cancel)'
     if ($ack -cne '') {
         $report.status = 'BLOCKED'
@@ -678,7 +673,7 @@ try {
     $report.status = 'PASS'
     Save-Report
     Show-Summary
-    Write-Host "PASS: one-run CLI LIVE validation. Report: $reportDirectory/shareable/report.json"
+    Write-Host 'PASS: one-run CLI LIVE validation.'
     exit 0
 } catch {
     if ($report.status -ne 'BLOCKED') {
