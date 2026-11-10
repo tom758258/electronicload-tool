@@ -43,9 +43,9 @@ once in PowerShell and pass it explicitly to every LIVE command:
 $env:ELECTRONICLOAD_TOOL_RESOURCE = "USB0::...::INSTR"
 ```
 
-This variable is a documentation convenience; the validation Script does not
-read it automatically. Operation commands never discover, guess, or select
-resources automatically.
+PowerShell expands this documentation-only variable in the explicit `-Resource`
+argument; the validation Script does not read it automatically. Operation
+commands never discover, guess, or select resources automatically.
 Only the explicit `list-resources` diagnostic enumerates them.
 
 For an authorized identification diagnostic:
@@ -740,7 +740,8 @@ validation cases or PASS counts; planned but unexecuted cases remain NOT RUN.
 Whenever CV, CR, CW or Transient is selected, including the default all-mode
 plan, explicitly declare source limits greater than zero and no more than
 **2 A / 18 V**, even for PlanOnly. Before a real run, configure and verify these
-limits on the source and confirm the DUT tolerates **every printed setting**.
+limits on the source and confirm the DUT tolerates every planned setting
+shown with `-Verbose` or recorded in `report.json`.
 The script does not control or verify the source. These script-only bounds do
 not expand product support or substitute for a safe source/DUT setup.
 
@@ -750,7 +751,7 @@ The mode-specific trials use `-Voltage 5` for both CV ranges,
 `-WidthB 0.002` and `-PulseWidth 0.001` by default. Units are V, ohm, W, A,
 A/us and seconds. Override these parameters for your approved setup; Core
 checks exact model limits without rounding, and Transient CC levels also obey
-the script's 2 A ceiling. A separate, printed Auto High trial deliberately
+the script's 2 A ceiling. A separate Auto High trial deliberately
 uses **0.5 A/us** for both slew rates while retaining the selected levels.
 New Transient defaults are `-VoltageLevelA 5`, `-VoltageLevelB 6` (V),
 `-ResistanceLevelA 10`, `-ResistanceLevelB 1000` (Ω), `-PowerLevelA 1` and
@@ -800,8 +801,11 @@ bounded ON/OFF trial. These limits do not alter normal product CC support.
 The complete LIVE validation requires a user-supplied explicit USB INSTR
 Resource, interactive operator confirmation, verified physical Input OFF,
 a safe source/DUT and a manual OFF contingency. The Script blocks
-noninteractive runs before any physical VISA connection. After offline preflight, the operator
-presses **Enter once** to run; Ctrl+C cancels. No magic words, Suite, Stage
+noninteractive runs before any physical VISA connection. The opening banner
+redacts Resource; the interactive LIVE check displays the selected Resource for
+operator verification before any hardware access. Shareable reports keep it
+redacted. After offline preflight, the operator presses **Enter once** to run;
+Ctrl+C cancels. No magic words, Suite, Stage
 or extra prompt are required.
 
 Every selection starts with Identify (precheck), Input State (must be OFF),
@@ -869,9 +873,9 @@ normal Product LIVE availability.
 
 The existing report layout is retained under
 `.tmp_tests/readonly-live-*/shareable/` with `report.json` and
-`summary.md`. The report includes per-case PASS/FAIL/NOT RUN and a final
-summary, printed case parameters and selected control readbacks; the resource
-stays redacted. Planned and unexecuted cases remain NOT RUN. Default execution retains **no raw
+`summary.md`. The `report.json` contains per-case PASS/FAIL/NOT RUN, planned arguments,
+expected ranges and selected control readbacks. The `summary.md` lists case
+names, statuses and overall counts. Both keep the Resource redacted. Planned and unexecuted cases remain NOT RUN. Default execution retains **no raw
 CLI logs or private Resource file**. The existing `-DebugArtifacts` flag
 additionally saves raw CLI stdout/stderr/exit information and Resource
 details under `private/`. Raw files may contain lab or device identifiers:

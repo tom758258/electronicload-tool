@@ -574,7 +574,7 @@ try {
         throw 'Preflight failed.'
     }
     $report.prechecks.preflight = 'PASS'
-    Write-Host "Target: $Target; resource: $Resource; backend: $Backend"
+    Write-Host "Operator resource check (LIVE): Target: $Target; Resource: $Resource; Backend: $Backend"
     Write-Host 'Confirm safe, bounded source/DUT, current limit and a manual Input OFF contingency.'
     Write-Host 'Each trial deliberately tests Input ON and explicitly commands/verifies OFF; source/DUT must tolerate every planned setting (use -Verbose or the report to review details).'
     $ack = Read-Host 'With approved hardware setup, press Enter to run selected CLI cases (Ctrl+C to cancel)'
@@ -673,7 +673,7 @@ try {
     $report.status = 'PASS'
     Save-Report
     Show-Summary
-    Write-Host "PASS: one-run CLI LIVE validation. Report: $reportDirectory/shareable/report.json"
+    Write-Host 'PASS: one-run CLI LIVE validation.'
     exit 0
 } catch {
     if ($report.status -ne 'BLOCKED') {
