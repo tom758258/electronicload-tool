@@ -83,6 +83,7 @@ def test_exact_readonly_sequence_and_cleanup(fake_visa, command, queries, result
     assert fake_visa.calls == [
         ("backend", "@ivi"), "manager", ("open", RESOURCE, 5000), "open_resource",
         ("timeout", 5000), ("read_termination", "\n"), ("write_termination", "\n"),
+        ("query_delay", 0.150),
         "runtime_metadata", *queries, "session_close", "manager_close",
     ]
     assert output["visa"]["manufacturer"] == "FAKE VISA"
@@ -121,6 +122,7 @@ def test_partial_measurement_is_failure_without_retry(fake_visa, query, reply):
     ("manager", "visa_manager_failed", []),
     ("open_resource", "visa_open_failed", ["manager_close"]),
     (("timeout", 5000), "visa_configure_failed", ["session_close", "manager_close"]),
+    (("query_delay", 0.150), "visa_configure_failed", ["session_close", "manager_close"]),
     ("*IDN?", "query_failed", ["session_close", "manager_close"]),
     ("session_close", "cleanup_failed", ["session_close", "manager_close"]),
     ("manager_close", "cleanup_failed", ["session_close", "manager_close"]),
