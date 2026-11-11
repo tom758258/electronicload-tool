@@ -70,6 +70,132 @@ def request(command,arguments=None):
             'context':{'mode':'simulate','planning_model_id':'itech-it8812c'}}
 
 
+def test_measurement_worker_admission_results_and_average_state(worker, capsys):
+    from electronicload_tool_cli.cli import main
+    _, out, ready = worker
+    initial = http(ready['status_url'])[1]
+    invalid = [
+        ('measure-min-max', {'metric': value}) for value in ('unknown', '', None, True, 1, [], {})
+    ] + [
+        ('measure-discharge', {'metric': 'voltage-min'}),
+        ('measure-discharge', {'extra': True}),
+        ('average-status', {'count': 2}),
+        ('measure-min-max', {'validation_allow_pending_live_support': True}),
+        ('set-average', {'count': 8, 'hardware_validation': 'input-timer'}),
+        *[('set-average', {'count': value}) for value in (None, True, 1, 17, 2.0, '2')],
+        ('set-average', {}), ('set-average', {'count': 8, 'extra': True}),
+    ]
+    for command, arguments in invalid:
+        code, response = http(ready['command_url'], request(command, arguments))
+        assert code == 400 and response['worker_job_id'] is None
+    assert http(ready['status_url'])[1]['last_job'] is None
+
+    def run(command, arguments=None, dry_run=False, error=None):
+        payload = request(command, arguments)
+        if dry_run:
+            payload['context']['mode'] = 'dry_run'
+        code, response = http(ready['command_url'], payload)
+        assert code == 202 and response['kind'] == 'async_job'
+        terminal = wait_finished(out, response['worker_job_id'])
+        assert terminal['schema_version'] == 3
+        assert terminal['state'] == ('failed' if error else 'succeeded')
+        if error:
+            assert terminal['result'] is None and terminal['error']['code'] == error
+        status = http(ready['status_url'])[1]
+        assert status.keys() == initial.keys()
+        assert status['last_job']['result'] == terminal['result']
+        return terminal['result']
+
+    assert run('measure-min-max') == {
+        'voltage_min_v': 11.9, 'voltage_max_v': 12.1, 'current_min_a': 0.4, 'current_max_a': 0.6}
+    for metric, field, value in [('voltage-min', 'voltage_min_v', 11.9),
+                                  ('voltage-max', 'voltage_max_v', 12.1),
+                                  ('current-min', 'current_min_a', 0.4),
+                                  ('current-max', 'current_max_a', 0.6)]:
+        assert run('measure-min-max', {'metric': metric}) == {field: value}
+    assert run('measure-discharge') == {'capacity_ah': 0.25, 'discharge_time_s': 1800.0}
+    assert run('measure-discharge', {'metric': 'capacity'}) == {'capacity_ah': 0.25}
+    assert run('measure-discharge', {'metric': 'time'}) == {'discharge_time_s': 1800.0}
+    assert run('measure-discharge', {'metric': 'time'}, dry_run=True)['queries'] == [
+        '*IDN?', 'MEAS:TIME?']
+    assert run('measure-min-max', {'metric': 'current-max'}, dry_run=True)['queries'] == [
+        '*IDN?', 'MEAS:CURR:MAX?']
+    assert main(['send-command', '--url', ready['command_url'], '--worker-command', 'set-average',
+                 '--arguments-json', '{"count":16}', '--context-json',
+                 json.dumps(request('set-average')['context']), '--json']) == 0
+    accepted = json.loads(capsys.readouterr().out)
+    assert wait_finished(out, accepted['worker_job_id'])['result'] == {'average_count': 16}
+    run('set-average', {'count': 2}, dry_run=True)
+    assert run('average-status') == {'average_count': 16}
+    run('input-on', {'confirm_input_on': True})
+    assert run('average-status') == {'average_count': 16}
+    run('set-average', {'count': 8}, error='input_not_off')
+    assert run('average-status') == {'average_count': 16}
+    assert run('input-state') == {'input_state': 'ON'}
+    run('input-off')
+    assert run('set-average', {'count': 8}) == {'average_count': 8}
+
+
+def test_measurement_live_worker_admitted_then_blocked_and_existing_measure_unchanged(fake_visa):
+    from http.server import ThreadingHTTPServer
+    from electronicload_tool_cli import worker as worker_module
+    runtime = worker_module.Runtime(mode='live',
+                                    resource='USB0::0xFFFF::0x0001::SYNTHETIC::INSTR',
+                                    allow_input_on=True)
+    with ThreadingHTTPServer(('127.0.0.1', 0), worker_module._handler(runtime)) as server:
+        runtime.server, runtime.port = server, server.server_port
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            for command in ('measure-min-max', 'measure-discharge', 'set-average', 'average-status',
+                            'measure'):
+                payload = {'schema_version': 3, 'command': command, 'context': {'mode': 'live'},
+                           'arguments': {'count': 8} if command == 'set-average' else {}}
+                code, accepted = http(runtime.urls()['command_url'], payload)
+                assert code == 202
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    terminal = http(runtime.urls()['status_url'])[1]['last_job']
+                    if terminal and terminal['worker_job_id'] == accepted['worker_job_id']:
+                        break
+                    time.sleep(0.01)
+                else:
+                    pytest.fail('Measurement job did not finish')
+                if command == 'measure':
+                    assert terminal['state'] == 'succeeded'
+                    assert terminal['result']['power_w'] == 6.0
+                    queries = [call for call in fake_visa.calls
+                               if isinstance(call, str) and call.endswith('?')]
+                    assert queries == ['*IDN?', 'MEAS:VOLT?', 'MEAS:CURR?', 'FETC:POW?']
+                else:
+                    assert terminal['state'] == 'failed' and terminal['result'] is None
+                    assert terminal['error']['code'] == 'unsupported_live_scope'
+                    assert fake_visa.calls == []
+        finally:
+            server.shutdown()
+            thread.join(timeout=3)
+
+
+def test_measurement_worker_query_failure_and_discharge_modes(fake_visa, capsys):
+    from electronicload_tool_cli.worker import Runtime
+    runtime = Runtime(mode='simulate')
+    for mode in ('FIX', 'TRAN', 'LIST'):
+        runtime.simulator.mode = mode
+        assert runtime._execute('measure-discharge', {}, {'mode': 'simulate'}) == {
+            'capacity_ah': 0.25, 'discharge_time_s': 1800.0}
+        assert runtime.simulator.mode == mode
+    fake_visa.responses['MEAS:CAP?'] = '0.25'
+    fake_visa.responses['MEAS:TIME?'] = TimeoutError()
+    runtime.simulator = fake_visa.session
+    runtime.run_job({'worker_job_id': 'measurement', 'job_id': None, 'command': 'measure-discharge'},
+                    {}, {'mode': 'simulate'})
+    terminal = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert terminal['event'] == 'job_finished' and terminal['state'] == 'failed'
+    assert terminal['result'] is None and terminal['error']['code'] == 'query_failed'
+    assert terminal['error']['details']['query'] == 'MEAS:TIME?'
+    assert fake_visa.calls == ['*IDN?', 'MEAS:CAP?', 'MEAS:TIME?']
+
+
 def test_fixed_auto_worker_resolved_state_and_dry_run(worker):
     _, out, ready = worker
 

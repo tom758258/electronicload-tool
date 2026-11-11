@@ -26,8 +26,10 @@ LIST_FIELDS = frozenset({"range", "repeat_count", "steps"})
 AUXILIARY_COMMANDS = ("set-von", "von-status", "short-on", "short-off", "short-status")
 INPUT_TIMER_COMMANDS = ("set-input-timer", "input-timer-enable", "input-timer-disable",
                         "input-timer-status")
+AVERAGE_COMMANDS = ("set-average", "average-status")
 CONTROL_COMMANDS = ("set-cc", "set-cv", "set-cr", "set-cw", "input-on", "input-off",
-                    *TRANSIENT_COMMANDS, *LIST_COMMANDS, *AUXILIARY_COMMANDS, *INPUT_TIMER_COMMANDS)
+                    *TRANSIENT_COMMANDS, *LIST_COMMANDS, *AUXILIARY_COMMANDS, *INPUT_TIMER_COMMANDS,
+                    *AVERAGE_COMMANDS)
 FIXED_RANGE_COMMANDS = ("set-cc", "set-cv", "set-cr")
 FIXED_RANGE_CHOICES = ("auto", "low", "high")
 TRANSIENT_FIELDS = frozenset({"transient_mode", "range", "level_a", "level_b", "rise_slew",
@@ -103,6 +105,12 @@ def validate_input_timer(seconds: object) -> int:
     if type(seconds) is not int or not 1 <= seconds <= 60000:
         raise LoadError("invalid_input_timer", "Timer seconds must be an integer from 1 through 60000.")
     return seconds
+
+
+def validate_average(count: object) -> int:
+    if type(count) is not int or not 2 <= count <= 16:
+        raise LoadError("invalid_average_count", "Average count must be an integer from 2 through 16.")
+    return count
 
 
 def validate_von(voltage: object, latch: object) -> Decimal:
@@ -541,6 +549,42 @@ def _input_off(session) -> None:
         raise LoadError("input_not_off", "Input must be confirmed OFF before configuration.")
 
 
+def _average(session, command, count, stop):
+    parse_identity(_query(session, "*IDN?"))
+    if command == "set-average":
+        if stop is not None and stop.is_set():
+            raise LoadError("stopping", "Worker is stopping.")
+        _input_off(session)
+        _write(session, "SYST:REM")
+        _input_off(session)
+        if stop is not None and stop.is_set():
+            raise LoadError("stopping", "Worker is stopping.")
+        action = f"SENS:AVER:COUN {count}"
+        try:
+            _write(session, action)
+        except LoadError as exc:
+            exc.details["command"] = action
+            raise
+    query = "SENS:AVER:COUN?"
+    try:
+        response = _query(session, query)
+    except LoadError as exc:
+        exc.details["query"] = query
+        raise
+    try:
+        observed = Decimal(response) if NUMBER.fullmatch(response) else Decimal("NaN")
+    except InvalidOperation:
+        observed = Decimal("NaN")
+    if (not observed.is_finite() or not 2 <= observed <= 16
+            or observed != observed.to_integral_value()):
+        raise LoadError("invalid_response", "Average readback must be an integer from 2 through 16.",
+                        3, query=query)
+    if command == "set-average" and observed != count:
+        raise LoadError("readback_mismatch", "Average count did not match readback.", 3,
+                        requested_average_count=count, observed_average_count=int(observed))
+    return {"average_count": int(observed)}
+
+
 def _short_simulation(session: ControlSimulator, command: str, stop: Event | None) -> dict:
     query = "INP:SHOR:STAT?"
     if command == "short-status":
@@ -842,12 +886,29 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
             validation_settings: dict | None = None,
             list_configuration: dict | None = None, slot: int | None = None,
             rise_slew: object | None = None, fall_slew: object | None = None,
-            latch: str | None = None, seconds: int | None = None) -> dict:
+            latch: str | None = None, seconds: int | None = None,
+            count: int | None = None) -> dict:
     if command not in CONTROL_COMMANDS or mode not in {"live", "simulate", "dry-run"}:
         raise LoadError("argument_error", "Unknown control command or mode.")
     if model_id != MODEL_ID:
         raise LoadError("unsupported_model", "The requested profile is not registered.")
     validate_connection(resource, backend, required=mode == "live")
+    if command in AVERAGE_COMMANDS:
+        if (any(value is not None for value in (current, voltage, resistance, power, range_name,
+                transient, hardware_validation, validation_settings, list_configuration, slot,
+                rise_slew, fall_slew, latch, seconds)) or confirmed
+                or (command == "average-status" and count is not None)):
+            raise LoadError("argument_error", "Unexpected Average arguments.")
+        if command == "set-average":
+            count = validate_average(count)
+        if mode == "live":
+            raise LoadError("unsupported_live_scope", "Measurement Average is offline only.")
+        if mode == "dry-run":
+            return {"command": command, "hardware_access": False,
+                    **({"average_count": count} if count is not None else {})}
+        return _average(simulator or ControlSimulator(), command, count, stop)
+    if count is not None:
+        raise LoadError("argument_error", "Count applies only to set-average.")
     if seconds is not None and command != "set-input-timer":
         raise LoadError("argument_error", "Seconds applies only to set-input-timer.")
     if hardware_validation == "input-timer":

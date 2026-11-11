@@ -44,6 +44,10 @@ Common contracts remain authoritative for the HTTP and JSONL envelopes.
 | `identify` | `{}` | Physical/simulated identity |
 | `input-state` | `{}` | `input_state` |
 | `measure` | `{}` | `voltage_v`, `current_a`, `power_w` |
+| `measure-min-max` | `{}` or `{"metric":"voltage-min"\|"voltage-max"\|"current-min"\|"current-max"}` | All four native extrema, or only the selected field; offline only |
+| `measure-discharge` | `{}` or `{"metric":"capacity"\|"time"}` | `capacity_ah`, `discharge_time_s`, or only the selected field; offline only |
+| `set-average` | `{"count":<integer 2–16>}` | Integer `average_count`; confirmed Input OFF required; offline only |
+| `average-status` | `{}` | Integer `average_count`, including with Input ON; offline only |
 | `set-cc` | `{"current": <number>, "range": "auto"\|"low"\|"high"}`, with optional paired `rise_slew` and `fall_slew` (numbers, offline only) | Fixed CC settings with Input OFF, plus Slew fields when supplied |
 | `set-cv` | `{"voltage": <number>, "range": "auto"\|"low"\|"high"}` | Offline-only CV setpoint simulation; LIVE refused |
 | `set-cr` | `{"resistance": <number>, "range": "auto"\|"low"\|"high"}` | Offline-only CR setpoint/range simulation; LIVE refused |
@@ -84,6 +88,46 @@ A live request uses `context: {"mode": "live"}` with optional matching
 `expected_model_id`. Simulation/dry-run uses the canonical
 `planning_model_id: "itech-it8812c"`; the Worker startup mode constrains the
 request mode. Worker does **not** allow the contributor-validation override.
+
+## Offline Measurement Extensions
+
+The four measurement extension commands are ordinary async jobs in Manifest
+schema 2 / Worker protocol 3. They use the shared Core for SCPI selection,
+numeric parsing, validation and permissions. The Worker read path uses the
+same Core execution entry as the CLI, including its Product LIVE allowlist.
+Valid LIVE requests retain HTTP 202 admission, then fail with
+`unsupported_live_scope` before opening VISA. Worker Input ON authorization,
+the legacy CLI override and CLI hardware-validation scopes do not open them.
+
+`measure-min-max` with `{}` issues `MEAS:VOLT:MIN?`, `MEAS:VOLT:MAX?`,
+`MEAS:CURR:MIN?`, `MEAS:CURR:MAX?` in order, returning `voltage_min_v`,
+`voltage_max_v`, `current_min_a`, `current_max_a`. `measure-discharge` with `{}`
+issues `MEAS:CAP?`, then `MEAS:TIME?`, returning `capacity_ah` and
+`discharge_time_s`. Both first perform the existing `*IDN?` identity check.
+`metric` selects just one measurement query and result field, using the
+[CLI metric mapping](../cli/README.md#offline-measurement-extensions).
+Omission selects all; null, non-string, unknown, empty and extra arguments
+are HTTP 400 before job creation. Measurement fields are finite JSON numbers.
+A failed query fails the job with no fabricated partial success, automatic
+`FETC` fallback or retry. Independent readings are sequential, without host
+accumulation, synchronization, mode restrictions or Battery Test/reset control.
+
+`count` requires a JSON integer token 2–16; missing, boolean, string,
+fractional/exponent-form, nonfinite, out-of-range and extra arguments are
+HTTP 400 before job creation. Set requires confirmed Input OFF before remote
+transition and again before the native count write, then verifies readback.
+Status only reads identity/count, including with Input ON. Neither changes
+Input, load mode or TRACE filtering. Stop blocks Set and performs no I/O;
+Status remains read-only. State failures occur during the accepted job.
+
+One simulated Worker retains Average count (initially 2) across jobs, including
+Input OFF and mode changes. It returns deterministic example Min/Max and
+discharge readings, without simulated measurement history or elapsed-time
+progression. Common `dry_run` maps to Core `dry-run`, validating arguments
+without inspecting or changing simulated state. Previews and standalone CLI
+behavior are described in the CLI reference above. `GET /status`, HTTP/JSONL
+envelopes, single-job admission, Stop and the existing `measure` behavior and
+LIVE scope retain their contracts. Offline results do not prove hardware support.
 
 ## Fixed Software Auto Range
 

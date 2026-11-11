@@ -9,6 +9,81 @@ from electronicload_tool_cli.cli import main
 RESOURCE = "USB0::0xFFFF::0x0001::SYNTHETIC::INSTR"
 
 
+@pytest.mark.parametrize("command,metric,fields", [
+    ("measure-min-max", None, {"voltage_min_v", "voltage_max_v", "current_min_a", "current_max_a"}),
+    ("measure-min-max", "voltage-min", {"voltage_min_v"}),
+    ("measure-min-max", "voltage-max", {"voltage_max_v"}),
+    ("measure-min-max", "current-min", {"current_min_a"}),
+    ("measure-min-max", "current-max", {"current_max_a"}),
+    ("measure-discharge", None, {"capacity_ah", "discharge_time_s"}),
+    ("measure-discharge", "capacity", {"capacity_ah"}),
+    ("measure-discharge", "time", {"discharge_time_s"}),
+])
+@pytest.mark.parametrize("mode", ["simulate", "dry-run"])
+def test_native_measurement_cli_selection(capsys, command, metric, fields, mode):
+    args = ["--metric", metric] if metric is not None else []
+    assert main([command, f"--{mode}", "--json", *args]) == 0
+    output = capsys.readouterr()
+    payload = json.loads(output.out)
+    assert payload["ok"] and payload["command"] == command and payload["mode"] == mode
+    assert output.err == ""
+    if mode == "simulate":
+        assert payload["result"].keys() == fields
+        assert all(isinstance(value, float) for value in payload["result"].values())
+    else:
+        assert len(payload["result"]["queries"]) == len(fields) + 1
+        assert payload["result"]["live_access"] == "blocked"
+
+
+@pytest.mark.parametrize("command", ["measure-min-max", "measure-discharge"])
+@pytest.mark.parametrize("args", [["--metric", "unknown"], ["--metric", ""], ["--metric"]])
+def test_native_measurement_cli_invalid_metric(fake_visa, capsys, command, args):
+    assert main([command, "--resource", RESOURCE, "--json", *args]) == 2
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "argument_error"
+    assert fake_visa.calls == []
+
+
+@pytest.mark.parametrize("command", ["measure-min-max", "measure-discharge", "set-average", "average-status"])
+@pytest.mark.parametrize("override", [[], ["--validation-allow-pending-live-support"]])
+def test_measurement_cli_live_blocked_before_visa(fake_visa, capsys, command, override):
+    args = ["--count", "8"] if command == "set-average" else []
+    assert main([command, "--resource", RESOURCE, "--json", *args, *override]) == 2
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "unsupported_live_scope"
+    assert fake_visa.calls == []
+
+
+@pytest.mark.parametrize("command", ["measure-min-max", "measure-discharge", "set-average", "average-status"])
+def test_measurement_cli_rejects_hardware_validation(fake_visa, capsys, command):
+    args = ["--count", "8"] if command == "set-average" else []
+    assert main([command, "--resource", RESOURCE, "--hardware-validation", "input-timer",
+                 "--json", *args]) == 2
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "argument_error"
+    assert fake_visa.calls == []
+
+
+def test_native_measurement_cli_scpi_failure(fake_visa, capsys, monkeypatch):
+    from electronicload_tool_core import readonly
+    monkeypatch.setattr(readonly, "Simulator", lambda: fake_visa.session)
+    fake_visa.responses["MEAS:CAP?"] = TimeoutError("PRIVATE-RESOURCE")
+    assert main(["measure-discharge", "--simulate", "--json"]) == 3
+    output = capsys.readouterr()
+    payload = json.loads(output.out)
+    assert payload["ok"] is False and "result" not in payload
+    assert payload["error"]["code"] == "query_failed"
+    assert payload["error"]["details"]["query"] == "MEAS:CAP?"
+    assert fake_visa.calls == ["*IDN?", "MEAS:CAP?"]
+    assert output.err == "" and "PRIVATE-RESOURCE" not in output.out
+
+
+def test_measurement_manifest(capsys):
+    assert main(["manifest", "--json"]) == 0
+    manifest = json.loads(capsys.readouterr().out)
+    assert manifest["schema_version"] == 2
+    assert manifest["worker_protocol"]["schema_versions"] == [3]
+    for command in ("measure-min-max", "measure-discharge", "set-average", "average-status"):
+        assert manifest["commands"][command] == {"kind": "async_job"}
+
+
 @pytest.mark.parametrize("command", ["identify", "input-state", "measure"])
 @pytest.mark.parametrize("mode", ["simulate", "dry-run"])
 def test_offline_json_contract(capsys, command, mode):
