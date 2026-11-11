@@ -2,6 +2,12 @@
 
 from decimal import Decimal
 
+NATIVE_MEASUREMENTS = {
+    "MEAS:VOLT:MIN?": "11.9", "MEAS:VOLT:MAX?": "12.1",
+    "MEAS:CURR:MIN?": "0.4", "MEAS:CURR:MAX?": "0.6",
+    "MEAS:CAP?": "0.25", "MEAS:TIME?": "1800",
+}
+
 
 class Simulator:
     def query(self, command: str) -> str:
@@ -11,6 +17,7 @@ class Simulator:
             "MEAS:VOLT?": "12.0",
             "MEAS:CURR?": "0.5",
             "FETC:POW?": "6.0",
+            **NATIVE_MEASUREMENTS,
         }[command]
 
 
@@ -34,6 +41,7 @@ class ControlSimulator:
         self.short_on = False
         self.input_timer_seconds = 10
         self.input_timer_enabled = False
+        self.average_count = 2
         self.transient_configuration = None
         self.transient_function = None
         self.transient_enabled = False
@@ -107,6 +115,8 @@ class ControlSimulator:
             "MEAS:VOLT?": "12.0",
             "MEAS:CURR?": str(self.current_a if self.input_on else 0),
             "FETC:POW?": str(12.0 * self.current_a if self.input_on else 0),
+            "SENS:AVER:COUN?": str(self.average_count),
+            **NATIVE_MEASUREMENTS,
         }[command]
 
     def configure_cv(self, voltage, range_name: str) -> None:
@@ -169,5 +179,7 @@ class ControlSimulator:
             self.current_a = value
         elif command in {"INP ON", "INP OFF"}:
             self.input_on = command.endswith("ON")
+        elif command.startswith("SENS:AVER:COUN "):
+            self.average_count = int(command.split(" ", 1)[1])
         else:
             raise ValueError("Unknown simulator command")

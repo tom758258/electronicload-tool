@@ -8,6 +8,31 @@ from electronicload_tool_cli import cli
 
 
 @pytest.mark.parametrize('mode', ['simulate', 'dry-run'])
+def test_average_cli_json_and_text(capsys, mode):
+    for command, args in [('set-average', ['--count', '16']), ('average-status', [])]:
+        assert main([command, '--' + mode, '--json', *args]) == 0
+        output = capsys.readouterr()
+        payload = json.loads(output.out)
+        assert payload['ok'] and payload['command'] == command and output.err == ''
+        if mode == 'dry-run':
+            assert payload['result']['hardware_access'] is False
+        else:
+            # Each standalone invocation starts with fresh simulator state.
+            assert payload['result'] == {'average_count': 16 if args else 2}
+    assert main(['average-status', '--simulate']) == 0
+    assert 'average_count: 2' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('args', [[], ['--count', '1'], ['--count', '17'], ['--count', '2.0'],
+                                 ['--count', 'NaN'], ['--count', 'true']])
+def test_average_cli_invalid_count(fake_visa, capsys, args):
+    assert main(['set-average', '--simulate', '--json', *args]) == 2
+    output = capsys.readouterr()
+    assert json.loads(output.out)['ok'] is False and output.err == ''
+    assert fake_visa.calls == []
+
+
+@pytest.mark.parametrize('mode', ['simulate', 'dry-run'])
 @pytest.mark.parametrize('command,field,value,expected', [
     ('set-cc', 'current', '2.5', 'low'), ('set-cc', 'current', '10', 'high'),
     ('set-cv', 'voltage', '12', 'low'), ('set-cv', 'voltage', '24', 'high'),

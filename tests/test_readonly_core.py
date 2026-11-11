@@ -10,6 +10,68 @@ from electronicload_tool_core.readonly import execute
 
 RESOURCE = "USB0::0xFFFF::0x0001::SYNTHETIC::INSTR"
 
+NATIVE_CASES = [
+    ("measure-min-max", None, ["MEAS:VOLT:MIN?", "MEAS:VOLT:MAX?", "MEAS:CURR:MIN?", "MEAS:CURR:MAX?"],
+     {"voltage_min_v": 11.9, "voltage_max_v": 12.1, "current_min_a": 0.4, "current_max_a": 0.6}),
+    ("measure-min-max", "voltage-min", ["MEAS:VOLT:MIN?"], {"voltage_min_v": 11.9}),
+    ("measure-min-max", "voltage-max", ["MEAS:VOLT:MAX?"], {"voltage_max_v": 12.1}),
+    ("measure-min-max", "current-min", ["MEAS:CURR:MIN?"], {"current_min_a": 0.4}),
+    ("measure-min-max", "current-max", ["MEAS:CURR:MAX?"], {"current_max_a": 0.6}),
+    ("measure-discharge", None, ["MEAS:CAP?", "MEAS:TIME?"],
+     {"capacity_ah": 0.25, "discharge_time_s": 1800.0}),
+    ("measure-discharge", "capacity", ["MEAS:CAP?"], {"capacity_ah": 0.25}),
+    ("measure-discharge", "time", ["MEAS:TIME?"], {"discharge_time_s": 1800.0}),
+]
+
+
+@pytest.mark.parametrize("command,metric,queries,result", NATIVE_CASES)
+def test_native_measurement_queries_and_fields(fake_visa, command, metric, queries, result):
+    fake_visa.responses.update(dict(zip(queries, (str(value) for value in result.values()))))
+    assert execute(command, mode="simulate", metric=metric, simulator=fake_visa.session) == result
+    assert fake_visa.calls == ["*IDN?", *queries]
+    plan = execute(command, mode="dry-run", metric=metric)
+    assert plan["queries"] == ["*IDN?", *queries]
+    assert plan["live_access"] == "blocked"
+
+
+@pytest.mark.parametrize("command", ["measure-min-max", "measure-discharge"])
+@pytest.mark.parametrize("metric", ["unknown", "", True, [], {}])
+def test_native_measurement_invalid_metric_before_io(fake_visa, command, metric):
+    with pytest.raises(LoadError) as error:
+        execute(command, resource=RESOURCE, metric=metric)
+    assert error.value.code == "argument_error"
+    assert fake_visa.calls == []
+
+
+@pytest.mark.parametrize("command,query", [
+    ("measure-min-max", "MEAS:CURR:MAX?"), ("measure-discharge", "MEAS:TIME?"),
+])
+@pytest.mark.parametrize("reply", ["invalid", "NaN", "inf", "1e999", TimeoutError()])
+def test_native_measurement_failure_has_query_and_no_fallback(fake_visa, command, query, reply):
+    queries = next(case[2] for case in NATIVE_CASES if case[:2] == (command, None))
+    fake_visa.responses.update(dict.fromkeys(queries, "1.25e-2"))
+    fake_visa.responses[query] = reply
+    with pytest.raises(LoadError) as error:
+        execute(command, mode="simulate", simulator=fake_visa.session)
+    assert error.value.code == ("query_failed" if isinstance(reply, Exception) else "invalid_response")
+    assert error.value.exit_code == 3 and error.value.details["query"] == query
+    assert fake_visa.calls == ["*IDN?", *queries[:queries.index(query) + 1]]
+
+
+def test_native_measurement_scientific_numeric_reply(fake_visa):
+    fake_visa.responses["MEAS:CAP?"] = " +2.5E-1\n"
+    assert execute("measure-discharge", mode="simulate", metric="capacity",
+                   simulator=fake_visa.session) == {"capacity_ah": 0.25}
+
+
+@pytest.mark.parametrize("command", ["measure-min-max", "measure-discharge"])
+@pytest.mark.parametrize("validation", [False, True])
+def test_native_measurement_live_blocked_before_visa(fake_visa, command, validation):
+    with pytest.raises(LoadError) as error:
+        execute(command, resource=RESOURCE, validation=validation)
+    assert error.value.code == "unsupported_live_scope"
+    assert fake_visa.calls == []
+
 
 def test_identity_keeps_detected_and_canonical_fields_separate():
     identity = parse_identity(" ITECH Ltd, it8812c, PRIVATE-SERIAL, 1.2\n")

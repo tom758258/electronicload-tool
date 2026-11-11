@@ -11,6 +11,131 @@ from electronicload_tool_core.simulator import ControlSimulator
 RESOURCE = 'USB0::0xFFFF::0x0001::SYNTHETIC::INSTR'
 
 
+@pytest.mark.parametrize('count', [2, 8, 16])
+def test_average_native_write_readback_and_query_while_on(count):
+    sim = ControlSimulator()
+    calls = []
+    query, write = sim.query, sim.write
+    sim.query = lambda command: (calls.append(command), query(command))[1]
+    sim.write = lambda command: (calls.append(command), write(command))[1]
+    result = control.execute('set-average', mode='simulate', count=count, simulator=sim)
+    assert result == {'average_count': count} and type(result['average_count']) is int
+    assert calls == ['*IDN?', 'INP:STAT?', 'SYST:REM', 'INP:STAT?',
+                     f'SENS:AVER:COUN {count}', 'SENS:AVER:COUN?']
+    assert sim.input_on is False
+    sim.input_on = True
+    calls.clear()
+    assert control.execute('average-status', mode='simulate', simulator=sim) == result
+    assert calls == ['*IDN?', 'SENS:AVER:COUN?'] and sim.input_on
+
+
+@pytest.mark.parametrize('count', [None, True, False, 1, 17, 2.0, 2.5, '2',
+                                  float('nan'), float('inf'), Decimal('2'), [], {}])
+def test_average_invalid_count_rejected_before_io(fake_visa, count):
+    with pytest.raises(LoadError) as error:
+        control.execute('set-average', count=count, resource=RESOURCE)
+    assert error.value.code == 'invalid_average_count'
+    assert fake_visa.calls == []
+
+
+@pytest.mark.parametrize('reply', ['1', 'UNKNOWN', TimeoutError()])
+def test_average_requires_confirmed_off_without_writes(fake_visa, reply):
+    fake_visa.responses['INP:STAT?'] = reply
+    with pytest.raises(LoadError):
+        control.execute('set-average', mode='simulate', count=8, simulator=fake_visa.session)
+    assert fake_visa.calls == ['*IDN?', 'INP:STAT?']
+
+
+def test_average_dry_run_and_stop_do_not_mutate():
+    sim = ControlSimulator()
+    sim.input_on = True
+    before = vars(sim).copy()
+    assert control.execute('set-average', mode='dry-run', count=16, simulator=sim) == {
+        'command': 'set-average', 'hardware_access': False, 'average_count': 16}
+    stop = Event()
+    stop.set()
+    with pytest.raises(LoadError) as error:
+        control.execute('set-average', mode='simulate', count=8, stop=stop, simulator=sim)
+    assert error.value.code == 'stopping'
+    assert vars(sim) == before
+
+
+@pytest.mark.parametrize('change', ['input', 'stop'])
+def test_average_rechecks_guards_after_remote(change, monkeypatch):
+    sim, stop, calls = ControlSimulator(), Event(), []
+    write = sim.write
+
+    def remote(command):
+        calls.append(command)
+        write(command)
+        if change == 'input':
+            sim.input_on = True
+        else:
+            stop.set()
+
+    monkeypatch.setattr(sim, 'write', remote)
+    with pytest.raises(LoadError) as error:
+        control.execute('set-average', mode='simulate', count=8, stop=stop, simulator=sim)
+    assert error.value.code == ('input_not_off' if change == 'input' else 'stopping')
+    assert calls == ['SYST:REM'] and sim.average_count == 2
+    assert sim.input_on == (change == 'input')
+
+
+@pytest.mark.parametrize('reply,code', [('NaN', 'invalid_response'), ('inf', 'invalid_response'),
+    ('1e999', 'invalid_response'), ('2.5', 'invalid_response'), ('1', 'invalid_response'),
+    ('8.0000000000000000001', 'invalid_response'),
+    ('8e999999999999999999999999', 'invalid_response'),
+    ('17', 'invalid_response'), ('7', 'readback_mismatch'), (TimeoutError(), 'query_failed')])
+def test_average_bad_readback_is_failure_without_retry(reply, code, monkeypatch):
+    sim = ControlSimulator()
+    query = sim.query
+    calls = []
+
+    def read(command):
+        calls.append(command)
+        if command == 'SENS:AVER:COUN?':
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+        return query(command)
+
+    monkeypatch.setattr(sim, 'query', read)
+    with pytest.raises(LoadError) as error:
+        control.execute('set-average', mode='simulate', count=8, simulator=sim)
+    assert error.value.code == code and error.value.exit_code == 3
+    assert calls.count('SENS:AVER:COUN?') == 1
+    assert sim.average_count == 8 and not sim.input_on
+
+
+def test_average_uncertain_write_never_retries_or_changes_input(monkeypatch):
+    sim = ControlSimulator()
+    write = sim.write
+    calls = []
+
+    def fail(command):
+        calls.append(command)
+        write(command)
+        if command.startswith('SENS:AVER:COUN '):
+            raise TimeoutError()
+
+    monkeypatch.setattr(sim, 'write', fail)
+    with pytest.raises(LoadError) as error:
+        control.execute('set-average', mode='simulate', count=8, simulator=sim)
+    assert error.value.code == 'write_failed' and error.value.exit_code == 3
+    assert calls == ['SYST:REM', 'SENS:AVER:COUN 8']
+    assert not sim.input_on
+
+
+@pytest.mark.parametrize('command', ['set-average', 'average-status'])
+@pytest.mark.parametrize('validation', [False, True])
+def test_average_live_blocked_before_visa(fake_visa, command, validation):
+    with pytest.raises(LoadError) as error:
+        control.execute(command, resource=RESOURCE, validation=validation,
+                        **({'count': 8} if command == 'set-average' else {}))
+    assert error.value.code == 'unsupported_live_scope'
+    assert fake_visa.calls == []
+
+
 @pytest.mark.parametrize('mode', ['simulate', 'dry-run'])
 @pytest.mark.parametrize('command,field,value,expected', [
     ('set-cc', 'current', '0', 'low'),

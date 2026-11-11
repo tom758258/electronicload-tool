@@ -10,11 +10,12 @@ from pathlib import Path
 from electronicload_tool_core.discovery import discover_resources
 from electronicload_tool_core.errors import LoadError
 from electronicload_tool_core.identity import MODEL_ID
-from electronicload_tool_core.readonly import COMMANDS, execute as read_execute
+from electronicload_tool_core.readonly import COMMANDS, NATIVE_MEASUREMENTS, execute as read_execute
 from electronicload_tool_core.control import (CONTROL_COMMANDS, execute as control_execute,
                                               validate_power, TRANSIENT_FIELDS, LIST_COMMANDS,
                                               FIXED_RANGE_COMMANDS, FIXED_RANGE_CHOICES,
-                                              TRANSIENT_SETUP_COMMANDS, AUXILIARY_COMMANDS)
+                                              TRANSIENT_SETUP_COMMANDS, AUXILIARY_COMMANDS,
+                                              AVERAGE_COMMANDS)
 from .json_input import decode_list_json
 from .worker import manifest, run_worker
 from .worker_client import request as worker_request, wait_ready
@@ -99,13 +100,18 @@ def main(argv: list[str] | None = None) -> int:
         sub.add_argument("--json", action="store_true")
         sub.add_argument("--validation-allow-pending-live-support", action="store_true",
                          help=argparse.SUPPRESS)
-        if name in CONTROL_COMMANDS and name not in (*LIST_COMMANDS, *AUXILIARY_COMMANDS):
+        if name in NATIVE_MEASUREMENTS:
+            sub.add_argument("--metric", choices=tuple(NATIVE_MEASUREMENTS[name]))
+        if name in CONTROL_COMMANDS and name not in (*LIST_COMMANDS, *AUXILIARY_COMMANDS,
+                                                     *AVERAGE_COMMANDS):
             sub.add_argument("--hardware-validation", choices=("input-timer", "cv", "cr", "cw", "transient-cc",
                                                                "transient-cv", "transient-cr", "transient-cw"),
                              help="Explicit contributor hardware-validation scope; not Product LIVE.")
             sub.add_argument("--validation-settings-json",
                              help="Expected complete setup for validation enable, ON and trigger.")
-        if name == "set-input-timer":
+        if name == "set-average":
+            sub.add_argument("--count", required=True, type=int, help="Integer average count, 2 through 16.")
+        elif name == "set-input-timer":
             sub.add_argument("--seconds", required=True, type=int, help="Integer seconds, 1 through 60000.")
         elif name == "set-cc":
             sub.add_argument("--current", required=True, type=_current_token)
@@ -242,11 +248,13 @@ def main(argv: list[str] | None = None) -> int:
                 fall_slew=getattr(args, "fall_slew", None) if args.command == "set-cc" else None,
                 latch=getattr(args, "latch", None),
                 seconds=getattr(args, "seconds", None),
+                count=getattr(args, "count", None),
             )
         else:
             result = read_execute(args.command, mode=mode, resource=args.resource,
                                   backend=args.backend, model_id=args.model,
-                                  validation=args.validation_allow_pending_live_support)
+                                  validation=args.validation_allow_pending_live_support,
+                                  metric=getattr(args, "metric", None))
     except LoadError as exc:
         return _emit_error(exc, command, mode, json_output)
     except KeyboardInterrupt:

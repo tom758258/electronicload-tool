@@ -146,6 +146,63 @@ status is rejected without PyVISA's automatic device-clear recovery. Read-only q
 not require input OFF. Closing the session and resource manager does not turn
 input OFF. A failed query never proves OFF or produces a substitute zero value.
 
+## Offline Measurement Extensions
+
+`measure-min-max`, `measure-discharge`, `set-average` and `average-status`
+support only `--simulate` and `--dry-run`. All four refuse LIVE before opening
+VISA, including with the legacy contributor override. No hardware-validation
+option opens these commands. Simulation and dry-run do not establish physical
+SCPI support or measurement accuracy.
+
+```powershell
+.\.venv\Scripts\electronicload-tool.exe measure-min-max --simulate --json
+.\.venv\Scripts\electronicload-tool.exe measure-min-max --metric current-max --dry-run --json
+.\.venv\Scripts\electronicload-tool.exe measure-discharge --simulate --json
+.\.venv\Scripts\electronicload-tool.exe measure-discharge --metric time --simulate --json
+.\.venv\Scripts\electronicload-tool.exe set-average --count 8 --simulate --json
+.\.venv\Scripts\electronicload-tool.exe average-status --simulate --json
+```
+
+After the existing `*IDN?` identity check, the native measurement queries are:
+
+| Command | `--metric` | Query | Result field |
+| --- | --- | --- | --- |
+| `measure-min-max` | `voltage-min` | `MEAS:VOLT:MIN?` | `voltage_min_v` |
+| `measure-min-max` | `voltage-max` | `MEAS:VOLT:MAX?` | `voltage_max_v` |
+| `measure-min-max` | `current-min` | `MEAS:CURR:MIN?` | `current_min_a` |
+| `measure-min-max` | `current-max` | `MEAS:CURR:MAX?` | `current_max_a` |
+| `measure-discharge` | `capacity` | `MEAS:CAP?` | `capacity_ah` |
+| `measure-discharge` | `time` | `MEAS:TIME?` | `discharge_time_s` |
+
+Omitting `--metric` queries all readings for that command in the table's order.
+A selection sends only its corresponding measurement query and returns only
+that field as a JSON number. Values use V, A, Ah and seconds as indicated by
+their keys. These are sequential independent queries; Min/Max is not a single
+SCPI command or a synchronized snapshot. The tool does not accumulate Min/Max,
+capacity or time, infer reset windows, or initiate/reset a Battery Test.
+Discharge readings have no Fixed/Transient/LIST mode restriction. Time means
+native discharge time, separate from Input Timer and voltage rise/fall time.
+No software statistics, automatic `FETC` fallback or retries are used. Invalid
+metrics fail before instrument I/O; invalid/nonfinite responses or a failed
+query fail the whole command without partial success.
+
+`set-average --count` requires an integer from **2 through 16**. Both Average
+commands return `{"average_count":8}` for a configured count of 8.
+The Core models native `SENS:AVER:COUN <count>` and `SENS:AVER:COUN?`, verifies
+the set readback, and rejects mismatches. Set confirms Input OFF before entering
+remote mode and checks OFF again before writing. It never changes Input.
+`average-status` only queries identity and count, including with Input ON;
+it never enters remote mode. This is native measurement averaging, independent
+of TRACE `TRAC:FILT`, without a software average algorithm.
+
+The simulator supplies deterministic example measurement values and starts
+Average at 2. One simulated Worker retains its count across jobs; standalone
+CLI invocations each start fresh. Dry-run validates arguments without querying
+or changing simulator state. Measurement previews list the selected queries
+with `live_access: "blocked"`; Average previews contain `hardware_access: false`
+and Set's validated `average_count`. The existing `measure` interface, fields,
+LIVE permissions and `MEAS:VOLT?`, `MEAS:CURR?`, `FETC:POW?` order are unchanged.
+
 ## Fixed Modes and Input Control
 
 Fixed CC uses a complete `set-cc` request with amperes and a required
