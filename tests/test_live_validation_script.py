@@ -468,7 +468,8 @@ def test_trace_validation_script_plan_only_and_noninteractive_refusal(run_script
 
 @pytest.mark.skipif(os.name == 'nt', reason='Requires a POSIX pseudo-terminal for fake operator input.')
 @pytest.mark.parametrize('failure', [
-    'none', 'untrusted', 'off_failed', 'off_unconfirmed', 'final_state_on',
+    'none', 'untrusted', 'feed_unconfirmed', 'off_failed',
+    'off_unconfirmed', 'final_state_on',
 ])
 def test_trace_validation_script_interactive_fake_cleanup_and_results(
     run_script, tmp_path, failure,
@@ -525,8 +526,8 @@ def test_trace_validation_script_interactive_fake_cleanup_and_results(
     assert commands.count('trace-start') == 5
     assert commands.count('input-on') == 1
     expected_off_calls = {
-        'none': 1, 'untrusted': 0, 'off_failed': 2,
-        'off_unconfirmed': 2, 'final_state_on': 1,
+        'none': 1, 'untrusted': 0, 'feed_unconfirmed': 1,
+        'off_failed': 2, 'off_unconfirmed': 2, 'final_state_on': 1,
     }[failure]
     assert commands.count('input-off') == expected_off_calls
     paths = re.findall(r'Report: (.+?/shareable/report\.json)', console)
@@ -540,6 +541,11 @@ def test_trace_validation_script_interactive_fake_cleanup_and_results(
         assert cases['trace-powered-off']['status'] == 'NOT RUN'
         assert cases['cleanup-input-off']['status'] == 'NOT RUN'
         assert 'independent operator' in console
+    elif failure == 'feed_unconfirmed':
+        # Confirming Input OFF must not clear a still-unconfirmed TRACE Feed.
+        assert cases['trace-powered-start']['status'] == 'FAIL'
+        assert cases['cleanup-input-off']['status'] == 'PASS'
+        assert cases['trace-powered-off']['status'] == 'NOT RUN'
     elif failure in ('off_failed', 'off_unconfirmed'):
         assert cases['trace-powered-start']['status'] == 'PASS'
         assert cases['trace-powered-off']['status'] == 'FAIL'
@@ -596,6 +602,10 @@ def fake_trace_main(argv=None):
         if TRACE_FAILURE == 'untrusted' and state['on']:
             failed = True
             error = {'code': 'trace_session_untrusted', 'details': {'feed': 'UNKNOWN'}}
+        elif TRACE_FAILURE == 'feed_unconfirmed' and state['on']:
+            failed = True
+            error = {'code': 'trace_timeout',
+                     'details': {'feed': 'NEXT', 'feed_stop_unconfirmed': True}}
         else:
             values = {'VOLT': {'voltage_v': 12.0}, 'CURR': {'current_a': 0.1},
                       'TWO': {'voltage_v': 12.0, 'current_a': 0.1}}
