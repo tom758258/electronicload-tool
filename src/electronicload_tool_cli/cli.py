@@ -16,7 +16,9 @@ from electronicload_tool_core.control import (CONTROL_COMMANDS, execute as contr
                                               FIXED_RANGE_COMMANDS, FIXED_RANGE_CHOICES,
                                               TRANSIENT_SETUP_COMMANDS, AUXILIARY_COMMANDS,
                                               AVERAGE_COMMANDS)
-from .json_input import decode_list_json
+from electronicload_tool_core.trace import (CONFIG_FIELDS, CSV_FIELDS, SAMPLE_FIELDS,
+                                           TRACE_COMMANDS, execute as trace_execute)
+from .json_input import decode_decimal_json
 from .worker import manifest, run_worker
 from .worker_client import request as worker_request, wait_ready
 
@@ -51,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     json_output = "--json" in argv
     mode = "dry-run" if "--dry-run" in argv else "simulate" if "--simulate" in argv else "live"
-    command_names = (*COMMANDS, *CONTROL_COMMANDS, "list-resources", "manifest", "worker",
+    command_names = (*COMMANDS, *CONTROL_COMMANDS, *TRACE_COMMANDS, "list-resources", "manifest", "worker",
                      "send-command", "status", "stop", "wait-ready")
     command = argv[0] if argv and argv[0] in command_names else None
     parser = _Parser(
@@ -109,7 +111,15 @@ def main(argv: list[str] | None = None) -> int:
                              help="Explicit contributor hardware-validation scope; not Product LIVE.")
             sub.add_argument("--validation-settings-json",
                              help="Expected complete setup for validation enable, ON and trigger.")
-        if name == "set-average":
+        if name == "trace-configure":
+            sub.add_argument("--source", required=True, choices=tuple(SAMPLE_FIELDS))
+            sub.add_argument("--points", required=True, type=int)
+            sub.add_argument("--interval-s", required=True, help="Capture interval in seconds.")
+        elif name == "trace-start":
+            sub.add_argument("--csv", default=argparse.SUPPRESS, help="Create a new CSV at this path.")
+            sub.add_argument("--csv-format", choices=("data", "full"), default=argparse.SUPPRESS)
+            sub.add_argument("--csv-time-columns", default=argparse.SUPPRESS, metavar="elapsed,delta")
+        elif name == "set-average":
             sub.add_argument("--count", required=True, type=int, help="Integer average count, 2 through 16.")
         elif name == "set-input-timer":
             sub.add_argument("--seconds", required=True, type=int, help="Integer seconds, 1 through 60000.")
@@ -175,8 +185,8 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             if args.command == "send-command":
                 try:
-                    arguments = (decode_list_json(args.arguments_json)
-                                 if args.worker_command in LIST_COMMANDS
+                    arguments = (decode_decimal_json(args.arguments_json)
+                                 if args.worker_command in (*LIST_COMMANDS, *TRACE_COMMANDS)
                                  else json.loads(args.arguments_json))
                     context = json.loads(args.context_json)
                 except (ValueError, UnicodeError, RecursionError) as exc:
@@ -191,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
                 if args.job_id is not None:
                     body["job_id"] = args.job_id
                 if args.worker_command in {*FIXED_RANGE_COMMANDS, *TRANSIENT_SETUP_COMMANDS,
-                                           *LIST_COMMANDS, "set-von"}:
+                                           *LIST_COMMANDS, *TRACE_COMMANDS, "set-von"}:
                     # Forward original numeric tokens; Core in the Worker validates them.
                     # Parsing above already guarantees a complete JSON value.
                     del body["arguments"]
@@ -209,13 +219,19 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if 200 <= code < 300 else 2 if code in (400, 409, 429) else 3
         if args.command == "list-resources":
             result = discover_resources(live_only=args.live_only)
+        elif args.command in TRACE_COMMANDS:
+            fields = CONFIG_FIELDS if args.command == "trace-configure" else CSV_FIELDS
+            result = trace_execute(args.command, mode=mode, resource=args.resource,
+                                   backend=args.backend, model_id=args.model,
+                                   arguments={key: value for key, value in vars(args).items()
+                                              if key in fields})
         elif args.command in CONTROL_COMMANDS:
             list_configuration = None
             if args.command == "set-list-cc":
                 try:
                     data = (Path(args.file).read_text(encoding="utf-8-sig")
                             if args.file is not None else args.arguments_json)
-                    list_configuration = decode_list_json(data)
+                    list_configuration = decode_decimal_json(data)
                 except (OSError, ValueError, UnicodeError, RecursionError) as exc:
                     raise LoadError("argument_error", "Cannot read a valid LIST JSON configuration.") from exc
             validation_settings = None

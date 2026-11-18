@@ -11,13 +11,14 @@ Common contracts remain authoritative for the HTTP and JSONL envelopes.
 - `tool_id: "electronicload"`; `execution.model: "multi_job"`,
   `execution.context_binding: "per_command"`.
 - `common.async_jobs` contract version 1, for all domain commands.
-  Cancellation and streaming are not adopted.
+  `common.job_cancel` contract version 1 lists only `trace-start`.
 - `electronicload-tool manifest --json` is static: no VISA, filesystem artifacts,
   instrument discovery, or Worker startup.
 - Start the Worker using `electronicload-tool worker --mode simulate|live`.
   `--control-port 0` selects an OS-assigned local port; the `ready` event
   reports the chosen numeric-loopback control URLs.
-- HTTP endpoints: `GET /status`, `POST /command`, `POST /stop`. Bind only to
+- HTTP endpoints are `GET /status`, `POST /command`, `POST /stop` and
+  `POST /cancel`. Bind only to
   `127.0.0.1`. Do not use proxies or redirects in managed clients.
 - `GET /status` observes in-memory state only; it never opens or queries VISA.
 - A valid request is accepted as a single async job with HTTP **202**,
@@ -29,7 +30,8 @@ Common contracts remain authoritative for the HTTP and JSONL envelopes.
   Accepted **does not** mean succeeded. A Worker may continue after a failed job.
 - The Worker keeps results in memory and emits JSONL to stdout. It creates no
   `request.json`, `result.json`, event log, artifact directory, or job history.
-  Human diagnostics go to stderr.
+  TRACE can write one explicitly requested local CSV. Human diagnostics go to
+  stderr.
 - Stop acknowledges without performing VISA I/O in the HTTP handler, rejects
   further submissions, and prevents a not-yet-sent `INP ON`. Blocking VISA I/O
   already in progress is not forcibly interrupted. Worker Stop **does not**
@@ -48,6 +50,8 @@ Common contracts remain authoritative for the HTTP and JSONL envelopes.
 | `measure-discharge` | `{}` or `{"metric":"capacity"\|"time"}` | `capacity_ah`, `discharge_time_s`, or only the selected field; offline only |
 | `set-average` | `{"count":<integer 2–16>}` | Integer `average_count`; confirmed Input OFF required; offline only |
 | `average-status` | `{}` | Integer `average_count`, including with Input ON; offline only |
+| `trace-configure` | `{"source":"VOLT"\|"CURR"\|"TWO","points":<integer>,"interval_s":<number>}` | Validated TRACE settings and sample count; offline only |
+| `trace-start` | `{}` or `{"csv":"PATH","csv_format":"data"\|"full","csv_time_columns":"elapsed,delta"}` | Complete TRACE batch; offline only |
 | `set-cc` | `{"current": <number>, "range": "auto"\|"low"\|"high"}`, with optional paired `rise_slew` and `fall_slew` (numbers, offline only) | Fixed CC settings with Input OFF, plus Slew fields when supplied |
 | `set-cv` | `{"voltage": <number>, "range": "auto"\|"low"\|"high"}` | Offline-only CV setpoint simulation; LIVE refused |
 | `set-cr` | `{"resistance": <number>, "range": "auto"\|"low"\|"high"}` | Offline-only CR setpoint/range simulation; LIVE refused |
@@ -128,6 +132,75 @@ without inspecting or changing simulated state. Previews and standalone CLI
 behavior are described in the CLI reference above. `GET /status`, HTTP/JSONL
 envelopes, single-job admission, Stop and the existing `measure` behavior and
 LIVE scope retain their contracts. Offline results do not prove hardware support.
+
+## Offline TRACE
+
+Both commands are Common v3 async jobs. Configure requires `source`, a JSON
+integer `points` and a finite JSON number `interval_s`. Start accepts an empty
+object or a non-empty `csv` path with optional `csv_format` and
+`csv_time_columns` strings. The latter accepts an empty string, either column
+token, or both comma-separated. Invalid arguments fail before job creation
+(HTTP 400). State failures and valid LIVE refusals retain HTTP 202 admission
+and a failed terminal. LIVE requests fail before opening VISA. Dry-run
+validates arguments without reading state or creating directories or files.
+
+Configure requires confirmed Input OFF. It stops Feed, applies Source/Points/
+Interval, sets Delay and Filter to zero, clears the buffer, and checks the
+readbacks. The requested and observed intervals must have the same decimal
+value. A difference fails with `trace_interval_mismatch`, including
+`requested_interval_s` and `actual_interval_s` in error details.
+
+Start checks the current instrument configuration, Feed idle, TBF clear,
+Input state, Fixed CC/CV/CR/CW, Transient OFF, Short OFF and Input Timer
+disabled. This applies with Input ON or OFF. A successful Start arms and
+triggers once, waits for Feed NEVER, and issues one `TRAC:DATA?` with its
+own 30-second VISA timeout. The success result contains `source`, `points`,
+exact decimal string `interval_s`, `sample_count`,
+`read_timestamp_utc_plus_8`, and all `samples`. Sample indexes start at
+one. Configure returns the four setting and count fields. Bounds, timing and
+CSV columns are defined in the [CLI reference](../cli/README.md#offline-trace).
+
+For a requested CSV, the Worker creates any missing parents and exclusively
+creates and flushes the CSV header after prechecks and before arming. An
+existing file or a creation failure prevents the trigger. A failure after
+creation retains the file and reports `error.details.csv_incomplete: true`.
+CSV writing failures fail the job even when the batch was acquired. The full
+batch is available in JSONL and status for every successful Start.
+
+### Cancel and recovery
+
+Ready and status publish `cancel_url`. `POST /cancel` accepts required
+`schema_version: 3` and the exact `worker_job_id` of the active `trace-start`,
+with an optional string `reason`. It returns HTTP 202 on acceptance, 400 for
+malformed requests, and 409 for a missing, terminal, or non-cancellable job.
+Cancel and Stop only signal the job in their HTTP handlers. They wake waits
+without interrupting in-flight VISA I/O. The job thread can attempt one Feed
+stop and verify it when communication remains reliable.
+
+Successful cancellation finishes with `state: "cancelled"` and `ok: false`.
+Worker Stop aborts an incomplete Start as `failed`. Completion or failure
+can win a race with cancellation. Before sending a subsequent command, wait
+for the matching terminal or its equivalent `last_job` snapshot and an empty
+`active_job`. Send `input-off` explicitly and confirm its result before
+stopping the Worker. Neither request performs Input OFF.
+
+`GET /status.trace_safety` is null during ordinary operation. If a cancelled
+Start cannot confirm Feed NEVER but communication stays reliable, the job
+fails and status reports `state: "restricted_recovery"`, `code`, `feed`,
+and `input_state`. Only `input-state` and explicit `input-off` are admitted
+until OFF is confirmed. After that, `trace-configure` is also admitted for
+recovery. Only successful configuration clears the restriction. Other
+commands receive HTTP 409 with `trace_recovery_required`.
+
+When TRACE loses reliable VISA communication, the job fails and Worker status
+reports `worker_state: "failed"` and a non-null `fatal_error`.
+`trace_safety.state` is `session_untrusted` with unknown Input and Feed
+states. All domain commands are rejected with HTTP 409 and
+`trace_session_untrusted`. Status and explicit Worker Stop remain available
+without device I/O. The Worker never attempts to reconnect or send cleanup
+on that session. The shutdown summary preserves any remaining TRACE safety
+state. An unconfirmed Input state at shutdown means that safe shutdown
+remains unconfirmed.
 
 ## Fixed Software Auto Range
 

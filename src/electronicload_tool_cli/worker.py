@@ -21,11 +21,17 @@ from electronicload_tool_core.identity import MODEL_ID
 from electronicload_tool_core.readonly import (COMMANDS as READ_COMMANDS, NATIVE_MEASUREMENTS,
                                                validate_metric, execute as read_execute)
 from electronicload_tool_core.simulator import ControlSimulator
+from electronicload_tool_core.trace import (CONFIG_FIELDS, CSV_FIELDS, TRACE_COMMANDS,
+                                           TraceSessionLost, execute as trace_execute,
+                                           validate_configuration, validate_csv)
 from electronicload_tool_core.visa import validate_connection
-from .json_input import decode_list_json
+from .json_input import decode_decimal_json
 
 SCHEMA = 3
-COMMANDS = READ_COMMANDS + CONTROL_COMMANDS
+COMMANDS = READ_COMMANDS + CONTROL_COMMANDS + TRACE_COMMANDS
+FEATURES = {"common.async_jobs": {"contract_version": 1},
+            "common.job_cancel": {"contract_version": 1, "commands": ["trace-start"]}}
+TRACE_RECOVERY_COMMANDS = {"input-state", "input-off", "trace-configure"}
 
 
 def _utc():
@@ -41,7 +47,7 @@ def manifest(version: str) -> dict:
             "tool_id": "electronicload", "tool_version": version,
             "worker_protocol": {"compatibility_policy": "v3-only", "schema_versions": [3]},
             "execution": {"model": "multi_job", "context_binding": "per_command"},
-            "features": {"common.async_jobs": {"contract_version": 1}},
+            "features": FEATURES,
             "commands": {command: {"kind": "async_job",
                                    **({"range_options": list(FIXED_RANGE_CHOICES)}
                                       if command in FIXED_RANGE_COMMANDS else {})}
@@ -69,10 +75,12 @@ class Runtime:
         self.port = port
         self.host = "127.0.0.1"
         self.fatal_error = None
+        self.trace_cancel = None
+        self.trace_safety = None
 
     def urls(self):
         base = f"http://{self.host}:{self.port}"
-        return {f"{key}_url": f"{base}/{key}" for key in ("status", "command", "stop")}
+        return {f"{key}_url": f"{base}/{key}" for key in ("status", "command", "stop", "cancel")}
 
     def emit(self, event, **values):
         payload = {"event": event, "schema_version": SCHEMA,
@@ -89,15 +97,21 @@ class Runtime:
                     "fatal_error": self.fatal_error,
                     "active_job": dict(self.active_job) if self.active_job else None,
                     "last_job": dict(self.last_job) if self.last_job else None,
-                    "features": {"common.async_jobs": {"contract_version": 1}},
+                    "features": FEATURES,
+                    "trace_safety": dict(self.trace_safety) if self.trace_safety else None,
                     **self.urls()}
 
     def _execute(self, command, arguments, context):
+        # Common v3 uses dry_run; Core uses dry-run.
+        core_mode = "dry-run" if context["mode"] == "dry_run" else context["mode"]
+        if command in TRACE_COMMANDS:
+            return trace_execute(
+                command, mode=core_mode, resource=self.resource, backend=self.backend,
+                arguments=arguments, simulator=self.simulator, stop=self.stop, cancel=self.trace_cancel,
+            )
         if command in CONTROL_COMMANDS:
             if context["mode"] == "live" and self.mode != "live":
                 raise LoadError("invalid_mode", "Live command not available in simulated Worker.")
-            # Common v3 uses dry_run; Core uses dry-run.
-            core_mode = "dry-run" if context["mode"] == "dry_run" else context["mode"]
             return control_execute(
                 command, mode=core_mode, resource=self.resource,
                 backend=self.backend, model_id=MODEL_ID,
@@ -117,7 +131,6 @@ class Runtime:
                 seconds=arguments.get("seconds"),
                 count=arguments.get("count"),
             )
-        core_mode = "dry-run" if context["mode"] == "dry_run" else context["mode"]
         return read_execute(command, mode=core_mode, resource=self.resource,
                             backend=self.backend, model_id=MODEL_ID,
                             metric=arguments.get("metric"), simulator=self.simulator)
@@ -136,24 +149,68 @@ class Runtime:
             job["timestamp_utc"] = _utc()
         self.emit("job_started", worker_job_id=job["worker_job_id"],
                   job_id=job["job_id"], command=job["command"])
+        command = job["command"]
+        session_lost = False
         try:
-            result = self._execute(job["command"], arguments, context)
+            result = self._execute(command, arguments, context)
             outcome = {"state": "succeeded", "ok": True, "result": result, "error": None}
         except LoadError as exc:
-            outcome = {"state": "failed", "ok": False, "result": None,
+            session_lost = isinstance(exc, TraceSessionLost) or (
+                self.trace_safety is not None and command in {"input-state", "input-off"}
+                and exc.code in {"query_failed", "write_failed", "invalid_response", "invalid_identity"}
+            )
+            state = "cancelled" if exc.code == "trace_cancelled" else "failed"
+            outcome = {"state": state, "ok": False, "result": None,
                        "error": _error("execution", exc.code, str(exc), exc.details)}
         except Exception as exc:
             outcome = {"state": "failed", "ok": False, "result": None,
                        "error": _error("worker", "execution_failed", "Command execution failed.",
                                        {"exception_type": type(exc).__name__})}
         terminal = {"worker_job_id": job["worker_job_id"], "job_id": job["job_id"],
-                    "command": job["command"], "timestamp_utc": _utc(), **outcome}
+                    "command": command, "timestamp_utc": _utc(), **outcome}
         with self.lock:
-            self.active_job = None
+            self._record_trace_safety(command, context["mode"], outcome, session_lost)
             self.last_job = terminal
+            self.active_job = None
+            self.trace_cancel = None
         self.emit("job_finished", **terminal)
         if self.stop.is_set():
             self._shutdown_after_stop_reply()
+
+    def _record_trace_safety(self, command, mode, outcome, session_lost):
+        error = outcome["error"]
+        if session_lost:
+            self.fatal_error = _error(
+                "worker", "trace_session_untrusted",
+                "Instrument communication is untrusted. Safe shutdown is unconfirmed.",
+                {"domain_error": error},
+            )
+            self.trace_safety = {"state": "session_untrusted", "code": "trace_session_untrusted",
+                                 "feed": "UNKNOWN", "input_state": "UNKNOWN"}
+        elif error and error["code"] == "trace_cancel_feed_unconfirmed":
+            self.trace_safety = {"state": "restricted_recovery", "code": error["code"],
+                                 "feed": error["details"]["feed"], "input_state": "UNKNOWN"}
+        elif self.trace_safety is not None and mode != "dry_run":
+            if command in {"input-state", "input-off"}:
+                result = outcome["result"]
+                self.trace_safety["input_state"] = result["input_state"] if result else "UNKNOWN"
+            elif command == "trace-configure":
+                if outcome["ok"]:
+                    self.trace_safety = None
+                elif error["code"] == "input_not_off":
+                    self.trace_safety["input_state"] = "ON"
+
+    def check_trace_admission(self, command, context):
+        if self.fatal_error:
+            raise LoadError("trace_session_untrusted", self.fatal_error["message"])
+        if self.trace_safety is None:
+            return
+        if (command not in TRACE_RECOVERY_COMMANDS or
+            (command == "trace-configure" and
+             (self.trace_safety["input_state"] != "OFF" or context["mode"] == "dry_run"))):
+            raise LoadError("trace_recovery_required",
+                            "TRACE recovery requires confirmed Input OFF and successful configuration.",
+                            trace_safety=dict(self.trace_safety))
 
 
 def _context(request, mode):
@@ -188,6 +245,8 @@ def _arguments(command, raw, runtime):
                  {"voltage", "latch"} if command == "set-von" else
                  {"seconds"} if command == "set-input-timer" else
                  {"count"} if command == "set-average" else
+                 CONFIG_FIELDS if command == "trace-configure" else
+                 CSV_FIELDS if command == "trace-start" else
                  {"metric"} if command in NATIVE_MEASUREMENTS else
                  TRANSIENT_FIELDS if command in TRANSIENT_SETUP_COMMANDS else
                  LIST_FIELDS if command == "set-list-cc" else
@@ -195,6 +254,12 @@ def _arguments(command, raw, runtime):
                  {"confirm_input_on"} if command == "input-on" else set())
     if set(raw) - permitted:
         raise LoadError("argument_error", "Unsupported command arguments.")
+    if command == "trace-configure":
+        if set(raw) != CONFIG_FIELDS or type(raw["interval_s"]) not in (int, float, Decimal):
+            raise LoadError("argument_error", "TRACE requires source, points and a numeric interval_s.")
+        validate_configuration(**raw)
+    if command == "trace-start":
+        validate_csv(raw)
     if command in NATIVE_MEASUREMENTS and "metric" in raw:
         if not isinstance(raw["metric"], str):
             raise LoadError("argument_error", "Metric must be a string when supplied.")
@@ -258,13 +323,14 @@ def _handler(runtime):
             self.end_headers()
             self.wfile.write(data)
 
-        def _body(self):
+        def _body(self, *, strict=False):
             try:
                 size = int(self.headers.get("Content-Length", "0"))
                 if not 0 <= size <= 65536:
                     raise ValueError("Content length is missing or too large.")
                 body = self.rfile.read(size)
-                value = json.loads(body) if size else {}
+                decode = decode_decimal_json if strict else json.loads
+                value = decode(body) if size else {}
                 if not isinstance(value, dict):
                     raise ValueError("JSON body must be an object.")
                 # Preserve the CW numeric token until Core validates the exact step/bounds.
@@ -277,9 +343,9 @@ def _handler(runtime):
                         and isinstance(value.get("arguments"), dict)):
                     # Core must validate the original decimal tokens.
                     value["arguments"] = json.loads(body, parse_float=Decimal)["arguments"]
-                if value.get("command") in LIST_COMMANDS:
+                if value.get("command") in (*LIST_COMMANDS, *TRACE_COMMANDS):
                     # Preserve nested numeric tokens; reject duplicate fields/nonfinite JSON.
-                    value = decode_list_json(body)
+                    value = decode_decimal_json(body)
                 return value
             except (ValueError, UnicodeError, json.JSONDecodeError, InvalidOperation,
                     RecursionError) as exc:
@@ -291,8 +357,39 @@ def _handler(runtime):
             else:
                 self._send(404, {"status": "error", "error": _error("validation", "not_found", "Unknown endpoint.")})
 
+        def _cancel(self):
+            worker_job_id = None
+            try:
+                req = self._body(strict=True)
+                candidate = req.get("worker_job_id")
+                if isinstance(candidate, str) and candidate.strip():
+                    worker_job_id = candidate
+                if (type(req.get("schema_version")) is not int or req["schema_version"] != SCHEMA
+                    or worker_job_id is None or set(req) - {"schema_version", "worker_job_id", "reason"}
+                    or ("reason" in req and not isinstance(req["reason"], str))):
+                    raise LoadError("invalid_request", "Invalid job cancellation request.")
+                with runtime.lock:
+                    job = runtime.active_job
+                    if (job is None or job["worker_job_id"] != worker_job_id
+                        or runtime.trace_cancel is None or runtime.stop.is_set()):
+                        result = (409, "rejected", _error(
+                            "admission", "job_not_cancellable", "No matching cancellable TRACE job."))
+                    else:
+                        runtime.trace_cancel.set()
+                        result = (202, "accepted", None)
+            except LoadError as exc:
+                result = (400, "error", _error("validation", exc.code, str(exc), exc.details))
+            except Exception:
+                result = (500, "error", _error("worker", "cancel_failed", "Cancellation handling failed."))
+            status, status_value, error = result
+            self._send(status, {"schema_version": SCHEMA, "run_id": runtime.run_id,
+                                "status": status_value, "worker_job_id": worker_job_id, "error": error})
+
         def do_POST(self):
             path = urlsplit(self.path).path
+            if path == "/cancel":
+                self._cancel()
+                return
             if path not in {"/stop", "/command"}:
                 self._send(404, {"status": "error", "error": _error("validation", "not_found", "Unknown endpoint.")})
                 return
@@ -304,8 +401,10 @@ def _handler(runtime):
                 if path == "/stop":
                     if set(req) - {"schema_version", "reason"} or ("reason" in req and not isinstance(req["reason"], str)):
                         raise LoadError("invalid_request", "Invalid stop arguments.")
-                    runtime.stop.set()
                     with runtime.lock:
+                        runtime.stop.set()
+                        if runtime.trace_cancel is not None:
+                            runtime.trace_cancel.set()
                         busy = runtime.active_job is not None
                     try:
                         self._send(202, {"schema_version": 3, "run_id": runtime.run_id,
@@ -335,10 +434,13 @@ def _handler(runtime):
                         raise LoadError("stopping", "Worker is stopping.")
                     if runtime.active_job is not None:
                         raise LoadError("busy", "Worker is busy.")
+                    runtime.check_trace_admission(command, context)
                     job = {"worker_job_id": uuid.uuid4().hex,
                            "job_id": job_id, "command": command,
                            "state": "queued", "timestamp_utc": _utc()}
                     runtime.active_job = job
+                    if command == "trace-start":
+                        runtime.trace_cancel = threading.Event()
                 runtime.emit("job_accepted", worker_job_id=job["worker_job_id"], job_id=job_id, command=command)
                 thread = threading.Thread(target=runtime.run_job, args=(job, arguments, context), daemon=True)
                 runtime.job_thread = thread
@@ -348,7 +450,8 @@ def _handler(runtime):
                                  "job_id": job_id, "kind": kind,
                                  "worker_job_id": job["worker_job_id"], "error": None})
             except LoadError as exc:
-                rejection = exc.code in {"busy", "stopping", "input_on_not_allowed", "confirmation_required"}
+                rejection = exc.code in {"busy", "stopping", "input_on_not_allowed", "confirmation_required",
+                                         "trace_session_untrusted", "trace_recovery_required"}
                 status = 409 if rejection else 400
                 self._send(status, {"schema_version": 3, "run_id": runtime.run_id,
                                     "status": "rejected" if rejection else "error",
@@ -372,13 +475,14 @@ def run_worker(*, mode="simulate", resource=None, backend="system",
             runtime.server = server
             runtime.port = server.server_port
             runtime.emit("ready", service="electronicload-tool", **runtime.urls(),
-                         features={"common.async_jobs": {"contract_version": 1}})
+                         features=FEATURES)
             server.serve_forever(poll_interval=0.05)
             if runtime.job_thread is not None:
                 runtime.job_thread.join()
             runtime.emit("summary", ok=runtime.fatal_error is None,
                          fatal_error=runtime.fatal_error,
-                         last_job=runtime.last_job, exit_code=0 if runtime.fatal_error is None else 3)
+                         last_job=runtime.last_job, exit_code=0 if runtime.fatal_error is None else 3,
+                         **({"trace_safety": runtime.trace_safety} if runtime.trace_safety else {}))
             return 0 if runtime.fatal_error is None else 3
     except OSError as exc:
         runtime.emit("error", error=_error("worker", "listen_failed", "Worker HTTP bind failed.",

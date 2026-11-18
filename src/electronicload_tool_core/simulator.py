@@ -2,6 +2,10 @@
 
 from decimal import Decimal
 
+from .visa import TIMEOUT_MS
+
+# Bit 15 of the Questionable Condition register indicates TRACE Buffer Full.
+TRACE_BUFFER_FULL = 1 << 15
 NATIVE_MEASUREMENTS = {
     "MEAS:VOLT:MIN?": "11.9", "MEAS:VOLT:MAX?": "12.1",
     "MEAS:CURR:MIN?": "0.4", "MEAS:CURR:MAX?": "0.6",
@@ -50,6 +54,15 @@ class ControlSimulator:
         self.list_slot = None
         self.list_slots = {}
         self.list_last_trigger = None
+        self.timeout = TIMEOUT_MS
+        self.trace_source = "TWO"
+        self.trace_points = 4
+        self.trace_interval = "1"
+        self.trace_delay = "0"
+        self.trace_filter = "0"
+        self.trace_feed = "NEVER"
+        self.trace_capturing = False
+        self.trace_data = ""
 
     def list_settings(self) -> dict:
         configuration = self.list_configuration
@@ -98,6 +111,13 @@ class ControlSimulator:
                 for key, value in self.transient_configuration.items()}
 
     def query(self, command: str) -> str:
+        if command == "TRAC:FEED:CONT?" and self.trace_capturing:
+            voltage, current = "12.0", str(self.current_a if self.input_on else 0)
+            sample = {"VOLT": (voltage,), "CURR": (current,), "TWO": (voltage, current)}
+            values = sample[self.trace_source]
+            self.trace_data = ",".join([" ".join(values)] * (self.trace_points // len(values)))
+            self.trace_feed = "NEVER"
+            self.trace_capturing = False
         return {
             "*IDN?": "ITECH Ltd,IT8812C,SIMULATED,1.0",
             "INP:STAT?": "1" if self.input_on else "0",
@@ -116,6 +136,16 @@ class ControlSimulator:
             "MEAS:CURR?": str(self.current_a if self.input_on else 0),
             "FETC:POW?": str(12.0 * self.current_a if self.input_on else 0),
             "SENS:AVER:COUN?": str(self.average_count),
+            "INP:TIM?": "1" if self.input_timer_enabled else "0",
+            "TRAC:FEED?": self.trace_source,
+            "TRAC:POIN?": str(self.trace_points),
+            "TRAC:TIM?": self.trace_interval,
+            "TRAC:DEL?": self.trace_delay,
+            "TRAC:FILT?": self.trace_filter,
+            "TRAC:FEED:CONT?": self.trace_feed,
+            "TRAC:DATA?": self.trace_data,
+            "STAT:QUES:COND?": str(TRACE_BUFFER_FULL if self.trace_data else 0),
+            "SYST:ERR?": '0,"No error"',
             **NATIVE_MEASUREMENTS,
         }[command]
 
@@ -149,6 +179,9 @@ class ControlSimulator:
         self.power_w = power
 
     def write(self, command: str) -> None:
+        if command == "TRIG" or command.startswith("TRAC:"):
+            self._write_trace(command)
+            return
         if command == "SYST:REM":
             self.remote = True
             return
@@ -183,3 +216,25 @@ class ControlSimulator:
             self.average_count = int(command.split(" ", 1)[1])
         else:
             raise ValueError("Unknown simulator command")
+
+    def _write_trace(self, command: str) -> None:
+        name, _, value = command.partition(" ")
+        if name == "TRIG" and self.trace_feed == "NEXT":
+            self.trace_capturing = True
+        elif name == "TRAC:FEED:CONT":
+            self.trace_feed = value
+            self.trace_capturing = False
+        elif name == "TRAC:CLE":
+            self.trace_data = ""
+        elif name == "TRAC:FEED":
+            self.trace_source = value
+        elif name == "TRAC:POIN":
+            self.trace_points = int(value)
+        elif name == "TRAC:TIM":
+            self.trace_interval = value
+        elif name == "TRAC:DEL":
+            self.trace_delay = value
+        elif name == "TRAC:FILT":
+            self.trace_filter = value
+        else:
+            raise ValueError("Unknown or unarmed simulator TRACE command")

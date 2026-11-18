@@ -98,7 +98,12 @@ def test_manifest_static(capsys):
     assert p['schema_version']==2
     assert p['worker_protocol']['schema_versions']==[3]
     assert p['execution']=={'model':'multi_job','context_binding':'per_command'}
-    assert p['features']=={'common.async_jobs':{'contract_version':1}}
+    assert p['features'] == {
+        'common.async_jobs': {'contract_version': 1},
+        'common.job_cancel': {'contract_version': 1, 'commands': ['trace-start']},
+    }
+    for command in ('trace-configure', 'trace-start'):
+        assert p['commands'][command] == {'kind': 'async_job'}
     for command in ('set-cc', 'set-cv', 'set-cr'):
         assert p['commands'][command] == {
             'kind': 'async_job', 'range_options': ['auto', 'low', 'high']}

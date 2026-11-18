@@ -1,4 +1,4 @@
-"""Strict decimal-preserving JSON decoding for complete LIST requests."""
+"""Strict decimal-preserving JSON decoding for domain requests."""
 
 from decimal import Decimal, InvalidOperation
 import json
@@ -17,7 +17,7 @@ def _reject_constant(_value):
     raise ValueError("Nonfinite JSON number.")
 
 
-def decode_list_json(text):
+def decode_decimal_json(text):
     try:
         return json.loads(text, parse_float=Decimal, parse_constant=_reject_constant,
                           object_pairs_hook=_unique_fields)

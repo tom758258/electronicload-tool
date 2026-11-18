@@ -203,6 +203,54 @@ with `live_access: "blocked"`; Average previews contain `hardware_access: false`
 and Set's validated `average_count`. The existing `measure` interface, fields,
 LIVE permissions and `MEAS:VOLT?`, `MEAS:CURR?`, `FETC:POW?` order are unchanged.
 
+## Offline TRACE
+
+`trace-configure` prepares the TRACE buffer while Input is OFF. Use
+`--source VOLT|CURR|TWO`, `--points`, and `--interval-s`. Each source accepts
+2–1000 points. TWO requires an even count and returns half as many voltage and
+current pairs. The interval must be between 0.001 and 3600 seconds, inclusive.
+The expected capture time is `(sample_count - 1) × interval_s`, up to 86400
+seconds. Configure sets Delay and Filter to zero and verifies the settings.
+Interval comparison uses the exact decimal values, so `1.000000` and `1E+0`
+match, while `0.001` differs from a request for `0.0013`.
+
+`trace-start` uses the current TRACE settings. It requires Feed idle, TBF
+clear, Delay and Filter zero, Fixed CC/CV/CR/CW, Transient OFF, Short OFF,
+and Input Timer disabled. These checks apply with Input ON or OFF. The
+capture deadline adds 20% to the expected time, with at least five seconds
+of margin. Once Feed reports NEVER, Start reads the batch once with a
+separate 30-second VISA timeout and checks its length, format, and instrument
+error status. Either TBF value can accompany a complete batch. The JSON
+result includes the settings, an exact decimal string for `interval_s`, and
+the complete sample array. Sample indexes start at one, and each sample
+includes only the selected measurement fields.
+
+Both commands support simulation and dry-run. Standalone simulation starts
+fresh with an empty TRACE buffer and example TWO settings. The simulated
+batch becomes available at the first Feed poll. To capture with settings
+from a preceding Configure, submit both jobs to the same simulated Worker.
+Dry-run validates arguments without touching the instrument, simulator state,
+or files. TRACE Product LIVE is disabled.
+
+```powershell
+.\.venv\Scripts\electronicload-tool.exe trace-configure --source TWO --points 40 --interval-s 1 --dry-run --json
+.\.venv\Scripts\electronicload-tool.exe trace-start --simulate --csv .tmp_tests/trace.csv --csv-format full --csv-time-columns elapsed,delta --json
+```
+
+CSV is optional. The default `data` format contains the shared batch read
+timestamp in UTC+8, the sample index, and the selected measurements. The
+`full` format adds `source`, `points`, `interval_s`, and `sample_count`.
+The CLI creates missing parent directories and creates a new file with its
+header before triggering. An existing file causes the command to fail.
+Failed captures and write errors retain any newly created file and identify
+it as incomplete in the error details.
+
+`--csv-time-columns` accepts `elapsed`, `delta`, or `elapsed,delta`. The
+optional estimated elapsed time is `(sample_index - 1) × interval_s`.
+Estimated delta is blank for the first row and equals `interval_s` for later
+rows. The batch timestamp records the host's reading time. The estimated
+columns derive from the configured sample interval.
+
 ## Fixed Modes and Input Control
 
 Fixed CC uses a complete `set-cc` request with amperes and a required
@@ -733,10 +781,10 @@ setup followed by simulated ON/OFF, send the commands to the same simulated
 Worker, with `confirm_input_on: true` on the ON request.
 
 A Worker prints Common v3 JSONL on stdout and offers local `GET /status`,
-`POST /command`, and `POST /stop` on numeric loopback only. The Worker
-runs one async job at a time, reports completion via `job_finished` and
-`last_job`, and does not create request/result artifact files or a job
-history. Stop does **not** imply Input OFF. For domain argument shapes and
+`POST /command`, `POST /stop` and `POST /cancel` on numeric loopback only.
+It runs one async job at a time and reports completion via `job_finished`
+and `last_job`. Only `trace-start` supports job cancellation. Input OFF
+requires an explicit `input-off` command. For domain argument shapes and
 permissions, see [Electronic Load Worker Contract](../contracts/electronicload-worker-contract.md).
 
 Worker requests use the existing local Common v3 endpoints and one async job at
