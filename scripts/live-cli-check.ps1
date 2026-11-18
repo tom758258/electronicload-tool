@@ -331,6 +331,17 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
             }
             throw "$CaseName failed (exit $exitStatus, code $($entry.error_code))."
         }
+        if ($script:traceSelected -and $Command -eq 'trace-start') {
+            # ConvertFrom-Json can normalize ISO datetimes to the runner's local
+            # timezone. Preserve the UTC+8 literal from the public CLI JSON.
+            $stampMatch = [regex]::Match($output, '"read_timestamp_utc_plus_8"\s*:\s*"([^"]+)"')
+            if (-not $stampMatch.Success) {
+                $entry['error_code'] = 'trace_bad_timestamp'
+                throw "$CaseName did not return a TRACE batch timestamp."
+            }
+            $result.result | Add-Member -MemberType NoteProperty -Name read_timestamp_utc_plus_8 `
+                -Value $stampMatch.Groups[1].Value -Force
+        }
         $entry.status = 'PASS'
         $entry['response'] = $result
         if ($null -ne $result.result.visa) {
