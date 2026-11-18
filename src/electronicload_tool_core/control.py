@@ -629,18 +629,13 @@ def _fixed_setup_guard(session, stop):
         raise LoadError("unsafe_mode", "Setup requires Short OFF.")
 
 
-def _check_fixed_cc_setup(session, stop):
-    _fixed_setup_guard(session, stop)
-    return _check_mode_change(session, fixed_cc=True)
-
-
-def _check_product_cc_origin(session):
-    # FUNC? already belongs to the verified CC path. Product LIVE cannot
-    # distinguish ordinary CR from CR-LED using its approved SCPI commands.
+def _check_cc_origin_without_led_access(session):
+    # FUNC? belongs to the verified CC path. Scopes without CR-LED access
+    # cannot distinguish ordinary CR from CR-LED.
     function = _query(session, "FUNC?").upper()
     if function in RESISTANCE_FUNCTIONS:
         raise LoadError("unsupported_live_scope",
-                        "Product LIVE cannot verify LED OFF when switching from CR.")
+                        "This CC scope cannot verify LED OFF when switching from CR.")
     if function not in {"CURR", "CURRENT", "VOLT", "VOLTAGE", "POW", "POWER"}:
         raise LoadError("unsafe_mode", "Cannot determine the current load function.")
 
@@ -989,7 +984,7 @@ def _perform(session, command: str, *, current: object | None,
              voltage: object | None, resistance: object | None, power: object | None,
              range_name: str | None, confirmed: bool, stop: Event | None,
              allow_cv: bool, allow_cr: bool, allow_cw: bool,
-             vdrop: Decimal | None = None, scoped_mode_change: bool = False) -> dict:
+             vdrop: Decimal | None = None, cc_mode_scope: str | None = None) -> dict:
     parse_identity(_query(session, "*IDN?"))
     if command == "cr-led-status":
         return _cr_status(session)
@@ -999,8 +994,20 @@ def _perform(session, command: str, *, current: object | None,
         return _cr_setup(session, validate_resistance(resistance, range_name), range_name, vdrop, stop)
     if command == "set-cc":
         requested = validate_current(current, range_name)
-        guard_mode = scoped_mode_change or isinstance(session, ControlSimulator)
+        simulated = isinstance(session, ControlSimulator)
+        guard_mode = cc_mode_scope is not None or simulated
+        allow_led_cleanup = cc_mode_scope == "cr-led" or simulated
+        setup_stop = stop if guard_mode else None
         completed = []
+
+        def check_origin():
+            if guard_mode:
+                _fixed_setup_guard(session, stop)
+            if allow_led_cleanup:
+                return _check_mode_change(session, fixed_cc=True)
+            _check_cc_origin_without_led_access(session)
+            return False
+
         # IT8812C hardware rejects nonzero CURR after CURR:RANG MIN
         # (error 120). A numeric selector equal to the requested low-range
         # setpoint was verified on physical hardware with Input OFF.
@@ -1013,23 +1020,16 @@ def _perform(session, command: str, *, current: object | None,
             # Remote is a control-state change: never send it for a read-only
             # operation or before a fresh physical Input OFF confirmation.
             _input_off(session)
-            if guard_mode:
-                _check_fixed_cc_setup(session, stop)
-            else:
-                _check_product_cc_origin(session)
+            check_origin()
+            _mutation_off(session, setup_stop)
             _write(session, "SYST:REM")
             if guard_mode:
-                led_off = _check_fixed_cc_setup(session, stop)
-                _leave_cr_led(session, led_off, stop)
-                if led_off:
-                    completed.append("led_off")
-            else:
-                _check_product_cc_origin(session)
+                completed.append("remote")
+            if check_origin():
+                _set_led(session, False, stop)
+                completed.append("led_off")
             for action, name in sequence:
-                if guard_mode:
-                    _mutation_off(session, stop)
-                else:
-                    _input_off(session)
+                _mutation_off(session, setup_stop)
                 _write(session, action)
                 completed.append(name)
             settings = _settings(session)

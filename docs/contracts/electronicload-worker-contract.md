@@ -59,7 +59,7 @@ Common contracts remain authoritative for the HTTP and JSONL envelopes.
 | `cr-led-status` | `{}` | Read-only LED, Vdrop, resistance, Range and mode; offline only |
 | `current-slow-rise-enable` | `{}` | `enabled: true`; Fixed CC and Input OFF required; offline only |
 | `current-slow-rise-disable` | `{}` | `enabled: false`; Input OFF required; offline only |
-| `current-slow-rise-status` | `{}` | Read-only `enabled` flag in any mode and Input state; offline only |
+| `current-slow-rise-status` | `{}` | Read-only `enabled` flag, available in any mode with Input ON or OFF; offline only |
 | `set-cw` | `{"power": <number>}` | Offline-only Fixed CW setpoint simulation; LIVE refused |
 | `set-von` | `{"voltage": <number>, "latch": "on"\|"off"}` | Offline VON settings, confirmed Input OFF required |
 | `von-status` | `{}` | Read-only simulated VON settings |
@@ -115,8 +115,9 @@ turns LED OFF and verifies readback. Selecting another load mode from
 CR-LED requires confirmed LED OFF before the switch. Enabled Current Slow
 Rise blocks non-Fixed-CC selection. Fixed CC setup and Input OFF preserve
 Slow Rise. Dry-run validates the request without touching simulator state.
-Worker Stop remains I/O-free. Product LIVE Fixed CC refuses to leave a
-resistance function when LED OFF cannot be verified in the approved scope.
+Worker Stop remains I/O-free. Product LIVE Fixed CC refuses every reported
+resistance function, including ordinary Fixed CR with LED OFF. Verifying
+the LED state requires a separately authorized scope.
 [CLI operation and validation](../cli/README.md#offline-cr-led-and-current-slow-rise)
 
 ## Offline Measurement Extensions

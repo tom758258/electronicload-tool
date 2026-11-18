@@ -123,9 +123,14 @@ def assert_report(result, expected, modes):
     if 'current-slow-rise' in modes:
         expected_names += ['slow-rise-set-cc', 'slow-rise-enable', 'slow-rise-explicit-input-off',
                            'slow-rise-status-after-off', 'slow-rise-repeat-cc', 'slow-rise-status-after-cc',
-                           'slow-rise-disable', 'slow-rise-status-disabled', 'slow-rise-final-input-state']
+                           'slow-rise-block-cv', 'slow-rise-disable', 'slow-rise-status-disabled',
+                           'slow-rise-final-input-state']
         assert cases['slow-rise-explicit-input-off']['command'] == 'input-off'
         assert cases['slow-rise-disable']['arguments'] == ['--hardware-validation', 'current-slow-rise']
+        refusal = cases['slow-rise-block-cv']
+        assert refusal['command'] == 'set-cv'
+        assert refusal['arguments'][-2:] == ['--hardware-validation', 'cv']
+        assert refusal['expected_error'] == 'current_slow_rise_enabled'
     assert list(cases) == expected_names
     assert report['summary_counts']['total'] == report['summary_counts']['not_run'] == len(expected_names)
     assert len(report['cases']) == len(expected_names)  # No duplicate selected trials.

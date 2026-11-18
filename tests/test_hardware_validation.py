@@ -130,10 +130,48 @@ def test_validation_cr_led_exit_stops_on_unconfirmed_off(monkeypatch, failure, c
     with pytest.raises(LoadError) as error:
         run('set-cc', 'cr-led', current='0.1', range_name='low')
     assert error.value.code == code
-    assert error.value.details['completed_steps'] == []
+    assert error.value.details['completed_steps'] == ['remote']
     assert error.value.details['led_enabled'] is (True if failure == 'ignored' else None)
     assert [call for call in fake.calls if '?' not in call] == ['SYST:REM', 'RES:LED:STAT 0']
     assert fake.function == 'RES' and not fake.input
+
+
+@pytest.mark.parametrize('ignore_led_off', [False, True])
+def test_validation_cv_requires_confirmed_cr_led_off_before_mode_write(monkeypatch, ignore_led_off):
+    fake = ValidationFake()
+    fake.function = 'RES'
+    fake.values['RES:LED:STAT'] = '1'
+    session(fake, monkeypatch)
+    settings = {'voltage': '0.1', 'range': 'low'}
+    if ignore_led_off:
+        fake.ignore = 'RES:LED:STAT 0'
+        with pytest.raises(LoadError) as error:
+            setup('cv', settings)
+        assert error.value.code == 'readback_mismatch'
+        assert error.value.details['completed_steps'] == ['SYST:REM']
+        assert [call for call in fake.calls if '?' not in call] == ['SYST:REM', 'RES:LED:STAT 0']
+        return
+    setup('cv', settings)
+    disabled = fake.calls.index('RES:LED:STAT 0')
+    confirmed = fake.calls.index('RES:LED:STAT?', disabled)
+    assert disabled < confirmed < fake.calls.index('FUNC:MODE FIX')
+
+
+@pytest.mark.parametrize('after_remote', [False, True])
+def test_slow_rise_cc_validation_refuses_cr_without_led_access(monkeypatch, after_remote):
+    fake = ValidationFake()
+    fake.values['RES:LED:STAT'] = '1'
+    if after_remote:
+        fake.after_remote = lambda device: setattr(device, 'function', 'RES')
+    else:
+        fake.function = 'RES'
+    session(fake, monkeypatch)
+    with pytest.raises(LoadError) as error:
+        run('set-cc', 'current-slow-rise', current='0.1', range_name='low')
+    assert error.value.code == 'unsupported_live_scope'
+    assert error.value.details['completed_steps'] == (['remote'] if after_remote else [])
+    assert [call for call in fake.calls if '?' not in call] == (['SYST:REM'] if after_remote else [])
+    assert not any(call.startswith('RES:LED:') for call in fake.calls)
 
 
 @pytest.mark.parametrize('field,value,code', [
@@ -162,8 +200,9 @@ def test_validation_slow_rise_native_reads_guards_and_preservation(monkeypatch):
     assert run('current-slow-rise-status', scope)['enabled']
     fake.calls.clear()
     with pytest.raises(LoadError) as error:
-        setup('cv', {'voltage': '5', 'range': 'low'})
+        setup('cv', {'voltage': '0.1', 'range': 'low'})
     assert error.value.code == 'current_slow_rise_enabled'
+    assert error.value.details['completed_steps'] == []
     assert all(call.endswith('?') for call in fake.calls)
     fake.function = 'VOLT'  # Emulate a front-panel selection.
     assert not run('current-slow-rise-disable', scope)['enabled']

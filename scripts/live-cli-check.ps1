@@ -135,6 +135,7 @@ function Save-Report {
             $case.arguments = $safeArguments
         }
         if ($entry.Contains('error_code')) { $case.error_code = $entry.error_code }
+        if ($entry.Contains('expected_error')) { $case.expected_error = $entry.expected_error }
         if ($entry.Contains('expected_range')) { $case.expected_range = $entry.expected_range }
         foreach ($field in @('trace_source','trace_points','trace_interval_s','trace_sample_count',
                              'trace_csv_complete')) {
@@ -271,6 +272,7 @@ function Invoke-PlanCommand([string]$Command, [string[]]$ExtraArgs) {
 function Invoke-LiveCommand([string]$Command, [string]$CaseName,
                             [string[]]$ExtraArgs = @(),
                             [int]$DeadlineMs = 30000,
+                            [string]$ExpectedError,
                             [switch]$Cleanup) {
     $remaining = if ($Cleanup) { $script:perCommandDeadlineMs } else {
         [Math]::Min($DeadlineMs,
@@ -330,6 +332,12 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
         if ($process.ExitCode -ne 0 -or $result.ok -ne $true) {
             $code = [string]$result.error.code
             $entry['error_code'] = $(if ($code -cmatch '^[a-z_]+$') { $code } else { 'execution_failed' })
+            if ($ExpectedError -and $process.ExitCode -eq 2 -and $result.ok -eq $false -and
+                $code -ceq $ExpectedError -and $null -ne $result.error.details.completed_steps -and
+                @($result.error.details.completed_steps).Count -eq 0) {
+                $entry.status = 'PASS'
+                return
+            }
             if ($traceCase -and $result.error.details.feed_stop_unconfirmed -eq $true) {
                 $script:traceFeedStopUnconfirmed = $true
                 $script:report.trace_safe_shutdown_unconfirmed = $true
@@ -340,6 +348,9 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
                 $script:traceCommunicationUntrusted = $true
             }
             throw "$CaseName failed (exit $exitStatus, code $($entry.error_code))."
+        }
+        if ($ExpectedError) {
+            Fail-Case $CaseName 'unexpected_success' 'The mode change succeeded despite the expected interlock.'
         }
         if ($script:traceSelected -and $Command -eq 'trace-start') {
             # ConvertFrom-Json can normalize ISO datetimes to the runner's local
@@ -715,13 +726,17 @@ try {
             @{name='slow-rise-status-after-off';command='current-slow-rise-status';args=$slowScope;slow=$true},
             @{name='slow-rise-repeat-cc';command='set-cc';args=$slowCc},
             @{name='slow-rise-status-after-cc';command='current-slow-rise-status';args=$slowScope;slow=$true},
+            @{name='slow-rise-block-cv';command='set-cv';expected_error='current_slow_rise_enabled';
+              args=@('--voltage','0.1','--range','low','--hardware-validation','cv')},
             @{name='slow-rise-disable';command='current-slow-rise-disable';args=$slowScope;slow=$false},
             @{name='slow-rise-status-disabled';command='current-slow-rise-status';args=$slowScope;slow=$false},
             @{name='slow-rise-final-input-state';command='input-state';args=@()}
         )
     }
     $report.results = @($planned | ForEach-Object {
-        [ordered]@{name=$_.name;command=$_.command;arguments=$_.args;status='NOT RUN'}
+        $entry = [ordered]@{name=$_.name;command=$_.command;arguments=$_.args;status='NOT RUN'}
+        if ($_.ContainsKey('expected_error')) { $entry['expected_error'] = $_.expected_error }
+        $entry
     })
     foreach ($step in $planned) {
         $extras = @($step.args)
@@ -756,6 +771,9 @@ try {
     }
     if ($featureSelected) {
         Write-Host 'CR-LED and Current Slow Rise trials keep Input OFF and verify configuration readback.'
+    }
+    if ('current-slow-rise' -in $selectedModes) {
+        Write-Host 'Slow Rise requires a non-resistance starting function and expects Fixed CV setup to be refused while enabled.'
     }
     Write-Host 'Fixed Auto adds Input OFF setup/readback with the existing values; no extra ON/OFF cycles.'
     if (@($selectedModes | Where-Object { $_.StartsWith('transient-') }).Count -gt 0) {
@@ -855,7 +873,11 @@ try {
             $traceStartDeadlineMs
         } else { $perCommandDeadlineMs })
         $result = Invoke-LiveCommand -Command $step.command -CaseName $step.name `
-            -ExtraArgs $step.args -DeadlineMs $commandDeadline
+            -ExtraArgs $step.args -DeadlineMs $commandDeadline -ExpectedError $step.expected_error
+        if ($step.ContainsKey('expected_error')) {
+            Write-Host "PASS $($step.name): confirmed refusal ($($step.expected_error))."
+            continue
+        }
         Assert-Runtime $result $step.name
         if ($step.ContainsKey('trace_expected')) { Assert-TraceResult $result $step }
         if ($step.ContainsKey('led') -and

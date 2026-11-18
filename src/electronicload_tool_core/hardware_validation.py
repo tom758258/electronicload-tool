@@ -379,7 +379,7 @@ def _execute_led_or_slow_rise(command, *, scope, mode, resource, current, resist
         result = c._perform(session, command, current=current, voltage=None, resistance=resistance,
                             power=None, range_name=range_name, confirmed=False, stop=stop,
                             allow_cv=False, allow_cr=False, allow_cw=False,
-                            vdrop=vdrop, scoped_mode_change=True)
+                            vdrop=vdrop, cc_mode_scope=scope)
         return {**result, **marker, "visa": runtime}
 
 

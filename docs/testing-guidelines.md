@@ -348,8 +348,11 @@ and select related Worker validation, state and LIVE-refusal cases.
 Use `scripts/preflight-cli.ps1 -CrLedSlowRiseOnly` and the corresponding
 script tests for PlanOnly and noninteractive refusal with a fictional USB
 resource and child-process VISA blocking. Physical CR-LED and Slow Rise
-trials require separate approval and keep Input OFF. Run Ruff on modified
-Python files. Configured CI retains its normal checks.
+trials require separate approval and keep Input OFF. For changes to the
+Slow Rise interlock case, verify with recording Fake VISA that the planned
+CV setup is refused before any control write and that the report recognizes
+only the expected refusal. Run Ruff on modified Python files. Configured
+CI retains its normal checks.
 
 ## Packaging checks
 

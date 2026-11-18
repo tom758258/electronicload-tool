@@ -304,13 +304,21 @@ Fixed CC uses a complete `set-cc` request with amperes and a required
 first, then High, including programming resolution, before any hardware access.
 It never changes the setpoint or switches range while Input is ON.
 See [Fixed Software Auto Range](#fixed-software-auto-range) for all three Fixed modes.
-Before LIVE configuration, Core
-checks the exact IT8812C identity and physically confirms Input OFF. Product
-LIVE checks `FUNC?` before and after `SYST:REM` and refuses setup from a
-resistance function because this scope cannot verify LED OFF. An approved
-contributor trial can switch from CR with `set-cc --hardware-validation cr-led`.
-Product LIVE rechecks
-Input OFF before **each** of the four subsequent CC writes; after all four
+Before LIVE configuration, Core checks the exact IT8812C identity. Product
+LIVE checks `FUNC?` before and after `SYST:REM` and requires a fresh physical
+Input OFF readback immediately before entering remote. Product LIVE currently
+refuses any reported resistance function, including ordinary Fixed CR with
+LED OFF. The approved queries cannot distinguish it from CR-LED or verify
+the LED state in other modes.
+
+An approved contributor trial can switch from Fixed CR with
+`set-cc --hardware-validation cr-led`. It exercises the same Core CC setup
+with the CR-LED interlock enabled. A future Product LIVE approval for this
+transition requires model-specific physical evidence and a support-policy
+update to allow that same Core path. A switch performed outside the tool
+may leave LED state that the current Product LIVE guard cannot establish.
+
+Product LIVE rechecks Input OFF before **each** of the four CC setup writes. After all four
 setting readbacks it verifies Input OFF once more. Configuration never turns
 Input ON. The `CURR:RANG?` reply is a numeric range-selector value, not
 necessarily a range ceiling: for IT8812C, 0–6 selects low resolution range,
@@ -392,6 +400,9 @@ Both features are offline in Product and Worker. Controlled hardware
 validation uses the dedicated CLI scopes `cr-led` and `current-slow-rise`
 with explicit operator approval. The corresponding script modes keep
 Input OFF and check configuration, readback, and explicit state transitions.
+Slow Rise CC setup requires a starting function other than CR. Its trial
+also verifies that Fixed CV setup is refused before any writes while
+Slow Rise is enabled.
 
 ```powershell
 .\scripts\preflight-cli.ps1 -CrLedSlowRiseOnly
@@ -1007,12 +1018,15 @@ and redirected stdin are blocked.
 | Manual OFF contingency | Independent means of making the circuit safe if communications fail |
 
 Use `-Verbose` or the report to review all setpoints before physical testing.
-Each selected trial configures with Input OFF, explicitly commands and
-confirms Input ON, measures, commands OFF and independently checks OFF.
+Powered Fixed and Transient trials configure with Input OFF, explicitly
+command and confirm Input ON, measure, then command and independently verify OFF.
 Transient also enables, triggers twice, checks status, then disables after
 OFF. TRACE runs four Input OFF captures and one powered Fixed CC capture
-with a Full CSV; Timer uses its own bounded CC case. Fixed Auto only adds
-OFF configuration/readback, not extra ON/OFF cycles.
+with a Full CSV. Timer uses its own bounded CC case. Fixed Auto adds only
+Input OFF configuration and readback. CR-LED and Current Slow Rise trials
+keep Input OFF throughout. The Slow Rise trial requires a non-resistance
+starting function and checks that the Fixed CV setup request is refused
+while Slow Rise is enabled. An unexpected success stops the run.
 
 Failures stop further normal cases. If ON may have been attempted, the script
 makes bounded explicit OFF cleanup and confirms it only by physical readback.

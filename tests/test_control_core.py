@@ -295,7 +295,7 @@ def test_live_cc_checks_origin_and_input_off_in_setup_sequence(monkeypatch, sele
     result = live('set-cc', current=1.5, range_name=selection)
     assert result['range'] == 'low' and result['current_a'] == 1.5
     assert fake.calls == [
-        '*IDN?', 'INP:STAT?', 'FUNC?', 'SYST:REM', 'FUNC?',
+        '*IDN?', 'INP:STAT?', 'FUNC?', 'INP:STAT?', 'SYST:REM', 'FUNC?',
         'INP:STAT?', 'FUNC:MODE FIX',
         'INP:STAT?', 'FUNC CURR',
         'INP:STAT?', 'CURR:RANG 1.5',
@@ -303,6 +303,24 @@ def test_live_cc_checks_origin_and_input_off_in_setup_sequence(monkeypatch, sele
         'FUNC:MODE?', 'FUNC?', 'CURR:RANG?', 'CURR?', 'INP:STAT?',
     ]
     assert not fake.input
+
+
+def test_live_cc_rechecks_input_after_origin_query_before_remote(monkeypatch):
+    fake = Fake()
+    query = fake.query
+
+    def query_with_input_change(command):
+        result = query(command)
+        if command == 'FUNC?':
+            fake.input = True
+        return result
+
+    monkeypatch.setattr(fake, 'query', query_with_input_change)
+    session(fake, monkeypatch)
+    with pytest.raises(LoadError) as error:
+        live('set-cc', current='0.1', range_name='low')
+    assert error.value.code == 'input_not_off'
+    assert all(call.endswith('?') for call in fake.calls)
 
 
 @pytest.mark.parametrize('current,range_name', [(0.1, 'low'), (7.0, 'high')])
@@ -701,7 +719,7 @@ def test_remote_failure_does_not_attempt_cc_or_input_on(monkeypatch):
         live('set-cc', current=0.1, range_name='low')
     assert error.value.code == 'write_failed'
     assert error.value.details['completed_steps'] == []
-    assert fake.calls == ['*IDN?', 'INP:STAT?', 'FUNC?', 'SYST:REM']
+    assert fake.calls == ['*IDN?', 'INP:STAT?', 'FUNC?', 'INP:STAT?', 'SYST:REM']
     assert not fake.input
 
 
