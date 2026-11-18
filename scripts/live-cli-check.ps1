@@ -1,7 +1,7 @@
 <#
 Single, bounded IT8812C CLI hardware validation.
 Default: all eight modes, with common read-only safety prechecks.
--Modes selects cc, cv, cr, cw and/or transient-cc/cv/cr/cw (comma-separated or an array).
+-Modes selects cc, cv, cr, cw, transient-cc/cv/cr/cw and/or trace (comma-separated or array).
 -InputTimerOnly selects a separate bounded Fixed CC Timer trial; excluded from defaults.
 Requires approved source/DUT limits and interactive confirmation before hardware access.
 -PlanOnly validates every planned CLI request without VISA or hardware access.
@@ -40,7 +40,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$supportedModes = @('cc', 'cv', 'cr', 'cw', 'transient-cc', 'transient-cv', 'transient-cr', 'transient-cw')
+$supportedModes = @('cc', 'cv', 'cr', 'cw', 'transient-cc', 'transient-cv', 'transient-cr', 'transient-cw', 'trace')
 if ($InputTimerOnly) {
     if ($PSBoundParameters.ContainsKey('Modes')) { throw 'InputTimerOnly cannot be combined with Modes.' }
     $supportedModes = @('input-timer')
@@ -51,6 +51,13 @@ $requestedModes = @($Modes | ForEach-Object { $_ -split ',' } |
 # Keep the established trial order and run each selected mode only once.
 $selectedModes = @($supportedModes | Where-Object { $_ -in $requestedModes })
 $hasValidationModes = @($selectedModes | Where-Object { $_ -ne 'cc' }).Count -gt 0
+$traceSelected = 'trace' -in $selectedModes
+$traceCommunicationUntrusted = $false
+$traceFeedStopUnconfirmed = $false
+$traceStartDeadlineMs = 120000
+$traceRunName = 'readonly-live-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfff') + '-' +
+    [Guid]::NewGuid().ToString('N').Substring(0, 8)
+$traceCsvPath = Join-Path $PSScriptRoot "../.tmp_tests/$traceRunName/trace-powered.csv"
 $repo = Split-Path -Parent $PSScriptRoot
 $python = Join-Path $repo '.venv/Scripts/python.exe'
 $cli = Join-Path $repo '.venv/Scripts/electronicload-tool.exe'
@@ -96,6 +103,11 @@ $report = [ordered]@{
     results = @()
 }
 
+if ($traceSelected) {
+    $report['trace_start_deadline_ms'] = $traceStartDeadlineMs
+    $report['trace_safe_shutdown_unconfirmed'] = $false
+}
+
 function Save-Report {
     if ($null -eq $script:reportDirectory) { return }
     $shareable = Join-Path $script:reportDirectory 'shareable'
@@ -108,9 +120,22 @@ function Save-Report {
             command = $entry.command
             status = $entry.status
         }
-        if ($entry.Contains('arguments')) { $case.arguments = $entry.arguments }
+        if ($entry.Contains('arguments')) {
+            $safeArguments = @($entry.arguments)
+            if ($script:traceSelected -and $entry.command -eq 'trace-start') {
+                $csvIndex = [Array]::IndexOf($safeArguments, '--csv')
+                if ($csvIndex -ge 0 -and $csvIndex + 1 -lt $safeArguments.Count) {
+                    $safeArguments[$csvIndex + 1] = '<redacted>'
+                }
+            }
+            $case.arguments = $safeArguments
+        }
         if ($entry.Contains('error_code')) { $case.error_code = $entry.error_code }
         if ($entry.Contains('expected_range')) { $case.expected_range = $entry.expected_range }
+        foreach ($field in @('trace_source','trace_points','trace_interval_s','trace_sample_count',
+                             'trace_csv_complete')) {
+            if ($entry.Contains($field)) { $case[$field] = $entry[$field] }
+        }
         if ($entry.status -eq 'PASS') {
             if ($entry.command -eq 'input-state' -or $entry.command -eq 'input-on' -or
                 $entry.command -eq 'input-off' -or $entry.command -eq 'input-timer-status') {
@@ -166,6 +191,10 @@ function Save-Report {
         prechecks = $script:report.prechecks
         cases = $cases
         summary_counts = $counts
+    }
+    if ($script:traceSelected) {
+        $public['trace_start_deadline_ms'] = $script:traceStartDeadlineMs
+        $public['trace_safe_shutdown_unconfirmed'] = $script:report.trace_safe_shutdown_unconfirmed
     }
     [IO.File]::WriteAllText((Join-Path $shareable 'report.json'),
         ($public | ConvertTo-Json -Depth 12), [Text.UTF8Encoding]::new($false))
@@ -236,9 +265,10 @@ function Invoke-PlanCommand([string]$Command, [string[]]$ExtraArgs) {
 
 function Invoke-LiveCommand([string]$Command, [string]$CaseName,
                             [string[]]$ExtraArgs = @(),
+                            [int]$DeadlineMs = 30000,
                             [switch]$Cleanup) {
     $remaining = if ($Cleanup) { $script:perCommandDeadlineMs } else {
-        [Math]::Min($script:perCommandDeadlineMs,
+        [Math]::Min($DeadlineMs,
             $script:totalDeadlineMs - $script:watch.ElapsedMilliseconds)
     }
     if ($remaining -le 0) { throw 'Total CLI validation deadline expired.' }
@@ -252,6 +282,9 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
     $sequence = $script:commandIndex
     $entry = $script:report.results | Where-Object { $_.name -eq $CaseName } | Select-Object -First 1
     if ($null -eq $entry) { throw "Unknown validation case: $CaseName" }
+    # Mixed-mode selections must not treat a preceding non-TRACE trial as a TRACE fault.
+    $traceCase = $script:traceSelected -and
+        ($Command -in @('trace-configure', 'trace-start') -or $CaseName.StartsWith('trace-'))
     $started = $false
     $output = ''
     $diagnostic = ''
@@ -264,6 +297,7 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
         $stdout = $process.StandardOutput.ReadToEndAsync()
         $stderr = $process.StandardError.ReadToEndAsync()
         if (-not $process.WaitForExit([int]$remaining)) {
+            if ($traceCase) { $script:traceCommunicationUntrusted = $true }
             $process.Kill()
             [void]$process.WaitForExit(5000)
             $exitStatus = 'TIMEOUT; session/input state unconfirmed'
@@ -278,10 +312,12 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
         try {
             $result = $output | ConvertFrom-Json -ErrorAction Stop
         } catch {
+            if ($traceCase) { $script:traceCommunicationUntrusted = $true }
             $entry['error_code'] = 'invalid_cli_json'
             throw "$CaseName did not return valid CLI JSON."
         }
         if ($null -eq $result -or $null -eq $result.ok) {
+            if ($traceCase) { $script:traceCommunicationUntrusted = $true }
             $entry['error_code'] = 'invalid_cli_json'
             throw "$CaseName returned an incomplete CLI result."
         }
@@ -289,7 +325,27 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
         if ($process.ExitCode -ne 0 -or $result.ok -ne $true) {
             $code = [string]$result.error.code
             $entry['error_code'] = $(if ($code -cmatch '^[a-z_]+$') { $code } else { 'execution_failed' })
+            if ($traceCase -and $result.error.details.feed_stop_unconfirmed -eq $true) {
+                $script:traceFeedStopUnconfirmed = $true
+                $script:report.trace_safe_shutdown_unconfirmed = $true
+            }
+            if ($traceCase -and ($code -in @('trace_session_untrusted','query_failed',
+                    'write_failed','visa_open_failed','visa_configure_failed','cleanup_failed') -or
+                    $result.error.details.feed -ceq 'UNKNOWN')) {
+                $script:traceCommunicationUntrusted = $true
+            }
             throw "$CaseName failed (exit $exitStatus, code $($entry.error_code))."
+        }
+        if ($script:traceSelected -and $Command -eq 'trace-start') {
+            # ConvertFrom-Json can normalize ISO datetimes to the runner's local
+            # timezone. Preserve the UTC+8 literal from the public CLI JSON.
+            $stampMatch = [regex]::Match($output, '"read_timestamp_utc_plus_8"\s*:\s*"([^"]+)"')
+            if (-not $stampMatch.Success) {
+                $entry['error_code'] = 'trace_bad_timestamp'
+                throw "$CaseName did not return a TRACE batch timestamp."
+            }
+            $result.result | Add-Member -MemberType NoteProperty -Name read_timestamp_utc_plus_8 `
+                -Value $stampMatch.Groups[1].Value -Force
         }
         $entry.status = 'PASS'
         $entry['response'] = $result
@@ -339,13 +395,93 @@ function Assert-Runtime([object]$Result, [string]$CaseName) {
 
 function Assert-InputOff([object]$Result, [string]$CaseName) {
     if ($Result.result.input_state -cne 'OFF') {
+        if ($script:traceSelected) {
+            $script:report.trace_safe_shutdown_unconfirmed = $true
+        }
         Fail-Case $CaseName 'input_not_off' 'Physical Input OFF was not confirmed; further writes are blocked.'
+    }
+}
+
+function Assert-TraceResult([object]$Result, [hashtable]$Step) {
+    $actual = $Result.result
+    $expected = $Step.trace_expected
+    $name = $Step.name
+    $count = [int]($expected.points / $(if ($expected.source -ceq 'TWO') { 2 } else { 1 }))
+    $readInterval = [decimal]::Parse([string]$actual.interval_s,
+        [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture)
+    if ($actual.validation_only -ne $true -or $actual.validation_scope -cne 'trace' -or
+        $actual.source -cne $expected.source -or $actual.points -ne $expected.points -or
+        $actual.sample_count -ne $count -or $readInterval -ne [decimal]$expected.interval) {
+        Fail-Case $name 'trace_readback_mismatch' 'TRACE result differs from the configured batch.'
+    }
+    $entry = $script:report.results | Where-Object { $_.name -eq $name } | Select-Object -First 1
+    $entry['trace_source'] = $actual.source
+    $entry['trace_points'] = [int]$actual.points
+    $entry['trace_interval_s'] = [string]$actual.interval_s
+    $entry['trace_sample_count'] = [int]$actual.sample_count
+    if ($Step.command -eq 'trace-configure') { return }
+    $samples = @($actual.samples)
+    if ($samples.Count -ne $count) {
+        Fail-Case $name 'trace_incomplete' 'TRACE returned an incomplete batch.'
+    }
+    $stamp = [datetimeoffset]::Parse([string]$actual.read_timestamp_utc_plus_8)
+    if ($stamp.Offset.TotalHours -ne 8) {
+        Fail-Case $name 'trace_bad_timestamp' 'TRACE batch timestamp must be UTC+8.'
+    }
+    $fields = $(if ($expected.source -ceq 'TWO') { @('voltage_v','current_a') }
+                elseif ($expected.source -ceq 'VOLT') { @('voltage_v') } else { @('current_a') })
+    for ($i = 0; $i -lt $samples.Count; $i++) {
+        if ($samples[$i].sample_index -ne $i + 1) {
+            Fail-Case $name 'trace_bad_index' 'TRACE sample index mismatch.'
+        }
+        $names = @($samples[$i].PSObject.Properties.Name | Where-Object { $_ -ne 'sample_index' })
+        if ((@($names | Sort-Object) -join ',') -cne (@($fields | Sort-Object) -join ',')) {
+            Fail-Case $name 'trace_bad_fields' 'TRACE returned fields for the wrong source.'
+        }
+        foreach ($field in $fields) {
+            $value = [double]$samples[$i].$field
+            if ([double]::IsNaN($value) -or [double]::IsInfinity($value)) {
+                Fail-Case $name 'trace_bad_value' 'TRACE returned non-finite data.'
+            }
+        }
+    }
+    if ($Step.ContainsKey('trace_csv') -and $Step.trace_csv) {
+        if (-not (Test-Path -LiteralPath $script:traceCsvPath -PathType Leaf)) {
+            Fail-Case $name 'trace_csv_missing' 'TRACE CSV was not created.'
+        }
+        $rows = @(Import-Csv -LiteralPath $script:traceCsvPath)
+        $required = @('read_timestamp_utc_plus_8','sample_index','voltage_v','current_a',
+                      'source','points','interval_s','sample_count',
+                      'estimated_elapsed_s','estimated_delta_t_s')
+        $headers = @((Get-Content -LiteralPath $script:traceCsvPath -TotalCount 1) -split ',')
+        if ($rows.Count -ne $count -or ($headers -join ',') -cne ($required -join ',')) {
+            Fail-Case $name 'trace_csv_mismatch' 'TRACE CSV columns/rows do not match.'
+        }
+        for ($i = 0; $i -lt $rows.Count; $i++) {
+            if ($rows[$i].sample_index -ne [string]($i + 1) -or
+                $rows[$i].source -cne $expected.source -or
+                [decimal]$rows[$i].points -ne $expected.points -or
+                [decimal]$rows[$i].interval_s -ne [decimal]$expected.interval -or
+                $rows[$i].read_timestamp_utc_plus_8 -cne $actual.read_timestamp_utc_plus_8) {
+                Fail-Case $name 'trace_csv_mismatch' 'TRACE CSV does not match JSON settings.'
+            }
+            foreach ($field in @('voltage_v','current_a')) {
+                if ([double]$rows[$i].$field -ne [double]$samples[$i].$field) {
+                    Fail-Case $name 'trace_csv_mismatch' 'TRACE CSV differs from JSON measurements.'
+                }
+            }
+        }
+        if ($rows[0].estimated_delta_t_s -ne '' -or
+            [decimal]$rows[0].estimated_elapsed_s -ne 0) {
+            Fail-Case $name 'trace_csv_mismatch' 'TRACE initial estimated times are incorrect.'
+        }
+        $entry['trace_csv_complete'] = $true
     }
 }
 
 try {
     if ($requestedModes.Count -eq 0 -or @($requestedModes | Where-Object { $_ -notin $supportedModes }).Count -gt 0) {
-        throw 'Modes must contain one or more of: cc, cv, cr, cw, transient-cc, transient-cv, transient-cr, transient-cw.'
+        throw 'Modes must contain one or more of: cc, cv, cr, cw, transient-cc, transient-cv, transient-cr, transient-cw, trace.'
     }
     if (-not $Target -or -not $Resource) {
         Write-Host 'BLOCKED: explicit -Target and -Resource are required.'
@@ -354,7 +490,7 @@ try {
     if (-not (Test-Path -LiteralPath $python) -or -not (Test-Path -LiteralPath $cli)) {
         throw 'Sync the repository .venv with uv before running validation.'
     }
-    if ('cc' -in $selectedModes -or $InputTimerOnly) {
+    if ('cc' -in $selectedModes -or $traceSelected -or $InputTimerOnly) {
         # Preserve the original token; both manual trials and the script ceiling must pass.
         & $python -c 'from electronicload_tool_core.control import validate_current; import sys; value = validate_current(sys.argv[1], sys.argv[2]); validate_current(sys.argv[1], sys.argv[3]); sys.exit(0 if 0 < value <= 2 else 2)' $currentText low high
         if ($LASTEXITCODE -ne 0) {
@@ -380,6 +516,9 @@ try {
             current_a = $SourceCurrentLimitA; voltage_v = $SourceVoltageLimitV
             verification = 'operator-declared; script does not configure or verify the source'
         }
+    }
+    if ($traceSelected -and [decimal]$currentText -gt [decimal]$SourceCurrentLimitA) {
+        throw 'TRACE CC current must not exceed the declared source current limit.'
     }
     if ('transient-cc' -in $selectedModes) {
         & $python -c 'from decimal import Decimal; import sys; a,b=map(Decimal,sys.argv[1:]); assert 0 <= a <= 2 and 0 <= b <= 2' $LevelA $LevelB
@@ -507,6 +646,40 @@ try {
             $planned += @{name="$prefix-final-state";command='input-state';args=@()}
         }
     }
+    if ($traceSelected) {
+        $trialCases = @(
+            @{name='trace-voltage';source='VOLT';points=10;interval='1'},
+            @{name='trace-current';source='CURR';points=10;interval='1'},
+            @{name='trace-paired';source='TWO';points=40;interval='1'},
+            @{name='trace-short-interval';source='VOLT';points=10;interval='0.001'},
+            @{name='trace-powered';source='TWO';points=10;interval='1'}
+        )
+        foreach ($trial in $trialCases) {
+            if ($trial.name -eq 'trace-powered') {
+                $planned += @{name='trace-powered-setup-cc';command='set-cc';args=$lowArgs}
+            }
+            $setupArgs = @('--hardware-validation','trace','--source',$trial.source,
+                           '--points',([string]$trial.points),'--interval-s',$trial.interval)
+            $planned += @{name="$($trial.name)-configure";command='trace-configure';
+                          args=$setupArgs;trace_expected=$trial}
+            if ($trial.name -eq 'trace-powered') {
+                $planned += @{name='trace-powered-on';command='input-on';args=$onArgs}
+            }
+            $startArgs = @('--hardware-validation','trace')
+            $startStep = @{name="$($trial.name)-start";command='trace-start';
+                           args=$startArgs;trace_expected=$trial}
+            if ($trial.name -eq 'trace-powered') {
+                $startStep.args += @('--csv',$traceCsvPath,'--csv-format','full',
+                                     '--csv-time-columns','elapsed,delta')
+                $startStep.trace_csv = $true
+            }
+            $planned += $startStep
+            if ($trial.name -eq 'trace-powered') {
+                $planned += @{name='trace-powered-off';command='input-off';args=@()}
+                $planned += @{name='trace-powered-final-state';command='input-state';args=@()}
+            }
+        }
+    }
     $report.results = @($planned | ForEach-Object {
         [ordered]@{name=$_.name;command=$_.command;arguments=$_.args;status='NOT RUN'}
     })
@@ -526,16 +699,20 @@ try {
         $report.plans += $plan
     }
     $report.prechecks.plan = 'PASS'
-    $name = 'readonly-live-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfff') + '-' +
-        [Guid]::NewGuid().ToString('N').Substring(0, 8)
-    $reportDirectory = Join-Path $repo ".tmp_tests/$name"
+    $reportDirectory = Join-Path $repo ".tmp_tests/$traceRunName"
     [void][IO.Directory]::CreateDirectory($reportDirectory)
     Write-Host "ElectronicLoad Tool - CLI Validation"
     Write-Host "Target: $Target | Connection: $Connection | Backend: $Backend | Resource: <redacted>"
     Write-Host "Mode: $(if ($PlanOnly) { 'PLAN ONLY' } else { 'LIVE' })"
     Write-Host "Selected modes: $($selectedModes -join ', ')."
     Write-Host "Plan: Identify, Input State, Measure."
-    Write-Host 'Every selected mode includes explicit ON/OFF and independent OFF confirmation.'
+    if ($traceSelected) {
+        Write-Host 'TRACE: four Input OFF batches and one bounded Fixed CC ON batch with explicit OFF.'
+        Write-Host "TRACE Start process deadline: $traceStartDeadlineMs ms. No auto reconnect."
+    }
+    if (@($selectedModes | Where-Object { $_ -ne 'trace' }).Count -gt 0) {
+        Write-Host 'Other selected modes retain explicit ON/OFF and independent OFF confirmation.'
+    }
     Write-Host 'Fixed Auto adds Input OFF setup/readback with the existing values; no extra ON/OFF cycles.'
     if (@($selectedModes | Where-Object { $_.StartsWith('transient-') }).Count -gt 0) {
         Write-Host 'Transient: Continuous/Pulse/Toggle, Low/High/Auto, repeated triggers, control status and separate disable.'
@@ -566,6 +743,8 @@ try {
     }
     if ($InputTimerOnly) {
         & (Join-Path $PSScriptRoot 'preflight-cli.ps1') -InputTimerOnly
+    } elseif ($selectedModes.Count -eq 1 -and $traceSelected) {
+        & (Join-Path $PSScriptRoot 'preflight-cli.ps1') -TraceOnly
     } else {
         & (Join-Path $PSScriptRoot 'preflight-cli.ps1')
     }
@@ -624,8 +803,13 @@ try {
             $activeTransientScope = $step.args[[Array]::IndexOf($step.args, '--hardware-validation') + 1]
             $transientEnableAttempted = $true
         }
-        $result = Invoke-LiveCommand -Command $step.command -CaseName $step.name -ExtraArgs $step.args
+        $commandDeadline = $(if ($traceSelected -and $step.command -eq 'trace-start') {
+            $traceStartDeadlineMs
+        } else { $perCommandDeadlineMs })
+        $result = Invoke-LiveCommand -Command $step.command -CaseName $step.name `
+            -ExtraArgs $step.args -DeadlineMs $commandDeadline
         Assert-Runtime $result $step.name
+        if ($step.ContainsKey('trace_expected')) { Assert-TraceResult $result $step }
         if ($InputTimerOnly -and $step.command -in @('set-input-timer', 'input-timer-enable', 'input-timer-disable')) {
             Assert-InputOff $result $step.name
         }
@@ -691,18 +875,32 @@ try {
         $report.results += [ordered]@{
             name = 'cleanup-input-off'; command = 'input-off'; status = 'NOT RUN'
         }
-        try {
+        if ($traceCommunicationUntrusted) {
+            $report.status = 'FAIL'
+            $report.trace_safe_shutdown_unconfirmed = $true
+            Write-Host 'WARNING: TRACE VISA untrusted: no new Session or blind OFF cleanup; independent operator action required.'
+        } else { try {
             Write-Host 'Input ON was attempted: explicitly commanding OFF cleanup...'
             $cleanup = Invoke-LiveCommand -Command 'input-off' -CaseName 'cleanup-input-off' -Cleanup
             Assert-Runtime $cleanup 'cleanup-input-off'
             Assert-InputOff $cleanup 'cleanup-input-off'
             $inputOnAttempted = $false
+            if ($traceSelected -and -not $traceFeedStopUnconfirmed) {
+                $report.trace_safe_shutdown_unconfirmed = $false
+            }
             Write-Host 'PASS Explicit Input OFF cleanup'
         } catch {
             $report.status = 'FAIL'
+            if ($traceSelected) { $report.trace_safe_shutdown_unconfirmed = $true }
             Write-Host 'WARNING: physical Input OFF was not confirmed. Immediate operator action is required.'
         }
         if ($report.status -eq 'PASS') { $report.status = 'FAIL' }
+        }
+    }
+    if ($traceCommunicationUntrusted) {
+        $report.status = 'FAIL'
+        $report.trace_safe_shutdown_unconfirmed = $true
+        Write-Host 'WARNING: TRACE VISA state untrusted; further I/O forbidden. Use independent manual safety procedure.'
     }
     if ($timerEnableAttempted) {
         $report.results += [ordered]@{name='cleanup-timer-state';command='input-state';status='NOT RUN'}

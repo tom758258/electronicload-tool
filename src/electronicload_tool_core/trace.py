@@ -14,7 +14,8 @@ from .control import NUMBER, _query, _write
 from .errors import LoadError, communication_error
 from .identity import MODEL_ID, parse_identity
 from .simulator import ControlSimulator, TRACE_BUFFER_FULL
-from .visa import (TraceSessionLost, mark_session_untrusted, require_trusted_session,
+from .visa import (TraceSessionLost, mark_session_untrusted, open_session,
+                   require_trusted_session,
                    validate_connection)
 
 TRACE_COMMANDS = ("trace-configure", "trace-start")
@@ -388,8 +389,8 @@ def _capture_with_csv(session, config, expected, stop, cancel, csv_options):
 
 def execute(command, *, mode="live", resource=None, backend="system", model_id=MODEL_ID,
             arguments=None, simulator=None, stop: Event | None = None,
-            cancel: Event | None = None):
-    """Run a TRACE command. Native sequences are exercised only offline."""
+            cancel: Event | None = None, hardware_validation: str | None = None):
+    """Run offline TRACE or explicitly authorized contributor validation."""
     if command not in TRACE_COMMANDS or mode not in ("live", "simulate", "dry-run"):
         raise LoadError("argument_error", "Unknown TRACE command or execution mode.")
     if model_id != MODEL_ID:
@@ -408,25 +409,37 @@ def execute(command, *, mode="live", resource=None, backend="system", model_id=M
         if set(arguments) - CSV_FIELDS:
             raise LoadError("argument_error", "TRACE start accepts only CSV options.")
         csv_options = validate_csv(arguments)
-    if mode == "live":
-        raise LoadError("unsupported_live_scope", "TRACE is offline only.")
+    if hardware_validation not in (None, "trace") or (
+            hardware_validation == "trace" and mode == "simulate"):
+        raise LoadError("argument_error", "TRACE contributor validation requires live or dry-run.")
+    if mode == "live" and hardware_validation != "trace":
+        raise LoadError("unsupported_live_scope", "TRACE Product LIVE is not open.")
+    marker = ({"validation_only": True, "validation_scope": "trace"}
+              if hardware_validation == "trace" else {})
     if mode == "dry-run":
-        return {"command": command, "hardware_access": False, **config}
+        return {"command": command, "hardware_access": False, **config, **marker}
 
-    session = simulator if simulator is not None else ControlSimulator()
-    require_trusted_session(session)
-    try:
-        if command == "trace-configure":
-            return _configure(session, config, stop)
-        config, expected = _start_precheck(session, stop, cancel)
-        _checkpoint(stop, cancel)
-        # The built-in simulator makes its batch visible on the first FEED poll.
-        # The full configured duration is still validated before scheduling.
-        if type(session) is ControlSimulator:
-            expected = 0
-        if csv_options is None:
-            return _capture(session, config, expected, stop, cancel)
-        return _capture_with_csv(session, config, expected, stop, cancel, csv_options)
-    except TraceSessionLost:
-        mark_session_untrusted(session)
-        raise
+    def run(session):
+        require_trusted_session(session)
+        try:
+            if command == "trace-configure":
+                return _configure(session, config, stop)
+            current, expected = _start_precheck(session, stop, cancel)
+            _checkpoint(stop, cancel)
+            # Only the built-in simulator bypasses the physical wait.
+            if type(session) is ControlSimulator:
+                expected = 0
+            if csv_options is None:
+                return _capture(session, current, expected, stop, cancel)
+            return _capture_with_csv(session, current, expected, stop, cancel, csv_options)
+        except TraceSessionLost:
+            mark_session_untrusted(session)
+            raise
+
+    if mode == "live":
+        # Contributor-only: no permission change to Worker or Product LIVE.
+        # Closing VISA never implies Input OFF.
+        with open_session(resource) as (session, runtime):
+            result = run(session)
+        return {**result, **marker, "visa": runtime}
+    return run(simulator if simulator is not None else ControlSimulator())
