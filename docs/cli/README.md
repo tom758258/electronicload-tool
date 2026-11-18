@@ -288,8 +288,9 @@ the bounded source/DUT, manual OFF contingency and interactive confirmation:
 `-Modes trace` does not alter the existing default eight-mode script selection.
 TRACE-only runs use `preflight-cli.ps1 -TraceOnly` for focused, no-hardware
 preflight. `-PlanOnly` produces cases marked NOT RUN, not physical PASS.
-The existing redacted `shareable/report.json` and `summary.md` include
-TRACE case settings, counts, CSV completeness and unconfirmed safety flags;
+The existing redacted `shareable/report.json` records TRACE case settings,
+sample counts, CSV completeness and unconfirmed safety flags. `summary.md`
+provides concise per-case statuses and totals;
 raw samples and the CSV are held only in the run's ignored `.tmp_tests/`
 folder outside `shareable/`. The script requires the original interactive
 operator gate and explicit Input OFF readback. If communications become
