@@ -281,6 +281,9 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
     $sequence = $script:commandIndex
     $entry = $script:report.results | Where-Object { $_.name -eq $CaseName } | Select-Object -First 1
     if ($null -eq $entry) { throw "Unknown validation case: $CaseName" }
+    # Mixed-mode selections must not treat a preceding non-TRACE trial as a TRACE fault.
+    $traceCase = $script:traceSelected -and
+        ($Command -in @('trace-configure', 'trace-start') -or $CaseName.StartsWith('trace-'))
     $started = $false
     $output = ''
     $diagnostic = ''
@@ -293,7 +296,7 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
         $stdout = $process.StandardOutput.ReadToEndAsync()
         $stderr = $process.StandardError.ReadToEndAsync()
         if (-not $process.WaitForExit([int]$remaining)) {
-            if ($script:traceSelected) { $script:traceCommunicationUntrusted = $true }
+            if ($traceCase) { $script:traceCommunicationUntrusted = $true }
             $process.Kill()
             [void]$process.WaitForExit(5000)
             $exitStatus = 'TIMEOUT; session/input state unconfirmed'
@@ -308,12 +311,12 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
         try {
             $result = $output | ConvertFrom-Json -ErrorAction Stop
         } catch {
-            if ($script:traceSelected) { $script:traceCommunicationUntrusted = $true }
+            if ($traceCase) { $script:traceCommunicationUntrusted = $true }
             $entry['error_code'] = 'invalid_cli_json'
             throw "$CaseName did not return valid CLI JSON."
         }
         if ($null -eq $result -or $null -eq $result.ok) {
-            if ($script:traceSelected) { $script:traceCommunicationUntrusted = $true }
+            if ($traceCase) { $script:traceCommunicationUntrusted = $true }
             $entry['error_code'] = 'invalid_cli_json'
             throw "$CaseName returned an incomplete CLI result."
         }
@@ -324,7 +327,7 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
             if ($script:traceSelected -and $result.error.details.feed_stop_unconfirmed -eq $true) {
                 $script:report.trace_safe_shutdown_unconfirmed = $true
             }
-            if ($script:traceSelected -and ($code -in @('trace_session_untrusted','query_failed',
+            if ($traceCase -and ($code -in @('trace_session_untrusted','query_failed',
                     'write_failed','visa_open_failed','visa_configure_failed','cleanup_failed') -or
                     $result.error.details.feed -ceq 'UNKNOWN')) {
                 $script:traceCommunicationUntrusted = $true
@@ -390,6 +393,9 @@ function Assert-Runtime([object]$Result, [string]$CaseName) {
 
 function Assert-InputOff([object]$Result, [string]$CaseName) {
     if ($Result.result.input_state -cne 'OFF') {
+        if ($script:traceSelected) {
+            $script:report.trace_safe_shutdown_unconfirmed = $true
+        }
         Fail-Case $CaseName 'input_not_off' 'Physical Input OFF was not confirmed; further writes are blocked.'
     }
 }
@@ -877,9 +883,11 @@ try {
             Assert-Runtime $cleanup 'cleanup-input-off'
             Assert-InputOff $cleanup 'cleanup-input-off'
             $inputOnAttempted = $false
+            if ($traceSelected) { $report.trace_safe_shutdown_unconfirmed = $false }
             Write-Host 'PASS Explicit Input OFF cleanup'
         } catch {
             $report.status = 'FAIL'
+            if ($traceSelected) { $report.trace_safe_shutdown_unconfirmed = $true }
             Write-Host 'WARNING: physical Input OFF was not confirmed. Immediate operator action is required.'
         }
         if ($report.status -eq 'PASS') { $report.status = 'FAIL' }
