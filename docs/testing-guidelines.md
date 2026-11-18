@@ -302,6 +302,36 @@ Verify that LIVE fails before opening VISA and that dry-run
 leaves simulator state and the filesystem untouched. Use Ruff on modified
 Python files. The configured CI runs its normal offline checks.
 
+## Contributor TRACE CLI hardware-validation preparation
+
+The existing `live-cli-check.ps1` is the sole instrument Script. Adding
+`-Modes trace` and CLI-only `--hardware-validation trace` does not authorize
+a physical run or promote Product/Worker LIVE. Verify only the directly
+changed contributor boundaries:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q tests/test_trace.py -k "hardware_validation"
+.\.venv\Scripts\python.exe -m pytest -q tests/test_live_validation_script.py -k "trace"
+.\.venv\Scripts\python.exe -m pytest -q tests/test_foundation.py -k "help or version"
+.\scripts\preflight-cli.ps1 -TraceOnly
+```
+
+Use a recording Fake VISA for the explicit-scope Core dispatcher, actual native
+Configure/Start sequencing, original Product LIVE refusal, untrusted Session
+rejection, exact identity and USB/System connection requirements. For the
+PowerShell Script, use PlanOnly, noninteractive gate refusal, and the existing
+pseudo-terminal/fake-CLI style of focused ON/OFF and Fail Closed verification.
+Use only fictional Resources in automated tests. Fake clock checks may replace
+real long waits. PowerShell unavailable is SKIP, never PASS. Ruff checks only
+modified Python files, and `git diff --check` checks the patch.
+
+The original eight script modes and default remain unchanged; do not add
+unrelated Fixed/Transient/LIST/Worker or release acceptance tests. Ordinary
+CI retains its repository-configured offline checks, irrespective of local
+focused selection. Contributor physical TRACE remains NOT RUN until a
+separately approved, bounded interactive run using an operator-supplied Resource,
+safe DUT/source, and independent manual Input OFF contingency.
+
 ## Packaging checks
 
 For packaging, dependency, or entry-point changes:

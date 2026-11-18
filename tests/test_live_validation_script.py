@@ -419,3 +419,191 @@ def test_input_timer_script_invalid_settings_and_selection(run_script, extra):
 def test_input_timer_script_requires_source_limits(run_script):
     result = run_script(['-InputTimerOnly', '-PlanOnly'], source_limits=False)
     assert result.returncode == 2, result.stdout + result.stderr
+
+
+def test_trace_validation_preflight_only(run_script):
+    checked = run_script(['-TraceOnly'], preflight=True)
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    assert 'PASS: TRACE-only offline preflight' in checked.stdout
+
+
+def test_trace_validation_script_plan_only_and_noninteractive_refusal(run_script):
+    planned = run_script(['-PlanOnly', '-Modes', 'trace'])
+    assert planned.returncode == 0, planned.stdout + planned.stderr
+    paths = re.findall(r'Report: (.+?/shareable/report\.json)', planned.stdout)
+    assert paths, planned.stdout
+    report = json.loads(Path(paths[-1]).read_text(encoding='utf-8-sig'))
+    assert report['overall_status'] == 'PLAN ONLY'
+    assert report['hardware_touched'] is False
+    assert report['trace_start_deadline_ms'] == 120000
+    cases = {case['name']: case for case in report['cases']}
+    assert len(cases) == 16
+    assert all(case['status'] == 'NOT RUN' for case in cases.values())
+    assert sum(case['command'] == 'trace-configure' for case in cases.values()) == 5
+    assert sum(case['command'] == 'trace-start' for case in cases.values()) == 5
+    assert 'trace-powered-on' in cases and 'trace-powered-off' in cases
+    assert not any('transient-' in name or name.startswith('cv-') for name in cases)
+    assert cases['trace-powered-start']['arguments'][-1] == 'elapsed,delta'
+    csv_args = cases['trace-powered-start']['arguments']
+    assert csv_args[csv_args.index('--csv') + 1] == '<redacted>'
+    assert RESOURCE not in Path(paths[-1]).read_text(encoding='utf-8-sig')
+    assert not (Path(paths[-1]).parents[1] / 'trace-powered.csv').exists()
+
+    refused = run_script(['-Modes', 'trace'])
+    assert refused.returncode == 2, refused.stdout + refused.stderr
+    assert 'requires an interactive console' in refused.stdout
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='Requires a POSIX pseudo-terminal for fake operator input.')
+@pytest.mark.parametrize('failure', [False, True])
+def test_trace_validation_script_interactive_fake_cleanup_and_results(
+    run_script, tmp_path, failure,
+):
+    import pty
+
+    command_log = tmp_path / 'trace-calls.jsonl'
+    state_file = tmp_path / 'trace-state.json'
+    customization = tmp_path / 'sitecustomize.py'
+    with customization.open('a', encoding='utf-8') as output:
+        output.write(
+            f"\nTRACE_CALLS = {str(command_log)!r}\n"
+            f"TRACE_STATE = {str(state_file)!r}\nTRACE_FAIL = {failure!r}\n"
+        )
+        output.write(FAKE_TRACE_CLI)
+    scripts = tmp_path / 'scripts'
+    scripts.mkdir()
+    shutil.copyfile(ROOT / 'scripts/live-cli-check.ps1', scripts / 'live-cli-check.ps1')
+    (scripts / 'preflight-cli.ps1').write_text('exit 0\n', encoding='utf-8')
+    (tmp_path / '.venv').symlink_to(ROOT / '.venv', target_is_directory=True)
+    master, slave = pty.openpty()
+    transcript = tmp_path / 'trace-console.txt'
+    try:
+        with transcript.open('w', encoding='utf-8') as output:
+            process = subprocess.Popen(
+                [run_script.powershell, '-NoProfile', '-File', str(scripts / 'live-cli-check.ps1'),
+                 '-Target', 'itech-it8812c', '-Resource', RESOURCE, '-Modes', 'trace',
+                 '-SourceCurrentLimitA', '0.5', '-SourceVoltageLimitV', '12'],
+                cwd=ROOT, env=run_script.env,
+                stdin=slave, stdout=output, stderr=subprocess.STDOUT)
+            try:
+                deadline = time.monotonic() + 150
+                confirmed = False
+                while process.poll() is None and time.monotonic() < deadline:
+                    log = transcript.read_text(encoding='utf-8')
+                    if not confirmed and 'press Enter to run' in log:
+                        os.write(master, b'\n')
+                        confirmed = True
+                    time.sleep(.05)
+                assert process.poll() is not None, transcript.read_text(encoding='utf-8')
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=5)
+    finally:
+        os.close(master)
+        os.close(slave)
+    assert confirmed
+    console = transcript.read_text(encoding='utf-8')
+    assert process.returncode == (3 if failure else 0), console
+    calls = [json.loads(line) for line in command_log.read_text().splitlines()]
+    commands = [row[0] for row in calls]
+    assert commands.count('trace-configure') == 5
+    assert commands.count('trace-start') == 5
+    assert commands.count('input-on') == 1
+    assert commands.count('input-off') == (0 if failure else 1)
+    paths = re.findall(r'Report: (.+?/shareable/report\.json)', console)
+    assert paths, console
+    report = json.loads(Path(paths[-1]).read_text(encoding='utf-8-sig'))
+    assert report['overall_status'] == ('FAIL' if failure else 'PASS')
+    assert report['trace_safe_shutdown_unconfirmed'] is failure
+    cases = {case['name']: case for case in report['cases']}
+    if failure:
+        assert cases['trace-powered-start']['status'] == 'FAIL'
+        assert cases['trace-powered-off']['status'] == 'NOT RUN'
+        assert cases['cleanup-input-off']['status'] == 'NOT RUN'
+        assert 'independent operator' in console
+    else:
+        assert cases['trace-powered-start']['trace_csv_complete'] is True
+        assert cases['trace-powered-off']['status'] == 'PASS'
+        assert cases['trace-powered-final-state']['status'] == 'PASS'
+    assert RESOURCE not in Path(paths[-1]).read_text(encoding='utf-8-sig')
+    assert str(tmp_path) not in Path(paths[-1]).read_text(encoding='utf-8-sig')
+    assert not (Path(paths[-1]).parents[1] / 'private').exists()
+
+
+FAKE_TRACE_CLI = r'''
+from electronicload_tool_cli import cli
+from pathlib import Path
+import csv
+import json
+from datetime import datetime, timedelta, timezone
+
+_original_main = cli.main
+
+def fake_trace_main(argv=None):
+    import sys
+    args = list(sys.argv[1:] if argv is None else argv)
+    if '--dry-run' in args or '--simulate' in args or args[0] == 'manifest':
+        return _original_main(args)
+    command = args[0]
+    with open(TRACE_CALLS, 'a', encoding='utf-8') as log:
+        log.write(json.dumps(args) + '\n')
+    state = json.loads(Path(TRACE_STATE).read_text()) if Path(TRACE_STATE).exists() else {
+        'on': False, 'config': {'source': 'TWO', 'points': 4, 'interval_s': '1'}
+    }
+    def option(flag, default=None):
+        return args[args.index(flag) + 1] if flag in args else default
+    failed = False
+    error = None
+    result = {'input_state': 'ON' if state['on'] else 'OFF',
+              'visa': {'library': 'FAKE', 'manufacturer': 'FAKE'}}
+    if command == 'trace-configure':
+        source = option('--source')
+        points = int(option('--points'))
+        interval = option('--interval-s')
+        state['config'] = {'source': source, 'points': points, 'interval_s': interval}
+        result.update({**state['config'], 'sample_count': points // (2 if source == 'TWO' else 1),
+                       'validation_only': True, 'validation_scope': 'trace'})
+    elif command == 'trace-start':
+        config = state['config']
+        count = config['points'] // (2 if config['source'] == 'TWO' else 1)
+        if TRACE_FAIL and state['on']:
+            failed = True
+            error = {'code': 'trace_session_untrusted', 'details': {'feed': 'UNKNOWN'}}
+        else:
+            values = {'VOLT': {'voltage_v': 12.0}, 'CURR': {'current_a': 0.1},
+                      'TWO': {'voltage_v': 12.0, 'current_a': 0.1}}
+            samples = [{'sample_index': i + 1, **values[config['source']]} for i in range(count)]
+            stamp = datetime.now(timezone(timedelta(hours=8))).isoformat()
+            result.update({**config, 'sample_count': count,
+                           'samples': samples, 'read_timestamp_utc_plus_8': stamp,
+                           'validation_only': True, 'validation_scope': 'trace'})
+            if '--csv' in args:
+                path = Path(option('--csv'))
+                path.parent.mkdir(parents=True, exist_ok=True)
+                columns = ['read_timestamp_utc_plus_8','sample_index','voltage_v','current_a',
+                           'source','points','interval_s','sample_count',
+                           'estimated_elapsed_s','estimated_delta_t_s']
+                with path.open('x', encoding='utf-8', newline='') as handle:
+                    writer = csv.DictWriter(handle, columns)
+                    writer.writeheader()
+                    for sample in samples:
+                        i = sample['sample_index']
+                        writer.writerow({**sample, **config, 'sample_count': count,
+                                         'read_timestamp_utc_plus_8': stamp,
+                                         'estimated_elapsed_s': str(i - 1),
+                                         'estimated_delta_t_s': '' if i == 1 else '1'})
+    elif command == 'input-on':
+        state['on'] = True
+        result['input_state'] = 'ON'
+    elif command == 'input-off':
+        state['on'] = False
+        result['input_state'] = 'OFF'
+    elif command == 'set-cc':
+        result['range'] = option('--range','low')
+    Path(TRACE_STATE).write_text(json.dumps(state))
+    print(json.dumps({'ok': not failed, 'result': None if failed else result, 'error': error}))
+    return 3 if failed else 0
+
+cli.main = fake_trace_main
+'''

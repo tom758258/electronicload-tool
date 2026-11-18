@@ -1,6 +1,7 @@
 """Offline acceptance of TRACE validation, native I/O, and CSV output."""
 
 import csv
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from decimal import Decimal
 import json
@@ -373,3 +374,94 @@ def test_trace_cli_entry_points_and_live_refusal(capsys, tmp_path):
     assert main(["trace-start", "--simulate", "--csv", str(path), "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["result"]["sample_count"] == 2
     assert Path(path).is_file()
+
+
+@pytest.mark.parametrize(("source", "points", "count"), [
+    ("VOLT", 10, 10), ("CURR", 10, 10), ("TWO", 40, 20),
+])
+def test_trace_hardware_validation_cli_only_uses_native_capture(
+    monkeypatch, clock, source, points, count,
+):
+    """A recording VISA object exercises the exact contributor-live dispatcher."""
+    session = RecordingVISA()
+    opened = []
+
+    @contextmanager
+    def fake_open(resource):
+        opened.append(resource)
+        yield session, {"library": "FAKE", "manufacturer": "FAKE"}
+
+    monkeypatch.setattr(trace, "open_session", fake_open)
+    configuration = {"source": source, "points": points, "interval_s": 1}
+    result = trace.execute("trace-configure", mode="live", resource=RESOURCE,
+                           hardware_validation="trace", arguments=configuration)
+    assert result["validation_only"] and result["validation_scope"] == "trace"
+    assert result["visa"]["library"] == "FAKE"
+    acquired = trace.execute("trace-start", mode="live", resource=RESOURCE,
+                             hardware_validation="trace", arguments={})
+    assert len(acquired["samples"]) == count
+    assert acquired["source"] == source and acquired["points"] == points
+    assert acquired["validation_only"] and acquired["visa"]["manufacturer"] == "FAKE"
+    assert opened == [RESOURCE, RESOURCE]
+    assert session.calls.count("TRAC:FEED:CONT NEXT") == 1
+    assert session.calls.count("TRIG") == 1
+    assert session.calls.count(("TRAC:DATA?", 30000)) == 1
+    assert "INP ON" not in session.calls and "INP OFF" not in session.calls
+
+
+def test_trace_hardware_validation_refuses_ordinary_live_before_open(
+    monkeypatch, capsys,
+):
+    @contextmanager
+    def forbidden(_resource):
+        pytest.fail("Unapproved TRACE LIVE may not open VISA.")
+        yield
+
+    monkeypatch.setattr(trace, "open_session", forbidden)
+    for command, arguments in [
+        ("trace-start", {}),
+        ("trace-configure", {"source": "TWO", "points": 4, "interval_s": 1}),
+    ]:
+        with pytest.raises(LoadError) as caught:
+            trace.execute(command, mode="live", resource=RESOURCE, arguments=arguments)
+        assert caught.value.code == "unsupported_live_scope"
+    assert main(["trace-start", "--resource", RESOURCE,
+                 "--validation-allow-pending-live-support", "--json"]) == 2
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "unsupported_live_scope"
+    assert main(["trace-start", "--hardware-validation", "trace",
+                 "--dry-run", "--json"]) == 0
+    preview = json.loads(capsys.readouterr().out)["result"]
+    assert preview["hardware_access"] is False
+    assert preview["validation_only"] and preview["validation_scope"] == "trace"
+    with pytest.raises(LoadError, match="validation"):
+        trace.execute("trace-start", mode="simulate", hardware_validation="trace")
+    with pytest.raises(LoadError) as caught:
+        trace.execute("trace-start", mode="live", resource=RESOURCE,
+                      model_id="not-itech", hardware_validation="trace")
+    assert caught.value.code == "unsupported_model"
+
+
+def test_trace_hardware_validation_live_failed_session_cannot_reuse_same_object(
+    monkeypatch, clock,
+):
+    session = RecordingVISA({"TRAC:DATA?": VisaIOError(StatusCode.error_timeout)})
+    opened = []
+
+    @contextmanager
+    def fake_open(resource):
+        opened.append(resource)
+        yield session, {"library": "FAKE", "manufacturer": "FAKE"}
+
+    monkeypatch.setattr(trace, "open_session", fake_open)
+    with pytest.raises(LoadError) as caught:
+        trace.execute("trace-start", mode="live", resource=RESOURCE,
+                      hardware_validation="trace", arguments={})
+    assert caught.value.code == "trace_session_untrusted"
+    previous = session.calls.copy()
+    with pytest.raises(LoadError) as caught:
+        trace.execute("trace-configure", mode="live", resource=RESOURCE,
+                      hardware_validation="trace",
+                      arguments={"source": "TWO", "points": 4, "interval_s": 1})
+    assert caught.value.code == "trace_session_untrusted"
+    assert session.calls == previous
+    assert opened == [RESOURCE, RESOURCE]

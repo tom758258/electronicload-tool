@@ -252,6 +252,50 @@ Estimated delta is blank for the first row and equals `interval_s` for later
 rows. The batch timestamp records the host's reading time. The estimated
 columns derive from the configured sample interval.
 
+### Contributor-only TRACE hardware validation
+
+Normal TRACE Product LIVE and Worker LIVE remain **disabled**. For a separately
+approved, interactive instrument trial, the existing CLI has a narrow
+`--hardware-validation trace` scope on `trace-configure` and `trace-start`.
+Only this explicit scope opens the exact user-supplied USB INSTR Resource with
+System VISA, validates the exact IT8812C identity, and follows the same
+Configure/Start prechecks, single trigger, timeout and CSV rules as Offline TRACE.
+The result includes `validation_only: true`, `validation_scope: "trace"` and
+VISA runtime evidence. The legacy LIVE override does not enable TRACE.
+`--hardware-validation trace --dry-run` previews arguments without opening VISA
+or creating CSV, and never counts as physical success. Do not use these CLI
+commands as unattended or ordinary load-operation APIs.
+
+The single controlled script `scripts/live-cli-check.ps1 -Modes trace` performs
+five short trials: VOLT 10 points / 1 s OFF, CURR 10 / 1 s OFF, TWO 40 / 1 s
+OFF, VOLT 10 / 1 ms OFF, and TWO 10 / 1 s with explicitly confirmed bounded
+Fixed CC Input ON. The last trial writes a new Full CSV with estimated elapsed
+and delta columns, then explicitly commands and confirms Input OFF. This is
+not waveform calibration, an exhaustive interval test, or Worker LIVE validation.
+TRACE Start alone has a 120-second script process deadline; other commands
+keep their existing 30-second budget and the total run stays bounded.
+Unexpected communication failures halt remaining cases; the script never
+reconnects to an untrusted VISA Session to attempt blind Input OFF.
+
+Use an explicit operator-selected real Resource only after separately approving
+the bounded source/DUT, manual OFF contingency and interactive confirmation:
+
+```powershell
+.\scripts\live-cli-check.ps1 -Target itech-it8812c -Resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" -Modes trace -SourceCurrentLimitA 0.5 -SourceVoltageLimitV 12 -PlanOnly
+# For a separately authorized interactive physical run, remove -PlanOnly.
+```
+
+`-Modes trace` does not alter the existing default eight-mode script selection.
+TRACE-only runs use `preflight-cli.ps1 -TraceOnly` for focused, no-hardware
+preflight. `-PlanOnly` produces cases marked NOT RUN, not physical PASS.
+The existing redacted `shareable/report.json` and `summary.md` include
+TRACE case settings, counts, CSV completeness and unconfirmed safety flags;
+raw samples and the CSV are held only in the run's ignored `.tmp_tests/`
+folder outside `shareable/`. The script requires the original interactive
+operator gate and explicit Input OFF readback. If communications become
+untrusted or a process deadline expires, the report marks safe shutdown
+unconfirmed and requires an independent manual safety procedure.
+
 ## Fixed Modes and Input Control
 
 Fixed CC uses a complete `set-cc` request with amperes and a required
@@ -830,7 +874,7 @@ INSTR resource (see the PowerShell setup above):
 
 `-Modes` is the sole mode selector and replaces `-IncludeValidationModes`.
 Accepted values are `cc`, `cv`, `cr`, `cw`, `transient-cc`, `transient-cv`,
-`transient-cr` and `transient-cw`; omit it for all eight. Select a single mode or a comma-separated list:
+`transient-cr`, `transient-cw`, and opt-in `trace`; omit it for the original eight. Select a single mode or a comma-separated list:
 
 ```powershell
 .\scripts\live-cli-check.ps1 -Target itech-it8812c -Resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" -Modes cc -PlanOnly

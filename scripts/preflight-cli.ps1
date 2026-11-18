@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param([switch]$TransientOnly, [switch]$FixedAutoOnly, [switch]$FixedSlewVonShortOnly,
-      [switch]$InputTimerOnly)
+      [switch]$InputTimerOnly, [switch]$TraceOnly)
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -20,12 +20,57 @@ function Invoke-PreflightCli {
 }
 
 try {
-    if (@($TransientOnly, $FixedAutoOnly, $FixedSlewVonShortOnly, $InputTimerOnly |
+    if (@($TransientOnly, $FixedAutoOnly, $FixedSlewVonShortOnly, $InputTimerOnly, $TraceOnly |
             Where-Object { $_ }).Count -gt 1) {
         throw 'Select only one focused preflight switch.'
     }
     if (-not (Test-Path -LiteralPath $cli)) {
         throw 'Sync the repository .venv with uv before running preflight.'
+    }
+    if ($TraceOnly) {
+        $scope = @('--hardware-validation','trace')
+        foreach ($mode in @('--dry-run','--simulate')) {
+            foreach ($source in @('VOLT','CURR','TWO')) {
+                $arguments = @('trace-configure','--source',$source,
+                               '--points','10','--interval-s','1') + $mode
+                $configured = Invoke-PreflightCli $arguments
+                if ($configured.result.source -cne $source -or
+                    $configured.result.sample_count -ne $(if ($source -eq 'TWO') {5} else {10})) {
+                    throw 'TRACE preview/configuration failed.'
+                }
+            }
+        }
+        $plan = Invoke-PreflightCli (@('trace-start','--dry-run') + $scope)
+        if ($plan.result.hardware_access -ne $false -or
+            $plan.result.validation_only -ne $true) {
+            throw 'TRACE contributor dry-run failed.'
+        }
+        $started = Invoke-PreflightCli @('trace-start','--simulate')
+        if ($started.result.source -cne 'TWO' -or $started.result.samples.Count -ne 2) {
+            throw 'TRACE simulation failed.'
+        }
+        $invalid = Invoke-PreflightCli @('trace-configure','--source','TWO',
+                          '--points','3','--interval-s','1','--dry-run') 2
+        if ($invalid.error.code -cne 'argument_error') {
+            throw 'TRACE invalid points were not refused.'
+        }
+        $fictional = 'USB0::0xFFFF::0x0001::SYNTHETIC::INSTR'
+        foreach ($command in @('trace-start','trace-configure')) {
+            $required = $(if ($command -eq 'trace-configure') {
+                @('--source','TWO','--points','10','--interval-s','1')
+            } else { @() })
+            foreach ($withOverride in @($false, $true)) {
+                $override = @()
+                if ($withOverride) { $override = @('--validation-allow-pending-live-support') }
+                $refused = Invoke-PreflightCli (@($command) + $required + $override +
+                    @('--resource',$fictional)) 2
+                if ($refused.error.code -cne 'unsupported_live_scope') {
+                    throw 'Ordinary TRACE LIVE must remain closed.'
+                }
+            }
+        }
+        Write-Host 'PASS: TRACE-only offline preflight; no VISA opened.'
+        exit 0
     }
     if (-not ($TransientOnly -or $FixedAutoOnly -or $FixedSlewVonShortOnly)) {
         foreach ($mode in @('--simulate', '--dry-run')) {

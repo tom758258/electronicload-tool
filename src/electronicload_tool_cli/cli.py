@@ -111,6 +111,9 @@ def main(argv: list[str] | None = None) -> int:
                              help="Explicit contributor hardware-validation scope; not Product LIVE.")
             sub.add_argument("--validation-settings-json",
                              help="Expected complete setup for validation enable, ON and trigger.")
+        if name in TRACE_COMMANDS:
+            sub.add_argument("--hardware-validation", choices=("trace",),
+                             help="Explicit CLI-only IT8812C TRACE hardware validation; not Product LIVE.")
         if name == "trace-configure":
             sub.add_argument("--source", required=True, choices=tuple(SAMPLE_FIELDS))
             sub.add_argument("--points", required=True, type=int)
@@ -223,6 +226,7 @@ def main(argv: list[str] | None = None) -> int:
             fields = CONFIG_FIELDS if args.command == "trace-configure" else CSV_FIELDS
             result = trace_execute(args.command, mode=mode, resource=args.resource,
                                    backend=args.backend, model_id=args.model,
+                                   hardware_validation=args.hardware_validation,
                                    arguments={key: value for key, value in vars(args).items()
                                               if key in fields})
         elif args.command in CONTROL_COMMANDS:
