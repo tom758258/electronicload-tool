@@ -279,6 +279,29 @@ client tests only where shared paths are affected. Run Ruff on modified Python
 files. No unrelated full pytest, default all-mode preflight, release acceptance,
 packaging or physical tests are required; leave normal CI configured checks intact.
 
+## Offline TRACE focused checks
+
+Run the TRACE tests and directly affected Worker and CLI contract checks.
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q tests/test_trace.py
+.\.venv\Scripts\python.exe -m pytest -q tests/test_worker.py -k "trace or worker_multi_job_terminal or worker_invalid_request or stop_waits_for_http_reply or local_lifecycle_client"
+.\.venv\Scripts\python.exe -m pytest -q tests/test_control_cli.py tests/test_foundation.py -k "manifest or help or version"
+```
+
+Cover exact decimal readback, numeric formats, model bounds, Input and
+trigger safety including unconfirmed arming over stale data, Feed cleanup,
+independent capture and data-read deadlines,
+one batch read and source-specific parsing. Use a fake clock for long captures
+and recording Fake VISA for I/O errors and out-of-sync replies. Check CSV
+exclusive creation, headers before triggering, both formats, optional time
+columns and preservation following failure. Exercise Common v3 cancellation,
+Stop during I/O, terminal and status snapshots, restricted recovery after
+Cancel, deadline cleanup or Configure, and Core and Worker session isolation.
+Verify that LIVE fails before opening VISA and that dry-run
+leaves simulator state and the filesystem untouched. Use Ruff on modified
+Python files. The configured CI runs its normal offline checks.
+
 ## Packaging checks
 
 For packaging, dependency, or entry-point changes:

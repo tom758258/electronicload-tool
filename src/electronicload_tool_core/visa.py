@@ -10,6 +10,24 @@ TERMINATION = "\n"
 QUERY_DELAY_S = 0.150
 
 
+class TraceSessionLost(LoadError):
+    """The command/reply stream is no longer trustworthy."""
+
+    def __init__(self, operation, **details):
+        super().__init__("trace_session_untrusted",
+                         "TRACE lost reliable communication. Feed and Input states are unknown.",
+                         3, operation=operation, feed="UNKNOWN", input_state="UNKNOWN", **details)
+
+
+def mark_session_untrusted(session) -> None:
+    session._trace_session_untrusted = True
+
+
+def require_trusted_session(session) -> None:
+    if getattr(session, "_trace_session_untrusted", False):
+        raise TraceSessionLost("session")
+
+
 def validate_connection(resource: str | None, backend: str, *, required: bool) -> None:
     if backend != "system":
         raise LoadError("unsupported_backend", "Only --backend system (IVI) is permitted.")
