@@ -289,16 +289,19 @@ def live(command, **kw):
 
 
 @pytest.mark.parametrize('selection', ['low', 'auto'])
-def test_four_off_checks_and_four_readbacks(monkeypatch, selection):
-    fake=Fake()
-    session(fake,monkeypatch)
-    result=live('set-cc',current=1.5,range_name=selection)
-    assert result['range']=='low' and result['current_a']==1.5
-    assert fake.calls==['*IDN?','INP:STAT?','SYST:REM',
-                        'INP:STAT?','FUNC:MODE FIX',
-                        'INP:STAT?','FUNC CURR','INP:STAT?','CURR:RANG 1.5',
-                        'INP:STAT?','CURR 1.5','FUNC:MODE?','FUNC?','CURR:RANG?','CURR?',
-                        'INP:STAT?']
+def test_live_cc_checks_origin_and_input_off_in_setup_sequence(monkeypatch, selection):
+    fake = Fake()
+    session(fake, monkeypatch)
+    result = live('set-cc', current=1.5, range_name=selection)
+    assert result['range'] == 'low' and result['current_a'] == 1.5
+    assert fake.calls == [
+        '*IDN?', 'INP:STAT?', 'FUNC?', 'SYST:REM', 'FUNC?',
+        'INP:STAT?', 'FUNC:MODE FIX',
+        'INP:STAT?', 'FUNC CURR',
+        'INP:STAT?', 'CURR:RANG 1.5',
+        'INP:STAT?', 'CURR 1.5',
+        'FUNC:MODE?', 'FUNC?', 'CURR:RANG?', 'CURR?', 'INP:STAT?',
+    ]
     assert not fake.input
 
 
