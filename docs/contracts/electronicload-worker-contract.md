@@ -54,7 +54,12 @@ Common contracts remain authoritative for the HTTP and JSONL envelopes.
 | `trace-start` | `{}` or `{"csv":"PATH","csv_format":"data"\|"full","csv_time_columns":"elapsed,delta"}` | Complete TRACE batch; offline only |
 | `set-cc` | `{"current": <number>, "range": "auto"\|"low"\|"high"}`, with optional paired `rise_slew` and `fall_slew` (numbers, offline only) | Fixed CC settings with Input OFF, plus Slew fields when supplied |
 | `set-cv` | `{"voltage": <number>, "range": "auto"\|"low"\|"high"}` | Offline-only CV setpoint simulation; LIVE refused |
-| `set-cr` | `{"resistance": <number>, "range": "auto"\|"low"\|"high"}` | Offline-only CR setpoint/range simulation; LIVE refused |
+| `set-cr` | `{"resistance": <number>, "range": "auto"\|"low"\|"high"}` | Fixed CR settings with LED confirmed OFF; offline only |
+| `set-cr-led` | `{"resistance": <number>, "range": "auto"\|"low"\|"high", "vdrop": <number>}` | Fixed CR settings with LED confirmed ON and Vdrop readback; offline only |
+| `cr-led-status` | `{}` | Read-only LED, Vdrop, resistance, Range and mode; offline only |
+| `current-slow-rise-enable` | `{}` | `enabled: true`; Fixed CC and Input OFF required; offline only |
+| `current-slow-rise-disable` | `{}` | `enabled: false`; Input OFF required; offline only |
+| `current-slow-rise-status` | `{}` | Read-only `enabled` flag in any mode and Input state; offline only |
 | `set-cw` | `{"power": <number>}` | Offline-only Fixed CW setpoint simulation; LIVE refused |
 | `set-von` | `{"voltage": <number>, "latch": "on"\|"off"}` | Offline VON settings, confirmed Input OFF required |
 | `von-status` | `{}` | Read-only simulated VON settings |
@@ -92,6 +97,27 @@ A live request uses `context: {"mode": "live"}` with optional matching
 `expected_model_id`. Simulation/dry-run uses the canonical
 `planning_model_id: "itech-it8812c"`; the Worker startup mode constrains the
 request mode. Worker does **not** allow the contributor-validation override.
+
+## Offline CR-LED and Current Slow Rise
+
+The five commands are async jobs in Manifest schema 2 and Worker Protocol 3.
+`set-cr-led` advertises the same Range choices as `set-cr`. The Worker
+retains numeric tokens through argument validation and returns `vdrop_v` as a
+decimal string. CR setup and status return `led_enabled`, `fixed_cr`,
+`function_mode`, `function`, `resistance_ohm`, `range` and `range_readback_ohm`.
+CR setup and Slow Rise mutations additionally return confirmed
+`input_state: "OFF"`. Invalid arguments fail at admission (HTTP 400).
+Valid LIVE jobs end with `unsupported_live_scope` before opening VISA.
+The CLI contributor validation scope is unavailable through the Worker.
+
+A simulated Worker retains configuration across jobs. Plain CR explicitly
+turns LED OFF and verifies readback. Selecting another load mode from
+CR-LED requires confirmed LED OFF before the switch. Enabled Current Slow
+Rise blocks non-Fixed-CC selection. Fixed CC setup and Input OFF preserve
+Slow Rise. Dry-run validates the request without touching simulator state.
+Worker Stop remains I/O-free. Product LIVE Fixed CC refuses to leave a
+resistance function when LED OFF cannot be verified in the approved scope.
+[CLI operation and validation](../cli/README.md#offline-cr-led-and-current-slow-rise)
 
 ## Offline Measurement Extensions
 

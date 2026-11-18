@@ -243,8 +243,7 @@ def _sequence(scope, settings):
         sequence += ["VOLT:RANG:AUTO OFF", f"VOLT:RANG {ceiling}",
                      f"VOLT {settings['voltage']:f}"]
     elif scope == "cr":
-        ceiling = c.CR_RANGE_LIMITS[settings["range"]][1]
-        sequence += [f"RES:RANG {ceiling}", f"RES {settings['resistance']:f}"]
+        return list(c._cr_sequence(settings["resistance"], settings["range"]))
     elif scope == "cw":
         sequence += [f"POW {settings['power']:f}"]
     else:
@@ -282,7 +281,17 @@ def _perform(session, command, scope, expected, sequence, stop):
     if sequence:
         completed = []
         try:
-            for write in ["SYST:REM", *sequence]:
+            _setup_guard(session, stop)
+            c._check_mode_change(session, force_led_off=scope == "cr")
+            c._mutation_off(session, stop)
+            c._write(session, "SYST:REM")
+            completed.append("SYST:REM")
+            _setup_guard(session, stop)
+            led_off = c._check_mode_change(session, force_led_off=scope == "cr")
+            c._leave_cr_led(session, led_off, stop)
+            if led_off:
+                completed.append("led_off")
+            for write in sequence:
                 _setup_guard(session, stop)
                 _stopping(stop)
                 c._write(session, write)
@@ -312,8 +321,14 @@ def _perform(session, command, scope, expected, sequence, stop):
         return result
 
     check()
+    if command == "transient-enable":
+        c._check_mode_change(session)
+        c._mutation_off(session, stop)
     c._write(session, "SYST:REM")
     snapshot = check()
+    if command == "transient-enable":
+        c._leave_cr_led(session, c._check_mode_change(session), stop)
+        c._mutation_off(session, stop)
     _stopping(stop)
     if command == "input-on":
         try:
@@ -337,8 +352,46 @@ def _perform(session, command, scope, expected, sequence, stop):
             **({"configuration": snapshot["configuration"]} if snapshot else {})}
 
 
+def _execute_led_or_slow_rise(command, *, scope, mode, resource, current, resistance,
+                              range_name, vdrop, stop):
+    permitted = ({"set-cc", *c.CR_COMMANDS, "cr-led-status"} if scope == "cr-led"
+                 else {"set-cc", *c.SLOW_RISE_COMMANDS})
+    if command not in permitted:
+        raise LoadError("argument_error", "Command does not match hardware-validation scope.")
+    configuration = None
+    if command in {"set-cc", *c.CR_COMMANDS}:
+        field = "current" if command == "set-cc" else "resistance"
+        value = current if command == "set-cc" else resistance
+        if (value is None or (command == "set-cc" and resistance is not None)
+                or (command in c.CR_COMMANDS and current is not None)):
+            raise LoadError("argument_error", "Supply only the selected mode's setup fields.")
+        range_name = c.resolve_fixed_range(command, value, range_name)
+        configuration = {field: str(value), "range": range_name}
+        if vdrop is not None:
+            configuration["vdrop"] = str(vdrop)
+    elif any(value is not None for value in (current, resistance, range_name, vdrop)):
+        raise LoadError("argument_error", "This command does not accept setup fields.")
+    marker = {"validation_only": True, "validation_scope": scope}
+    if mode == "dry-run":
+        return {**marker, "command": command, "hardware_access": False,
+                "expected_configuration": configuration}
+    with c.open_session(resource) as (session, runtime):
+        result = c._perform(session, command, current=current, voltage=None, resistance=resistance,
+                            power=None, range_name=range_name, confirmed=False, stop=stop,
+                            allow_cv=False, allow_cr=False, allow_cw=False,
+                            vdrop=vdrop, scoped_mode_change=True)
+        return {**result, **marker, "visa": runtime}
+
+
 def execute(command, *, scope, mode, resource, current, voltage, resistance, power,
-            range_name, transient, expected, confirmed, stop):
+            range_name, transient, expected, confirmed, stop, vdrop=None):
+    if scope in ("cr-led", "current-slow-rise"):
+        if (mode not in {"live", "dry-run"} or confirmed
+                or any(value is not None for value in (voltage, power, transient, expected))):
+            raise LoadError("argument_error", "Use the explicit validation scope with LIVE or dry-run.")
+        return _execute_led_or_slow_rise(command, scope=scope, mode=mode, resource=resource,
+                                         current=current, resistance=resistance, range_name=range_name,
+                                         vdrop=vdrop, stop=stop)
     if not isinstance(scope, str) or scope not in FUNCTIONS or mode not in {"live", "dry-run"}:
         raise LoadError("argument_error", "Hardware validation requires an explicit scope and LIVE/dry-run.")
     setup = "set-" + scope
@@ -372,7 +425,8 @@ def execute(command, *, scope, mode, resource, current, voltage, resistance, pow
         writes = {"input-on": "INP ON", "input-off": "INP OFF",
                   "transient-enable": "TRAN ON", "transient-disable": "TRAN OFF",
                   "transient-trigger": "TRIG:IMM"}
-        actions = sequence or ([writes[command]] if command in writes else [])
+        actions = (["RES:LED:STAT 0", *sequence] if sequence and scope == "cr" else sequence)
+        actions = actions or ([writes[command]] if command in writes else [])
         return {**marker, "command": command, "hardware_access": False,
                 "planned_writes": ["SYST:REM", *actions] if actions else [],
                 "expected_configuration": _serial(expected) if expected else None}

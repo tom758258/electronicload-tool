@@ -17,6 +17,7 @@ class ValidationFake(Fake):
         super().__init__()
         self.values = {'VOLT:RANG': '18', 'VOLT:RANG:AUTO': '0', 'VOLT': '5',
                        'RES:RANG': '10', 'RES': '10', 'POW': '1',
+                       'RES:LED:STAT': '0', 'RES:VDR': '0', 'CURR:SLEW:STAT': '0',
                        'CURR:TRAN:MODE': 'CONT', 'CURR:TRAN:ALEV': '.1',
                        'CURR:TRAN:BLEV': '.2', 'CURR:SLEW:POS': '.1', 'CURR:SLEW:NEG': '.1',
                        'CURR:TRAN:AWID': '.001', 'CURR:TRAN:BWID': '.002', 'TRIG:SOUR': 'HOLD'}
@@ -29,6 +30,9 @@ class ValidationFake(Fake):
         self.after_write = None
 
     def query(self, command):
+        if command == 'RES:VDR? MAX':
+            self.calls.append(command)
+            return '12'  # Test value, not a model limit.
         if command[:-1] in self.values:
             self.calls.append(command)
             return self.values[command[:-1]]
@@ -75,6 +79,110 @@ def setup(scope, settings, **kwargs):
 
 def run(command, scope='transient-cc', **kwargs):
     return control.execute(command, resource=RESOURCE, hardware_validation=scope, **kwargs)
+
+
+def test_validation_cr_led_native_settings_and_confirmed_exit(monkeypatch):
+    fake = ValidationFake()
+    session(fake, monkeypatch)
+    result = run('set-cr-led', 'cr-led', resistance='50', range_name='auto', vdrop='1.00000000000001')
+    assert result['fixed_cr'] and result['led_enabled']
+    assert result['vdrop_v'] == '1.00000000000001'
+    assert result['vdrop_max_v'] == '12'
+    assert result['range'] == 'high'
+    assert fake.calls.index('RES:VDR? MAX') < fake.calls.index('SYST:REM')
+    assert [call for call in fake.calls if '?' not in call] == [
+        'SYST:REM', 'FUNC:MODE FIX', 'FUNC RES', 'RES:RANG 7500', 'RES 50',
+        'RES:VDR 1.00000000000001', 'RES:LED:STAT 1']
+
+    fake.calls.clear()
+    assert not run('set-cr', 'cr-led', resistance='50', range_name='auto')['led_enabled']
+    assert fake.calls.index('RES:LED:STAT 0') < fake.calls.index('RES:LED:STAT?')
+    assert fake.calls.index('RES:LED:STAT?') < fake.calls.index('FUNC:MODE FIX')
+    run('set-cr-led', 'cr-led', resistance='50', range_name='auto', vdrop='1')
+    fake.calls.clear()
+    run('set-cc', 'cr-led', current='0.1', range_name='low')
+    led_off = fake.calls.index('RES:LED:STAT 0')
+    assert led_off < fake.calls.index('RES:LED:STAT?', led_off) < fake.calls.index('FUNC CURR')
+    fake.calls.clear()
+    status = run('cr-led-status', 'cr-led')
+    assert not status['fixed_cr'] and not status['led_enabled']
+    assert all(call.endswith('?') for call in fake.calls)
+
+
+@pytest.mark.parametrize('failure,code', [
+    ('ignored', 'readback_mismatch'), ('unreadable', 'query_failed'), ('write', 'write_failed'),
+])
+def test_validation_cr_led_exit_stops_on_unconfirmed_off(monkeypatch, failure, code):
+    fake = ValidationFake()
+    fake.function = 'RES'
+    fake.values['RES:LED:STAT'] = '1'
+    if failure == 'ignored':
+        fake.ignore = 'RES:LED:STAT 0'
+    elif failure == 'unreadable':
+        def corrupt_readback(device, command):
+            if command == 'RES:LED:STAT 0':
+                del device.values['RES:LED:STAT']
+
+        fake.after_write = corrupt_readback
+    else:
+        fake.write_fail = 'RES:LED:STAT 0'
+    session(fake, monkeypatch)
+    with pytest.raises(LoadError) as error:
+        run('set-cc', 'cr-led', current='0.1', range_name='low')
+    assert error.value.code == code
+    assert error.value.details['completed_steps'] == []
+    assert error.value.details['led_enabled'] is (True if failure == 'ignored' else None)
+    assert [call for call in fake.calls if '?' not in call] == ['SYST:REM', 'RES:LED:STAT 0']
+    assert fake.function == 'RES' and not fake.input
+
+
+@pytest.mark.parametrize('field,value,code', [
+    ('vdrop', '13', 'vdrop_out_of_range'),
+    ('resistance', '0', 'no_matching_range'),
+])
+def test_validation_cr_led_checks_limits_before_any_write(monkeypatch, field, value, code):
+    fake = ValidationFake()
+    session(fake, monkeypatch)
+    args = dict(resistance='50', range_name='auto', vdrop='1')
+    args[field] = value
+    with pytest.raises(LoadError) as error:
+        run('set-cr-led', 'cr-led', **args)
+    assert error.value.code == code
+    assert all('?' in call for call in fake.calls)
+
+
+def test_validation_slow_rise_native_reads_guards_and_preservation(monkeypatch):
+    fake = ValidationFake()
+    session(fake, monkeypatch)
+    scope = 'current-slow-rise'
+    assert run('current-slow-rise-enable', scope)['enabled']
+    assert 'CURR:SLEW:STAT 1' in fake.calls
+    control.execute('input-off', resource=RESOURCE)
+    run('set-cc', scope, current='0.2', range_name='low')
+    assert run('current-slow-rise-status', scope)['enabled']
+    fake.calls.clear()
+    with pytest.raises(LoadError) as error:
+        setup('cv', {'voltage': '5', 'range': 'low'})
+    assert error.value.code == 'current_slow_rise_enabled'
+    assert all(call.endswith('?') for call in fake.calls)
+    fake.function = 'VOLT'  # Emulate a front-panel selection.
+    assert not run('current-slow-rise-disable', scope)['enabled']
+    assert 'CURR:SLEW:STAT 0' in fake.calls
+    assert not any(call.startswith(('CURR:SLEW:POS ', 'CURR:SLEW:NEG ')) for call in fake.calls)
+    fake.calls.clear()
+    with pytest.raises(LoadError, match='Fixed CC'):
+        run('current-slow-rise-enable', scope)
+    assert all(call.endswith('?') for call in fake.calls)
+
+
+def test_validation_slow_rise_checks_again_after_remote(monkeypatch):
+    fake = ValidationFake()
+    fake.after_remote = lambda device: setattr(device, 'input', True)
+    session(fake, monkeypatch)
+    with pytest.raises(LoadError) as error:
+        run('current-slow-rise-enable', 'current-slow-rise')
+    assert error.value.code == 'input_not_off'
+    assert [call for call in fake.calls if '?' not in call] == ['SYST:REM']
 
 
 TRIALS = [('cv', {'voltage': '5', 'range': r}) for r in ('auto', 'low', 'high')] + [

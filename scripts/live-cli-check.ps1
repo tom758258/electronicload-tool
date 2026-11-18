@@ -1,7 +1,7 @@
 <#
 Single, bounded IT8812C CLI hardware validation.
 Default: all eight modes, with common read-only safety prechecks.
--Modes selects cc, cv, cr, cw, transient-cc/cv/cr/cw and/or trace (comma-separated or array).
+-Modes selects cc, cv, cr, cw, transient-cc/cv/cr/cw, trace, cr-led and/or current-slow-rise.
 -InputTimerOnly selects a separate bounded Fixed CC Timer trial; excluded from defaults.
 Requires approved source/DUT limits and interactive confirmation before hardware access.
 -PlanOnly validates every planned CLI request without VISA or hardware access.
@@ -40,7 +40,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$supportedModes = @('cc', 'cv', 'cr', 'cw', 'transient-cc', 'transient-cv', 'transient-cr', 'transient-cw', 'trace')
+$featureModes = @('cr-led', 'current-slow-rise')
+$supportedModes = @('cc', 'cv', 'cr', 'cw', 'transient-cc', 'transient-cv', 'transient-cr', 'transient-cw',
+                    'trace') + $featureModes
 if ($InputTimerOnly) {
     if ($PSBoundParameters.ContainsKey('Modes')) { throw 'InputTimerOnly cannot be combined with Modes.' }
     $supportedModes = @('input-timer')
@@ -52,6 +54,8 @@ $requestedModes = @($Modes | ForEach-Object { $_ -split ',' } |
 $selectedModes = @($supportedModes | Where-Object { $_ -in $requestedModes })
 $hasValidationModes = @($selectedModes | Where-Object { $_ -ne 'cc' }).Count -gt 0
 $traceSelected = 'trace' -in $selectedModes
+$featureSelected = @($selectedModes | Where-Object { $_ -in $featureModes }).Count -gt 0
+$featureOnly = $featureSelected -and @($selectedModes | Where-Object { $_ -notin $featureModes }).Count -eq 0
 $traceCommunicationUntrusted = $false
 $traceFeedStopUnconfirmed = $false
 $traceStartDeadlineMs = 120000
@@ -141,14 +145,15 @@ function Save-Report {
                 $entry.command -eq 'input-off' -or $entry.command -eq 'input-timer-status') {
                 $case.input_state = $entry.response.result.input_state
             }
-            if ($entry.command -in @('set-cc', 'set-cv', 'set-cr')) {
+            if ($entry.command -in @('set-cc', 'set-cv', 'set-cr', 'set-cr-led', 'cr-led-status')) {
                 $case.range = $entry.response.result.range
             }
             if ($entry.command -eq 'set-cc') {
                 $case.current_a = $entry.response.result.current_a
             }
             foreach ($field in @('configuration', 'seconds', 'enabled', 'state_source', 'validation_only', 'validation_scope',
-                                  'trigger_dispatched_at_utc', 'waveform_completion_known')) {
+                                  'trigger_dispatched_at_utc', 'waveform_completion_known',
+                                  'fixed_cr', 'led_enabled', 'vdrop_v', 'vdrop_max_v', 'resistance_ohm')) {
                 if ($null -ne $entry.response.result.$field) {
                     $case[$field] = $entry.response.result.$field
                 }
@@ -481,7 +486,7 @@ function Assert-TraceResult([object]$Result, [hashtable]$Step) {
 
 try {
     if ($requestedModes.Count -eq 0 -or @($requestedModes | Where-Object { $_ -notin $supportedModes }).Count -gt 0) {
-        throw 'Modes must contain one or more of: cc, cv, cr, cw, transient-cc, transient-cv, transient-cr, transient-cw, trace.'
+        throw "Modes must contain one or more of: $($supportedModes -join ', ')."
     }
     if (-not $Target -or -not $Resource) {
         Write-Host 'BLOCKED: explicit -Target and -Resource are required.'
@@ -490,7 +495,7 @@ try {
     if (-not (Test-Path -LiteralPath $python) -or -not (Test-Path -LiteralPath $cli)) {
         throw 'Sync the repository .venv with uv before running validation.'
     }
-    if ('cc' -in $selectedModes -or $traceSelected -or $InputTimerOnly) {
+    if ('cc' -in $selectedModes -or $traceSelected -or $InputTimerOnly -or $featureSelected) {
         # Preserve the original token; both manual trials and the script ceiling must pass.
         & $python -c 'from electronicload_tool_core.control import validate_current; import sys; value = validate_current(sys.argv[1], sys.argv[2]); validate_current(sys.argv[1], sys.argv[3]); sys.exit(0 if 0 < value <= 2 else 2)' $currentText low high
         if ($LASTEXITCODE -ne 0) {
@@ -515,7 +520,7 @@ try {
         current_a = $SourceCurrentLimitA; voltage_v = $SourceVoltageLimitV
         verification = 'operator-declared; script does not configure or verify the source'
     }
-    if (('cc' -in $selectedModes -or $traceSelected -or $InputTimerOnly) -and
+    if (('cc' -in $selectedModes -or $traceSelected -or $InputTimerOnly -or $featureSelected) -and
         [decimal]$currentText -gt [decimal]$SourceCurrentLimitA) {
         throw 'CC current must not exceed the declared source current limit.'
     }
@@ -683,13 +688,46 @@ try {
             }
         }
     }
+    if ('cr-led' -in $selectedModes) {
+        $ledScope = @('--hardware-validation', 'cr-led')
+        # Both resistance and Vdrop are fixed for this Input OFF trial. The
+        # native Core path asks the instrument for its Vdrop maximum.
+        $cr = @('--resistance', '50', '--range', 'auto') + $ledScope
+        $led = $cr + @('--vdrop', '1')
+        $planned += @(
+            @{name='cr-led-set';command='set-cr-led';args=$led},
+            @{name='cr-led-status-on';command='cr-led-status';args=$ledScope;led=$true;fixed_cr=$true},
+            @{name='cr-led-plain-cr';command='set-cr';args=$cr},
+            @{name='cr-led-status-off';command='cr-led-status';args=$ledScope;led=$false;fixed_cr=$true},
+            @{name='cr-led-set-again';command='set-cr-led';args=$led},
+            @{name='cr-led-leave-for-cc';command='set-cc';args=($lowArgs + $ledScope)},
+            @{name='cr-led-status-after-cc';command='cr-led-status';args=$ledScope;led=$false;fixed_cr=$false},
+            @{name='cr-led-final-input-state';command='input-state';args=@()}
+        )
+    }
+    if ('current-slow-rise' -in $selectedModes) {
+        $slowScope = @('--hardware-validation', 'current-slow-rise')
+        $slowCc = $lowArgs + $slowScope
+        $planned += @(
+            @{name='slow-rise-set-cc';command='set-cc';args=$slowCc},
+            @{name='slow-rise-enable';command='current-slow-rise-enable';args=$slowScope;slow=$true},
+            @{name='slow-rise-explicit-input-off';command='input-off';args=@()},
+            @{name='slow-rise-status-after-off';command='current-slow-rise-status';args=$slowScope;slow=$true},
+            @{name='slow-rise-repeat-cc';command='set-cc';args=$slowCc},
+            @{name='slow-rise-status-after-cc';command='current-slow-rise-status';args=$slowScope;slow=$true},
+            @{name='slow-rise-disable';command='current-slow-rise-disable';args=$slowScope;slow=$false},
+            @{name='slow-rise-status-disabled';command='current-slow-rise-status';args=$slowScope;slow=$false},
+            @{name='slow-rise-final-input-state';command='input-state';args=@()}
+        )
+    }
     $report.results = @($planned | ForEach-Object {
         [ordered]@{name=$_.name;command=$_.command;arguments=$_.args;status='NOT RUN'}
     })
     foreach ($step in $planned) {
         $extras = @($step.args)
         $plan = Invoke-PlanCommand $step.command $extras
-        if ($step.command -in @('set-cc', 'set-cv', 'set-cr', 'set-transient-cc', 'set-transient-cv', 'set-transient-cr') -and 'auto' -in $step.args) {
+        if ($step.command -in @('set-cc', 'set-cv', 'set-cr', 'set-cr-led',
+                                'set-transient-cc', 'set-transient-cv', 'set-transient-cr') -and 'auto' -in $step.args) {
             # The Core plan owns selection; the script only compares later physical readback.
             $resolved = $(if ($step.command -eq 'set-cc') { $plan.result.range } else {
                 $plan.result.expected_configuration.range
@@ -713,8 +751,11 @@ try {
         Write-Host 'TRACE: four Input OFF batches and one bounded Fixed CC ON batch with explicit OFF.'
         Write-Host "TRACE Start process deadline: $traceStartDeadlineMs ms. No auto reconnect."
     }
-    if (@($selectedModes | Where-Object { $_ -ne 'trace' }).Count -gt 0) {
+    if (@($selectedModes | Where-Object { $_ -ne 'trace' -and $_ -notin $featureModes }).Count -gt 0) {
         Write-Host 'Other selected modes retain explicit ON/OFF and independent OFF confirmation.'
+    }
+    if ($featureSelected) {
+        Write-Host 'CR-LED and Current Slow Rise trials keep Input OFF and verify configuration readback.'
     }
     Write-Host 'Fixed Auto adds Input OFF setup/readback with the existing values; no extra ON/OFF cycles.'
     if (@($selectedModes | Where-Object { $_.StartsWith('transient-') }).Count -gt 0) {
@@ -747,6 +788,8 @@ try {
         & (Join-Path $PSScriptRoot 'preflight-cli.ps1') -InputTimerOnly
     } elseif ($selectedModes.Count -eq 1 -and $traceSelected) {
         & (Join-Path $PSScriptRoot 'preflight-cli.ps1') -TraceOnly
+    } elseif ($featureOnly) {
+        & (Join-Path $PSScriptRoot 'preflight-cli.ps1') -CrLedSlowRiseOnly
     } else {
         & (Join-Path $PSScriptRoot 'preflight-cli.ps1')
     }
@@ -815,6 +858,15 @@ try {
             -ExtraArgs $step.args -DeadlineMs $commandDeadline
         Assert-Runtime $result $step.name
         if ($step.ContainsKey('trace_expected')) { Assert-TraceResult $result $step }
+        if ($step.ContainsKey('led') -and
+            ($result.result.led_enabled -cne $step.led -or $result.result.fixed_cr -cne $step.fixed_cr -or
+             [decimal]$result.result.vdrop_v -ne 1 -or $result.result.resistance_ohm -ne 50 -or
+             $result.result.range -cne 'high')) {
+            Fail-Case $step.name 'readback_mismatch' 'CR-LED status differs from the expected settings.'
+        }
+        if ($step.ContainsKey('slow') -and $result.result.enabled -cne $step.slow) {
+            Fail-Case $step.name 'readback_mismatch' 'Current Slow Rise state differs from the expected setting.'
+        }
         if ($InputTimerOnly -and $step.command -in @('set-input-timer', 'input-timer-enable', 'input-timer-disable')) {
             Assert-InputOff $result $step.name
         }
@@ -831,7 +883,8 @@ try {
             $report.prechecks.input_off = 'BLOCKED'
             $report.status = 'BLOCKED'
         }
-        if ($step.command -in @('input-state', 'input-off', 'set-cc', 'set-cv', 'set-cr', 'set-cw',
+        if ($step.command -in @('input-state', 'input-off', 'set-cc', 'set-cv', 'set-cr', 'set-cr-led', 'set-cw',
+                               'current-slow-rise-enable', 'current-slow-rise-disable',
                                'set-transient-cc', 'set-transient-cv', 'set-transient-cr', 'set-transient-cw',
                                'transient-enable', 'transient-disable')) {
             Assert-InputOff $result $step.name
@@ -839,7 +892,7 @@ try {
         if ($step.command -eq 'input-on' -and $result.result.input_state -cne 'ON') {
             Fail-Case $step.name 'input_on_not_confirmed' 'Input ON was not confirmed.'
         }
-        $observedRange = $(if ($step.command -eq 'set-cc') { $result.result.range } else {
+        $observedRange = $(if ($null -ne $result.result.range) { $result.result.range } else {
             $result.result.configuration.range
         })
         if ($step.ContainsKey('expected_range') -and $observedRange -cne $step.expected_range) {

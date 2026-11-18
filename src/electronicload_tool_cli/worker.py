@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 from electronicload_tool_core.control import (CONTROL_COMMANDS, execute as control_execute,
                                               resolve_fixed_range, validate_power,
                                               validate_fixed_cc_slew, validate_von, validate_input_timer,
-                                              validate_average,
+                                              validate_average, validate_vdrop, CR_COMMANDS,
                                               FIXED_RANGE_COMMANDS, FIXED_RANGE_CHOICES,
                                               TRANSIENT_FIELDS, TRANSIENT_SETUP_COMMANDS, validate_transient,
                                               LIST_COMMANDS, LIST_FIELDS,
@@ -117,6 +117,7 @@ class Runtime:
                 backend=self.backend, model_id=MODEL_ID,
                 current=arguments.get("current"), voltage=arguments.get("voltage"),
                 resistance=arguments.get("resistance"),
+                vdrop=arguments.get("vdrop"),
                 power=arguments.get("power"),
                 range_name=(None if command in {*TRANSIENT_SETUP_COMMANDS, "set-list-cc"}
                             else arguments.get("range")),
@@ -244,6 +245,7 @@ def _arguments(command, raw, runtime):
     permitted = ({"current", "range", "rise_slew", "fall_slew"} if command == "set-cc" else
                  {"voltage", "range"} if command == "set-cv" else
                  {"resistance", "range"} if command == "set-cr" else
+                 {"resistance", "range", "vdrop"} if command == "set-cr-led" else
                  {"power"} if command == "set-cw" else
                  {"voltage", "latch"} if command == "set-von" else
                  {"seconds"} if command == "set-input-timer" else
@@ -298,11 +300,15 @@ def _arguments(command, raw, runtime):
                 or type(raw["voltage"]) not in (int, float, Decimal)):
             raise LoadError("argument_error", "CV requires voltage and range.")
         resolve_fixed_range(command, raw["voltage"], raw["range"])
-    if command == "set-cr":
+    if command in CR_COMMANDS:
         if (set(raw) != permitted or not isinstance(raw["range"], str)
                 or type(raw["resistance"]) not in (int, float, Decimal)):
             raise LoadError("argument_error", "CR requires resistance and range.")
         resolve_fixed_range(command, raw["resistance"], raw["range"])
+        if command == "set-cr-led":
+            if type(raw["vdrop"]) not in (int, float, Decimal):
+                raise LoadError("argument_error", "Vdrop must be a JSON number.")
+            validate_vdrop(raw["vdrop"])
     if command == "set-cw":
         if set(raw) != permitted or type(raw["power"]) not in (int, float, Decimal):
             raise LoadError("argument_error", "CW requires power as a JSON number.")

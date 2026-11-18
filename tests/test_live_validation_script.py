@@ -114,6 +114,18 @@ def assert_report(result, expected, modes):
                 for step in ('trigger-1', 'trigger-2'):
                     assert cases[f'{prefix}-{step}']['command'] == 'transient-trigger'
                 assert cases[f'{prefix}-disable']['command'] == 'transient-disable'
+    if 'cr-led' in modes:
+        expected_names += ['cr-led-set', 'cr-led-status-on', 'cr-led-plain-cr', 'cr-led-status-off',
+                           'cr-led-set-again', 'cr-led-leave-for-cc', 'cr-led-status-after-cc',
+                           'cr-led-final-input-state']
+        assert cases['cr-led-set']['expected_range'] == cases['cr-led-plain-cr']['expected_range'] == 'high'
+        assert cases['cr-led-leave-for-cc']['arguments'][-2:] == ['--hardware-validation', 'cr-led']
+    if 'current-slow-rise' in modes:
+        expected_names += ['slow-rise-set-cc', 'slow-rise-enable', 'slow-rise-explicit-input-off',
+                           'slow-rise-status-after-off', 'slow-rise-repeat-cc', 'slow-rise-status-after-cc',
+                           'slow-rise-disable', 'slow-rise-status-disabled', 'slow-rise-final-input-state']
+        assert cases['slow-rise-explicit-input-off']['command'] == 'input-off'
+        assert cases['slow-rise-disable']['arguments'] == ['--hardware-validation', 'current-slow-rise']
     assert list(cases) == expected_names
     assert report['summary_counts']['total'] == report['summary_counts']['not_run'] == len(expected_names)
     assert len(report['cases']) == len(expected_names)  # No duplicate selected trials.
@@ -134,6 +146,22 @@ def assert_report(result, expected, modes):
 def test_fixed_auto_offline_preflight(run_script):
     result = run_script(['-FixedAutoOnly'], preflight=True)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_cr_led_slow_rise_offline_preflight(run_script):
+    result = run_script(['-CrLedSlowRiseOnly'], preflight=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'PASS: CR-LED and Current Slow Rise preflight' in result.stdout
+
+
+@pytest.mark.parametrize('modes', [('cr-led',), ('current-slow-rise',), ('cr-led', 'current-slow-rise')])
+def test_cr_led_slow_rise_script_plans_and_refuses_unattended(run_script, modes):
+    selection = ['-Modes', ','.join(modes)]
+    for args, expected in [(selection + ['-PlanOnly'], 'PLAN ONLY'), (selection, 'BLOCKED')]:
+        result = run_script(args)
+        report = assert_report(result, expected, modes)
+        assert all(case['command'] != 'input-on' for case in report['cases'])
+    assert 'requires an interactive console' in result.stdout
 
 
 def test_fixed_slew_von_short_offline_preflight(run_script):

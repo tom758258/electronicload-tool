@@ -15,7 +15,7 @@ from electronicload_tool_core.control import (CONTROL_COMMANDS, execute as contr
                                               validate_power, TRANSIENT_FIELDS, LIST_COMMANDS,
                                               FIXED_RANGE_COMMANDS, FIXED_RANGE_CHOICES,
                                               TRANSIENT_SETUP_COMMANDS, AUXILIARY_COMMANDS,
-                                              AVERAGE_COMMANDS)
+                                              AVERAGE_COMMANDS, CR_COMMANDS)
 from electronicload_tool_core.trace import (CONFIG_FIELDS, CSV_FIELDS, SAMPLE_FIELDS,
                                            TRACE_COMMANDS, execute as trace_execute)
 from .json_input import decode_decimal_json
@@ -107,7 +107,8 @@ def main(argv: list[str] | None = None) -> int:
         if name in CONTROL_COMMANDS and name not in (*LIST_COMMANDS, *AUXILIARY_COMMANDS,
                                                      *AVERAGE_COMMANDS):
             sub.add_argument("--hardware-validation", choices=("input-timer", "cv", "cr", "cw", "transient-cc",
-                                                               "transient-cv", "transient-cr", "transient-cw"),
+                                                               "transient-cv", "transient-cr", "transient-cw",
+                                                               "cr-led", "current-slow-rise"),
                              help="Explicit contributor hardware-validation scope; not Product LIVE.")
             sub.add_argument("--validation-settings-json",
                              help="Expected complete setup for validation enable, ON and trigger.")
@@ -134,9 +135,11 @@ def main(argv: list[str] | None = None) -> int:
         elif name == "set-cv":
             sub.add_argument("--voltage", required=True)
             sub.add_argument("--range", required=True, choices=FIXED_RANGE_CHOICES)
-        elif name == "set-cr":
+        elif name in CR_COMMANDS:
             sub.add_argument("--resistance", required=True, help="Resistance in ohms (offline only).")
             sub.add_argument("--range", required=True, choices=FIXED_RANGE_CHOICES)
+            if name == "set-cr-led":
+                sub.add_argument("--vdrop", required=True, help="LED voltage drop in volts (offline only).")
         elif name == "set-cw":
             sub.add_argument("--power", required=True, help="Power in watts (offline only).")
         elif name == "set-von":
@@ -253,6 +256,7 @@ def main(argv: list[str] | None = None) -> int:
                 current=getattr(args, "current", None),
                 voltage=getattr(args, "voltage", None),
                 resistance=getattr(args, "resistance", None),
+                vdrop=getattr(args, "vdrop", None),
                 power=getattr(args, "power", None),
                 range_name=(None if args.command in TRANSIENT_SETUP_COMMANDS
                             else getattr(args, "range", None)),

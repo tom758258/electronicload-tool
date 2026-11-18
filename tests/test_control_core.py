@@ -389,7 +389,9 @@ def test_live_control_product_scope_preserves_safety_and_input_confirmation(monk
 
     result = control.execute('set-cc', resource=RESOURCE, current=0.1, range_name='low')
     assert result['input_state'] == 'OFF'
-    assert 'INP ON' not in fake.calls
+    assert [call for call in fake.calls if '?' not in call] == [
+        'SYST:REM', 'FUNC:MODE FIX', 'FUNC CURR', 'CURR:RANG 0.1', 'CURR 0.1']
+    assert not any(call.startswith(('RES:LED', 'RES:VDR', 'CURR:SLEW:STAT')) for call in fake.calls)
 
     with pytest.raises(LoadError) as err:
         control.execute('input-on', resource=RESOURCE)
@@ -400,6 +402,27 @@ def test_live_control_product_scope_preserves_safety_and_input_confirmation(monk
     assert control.execute('input-off', resource=RESOURCE)['input_state'] == 'OFF'
     assert fake.calls.count('INP ON') == 1
     assert fake.calls.count('INP OFF') == 1
+
+
+@pytest.mark.parametrize('after_remote', [False, True])
+def test_product_live_cc_refuses_cr_origin_without_unapproved_scpi(monkeypatch, after_remote):
+    fake = Fake()
+    if after_remote:
+        write = fake.write
+
+        def enter_remote(command):
+            write(command)
+            fake.function = 'RES'
+
+        monkeypatch.setattr(fake, 'write', enter_remote)
+    else:
+        fake.function = 'RES'
+    session(fake, monkeypatch)
+    with pytest.raises(LoadError) as error:
+        live('set-cc', current='0.1', range_name='low')
+    assert error.value.code == 'unsupported_live_scope'
+    assert [call for call in fake.calls if '?' not in call] == (['SYST:REM'] if after_remote else [])
+    assert not any(call.startswith(('RES:LED', 'RES:VDR', 'CURR:SLEW:STAT')) for call in fake.calls)
 
 
 @pytest.mark.parametrize('kwargs,code', [
@@ -675,7 +698,7 @@ def test_remote_failure_does_not_attempt_cc_or_input_on(monkeypatch):
         live('set-cc', current=0.1, range_name='low')
     assert error.value.code == 'write_failed'
     assert error.value.details['completed_steps'] == []
-    assert fake.calls == ['*IDN?', 'INP:STAT?', 'SYST:REM']
+    assert fake.calls == ['*IDN?', 'INP:STAT?', 'FUNC?', 'SYST:REM']
     assert not fake.input
 
 
@@ -881,6 +904,91 @@ def test_cr_readback_mismatch_fails_without_input_on():
         control.execute('set-cr', mode='simulate', resistance=5, range_name='low', simulator=sim)
     assert error.value.code == 'readback_mismatch'
     assert sim.input_on is False
+
+
+def test_cr_led_preview_status_and_plain_cr():
+    sim = ControlSimulator()
+    before = vars(sim).copy()
+    settings = {'resistance': '10', 'range_name': 'auto', 'vdrop': '120.0000000000000001'}
+    plan = control.execute('set-cr-led', mode='dry-run', simulator=sim, **settings)
+    assert plan['range'] == 'low' and plan['led_enabled'] and not plan['hardware_access']
+    assert plan['vdrop_v'] == settings['vdrop'] and vars(sim) == before
+    active = control.execute('set-cr-led', mode='simulate', simulator=sim, **settings)
+    assert active['fixed_cr'] and active['led_enabled']
+    assert active['vdrop_v'] == plan['vdrop_v']
+    sim.input_on = True
+    before = vars(sim).copy()
+    status = control.execute('cr-led-status', mode='simulate', simulator=sim)
+    assert status['led_enabled'] and status['resistance_ohm'] == 10
+    with pytest.raises(LoadError, match='Input must be confirmed OFF'):
+        control.execute('set-cr-led', mode='simulate', simulator=sim, **settings)
+    assert vars(sim) == before
+    control.execute('input-off', mode='simulate', simulator=sim)
+    plain = control.execute('set-cr', mode='simulate', simulator=sim, resistance='10', range_name='high')
+    assert plain['fixed_cr'] and not plain['led_enabled'] and plain['range'] == 'high'
+    assert plain['vdrop_v'] == settings['vdrop']
+
+
+@pytest.mark.parametrize('vdrop', [None, True, 'NaN', 'Infinity', '-0.01', {}])
+def test_cr_led_invalid_vdrop_does_not_write(vdrop):
+    sim = ControlSimulator()
+    before = vars(sim).copy()
+    with pytest.raises(LoadError) as error:
+        control.execute('set-cr-led', mode='simulate', simulator=sim,
+                        resistance='10', range_name='auto', vdrop=vdrop)
+    assert error.value.code == 'invalid_vdrop'
+    assert vars(sim) == before
+
+
+_LIST_SETUP = {'range': 'low', 'repeat_count': 1,
+               'steps': [{'current_a': current, 'slew_a_per_us': 0.1, 'width_s': 0.1}
+                         for current in (0.1, 0.2)]}
+
+
+@pytest.mark.parametrize('command,arguments', [
+    ('set-cv', {'voltage': '3', 'range_name': 'low'}),
+    ('set-cw', {'power': '1'}),
+    ('set-transient-cw', {'transient': {'transient_mode': 'toggle', 'level_a': '1', 'level_b': '2'}}),
+    ('set-list-cc', {'list_configuration': _LIST_SETUP}),
+    ('list-recall', {'slot': 1}),
+])
+def test_mode_selection_blocks_slow_rise_and_clears_cr_led_after_guards(command, arguments):
+    sim = ControlSimulator()
+
+    def run(name, **options):
+        return control.execute(name, mode='simulate', simulator=sim, **options)
+
+    if command == 'list-recall':
+        run('set-list-cc', list_configuration=_LIST_SETUP)
+        run('list-save', slot=1)
+        run('list-exit')
+    run('current-slow-rise-enable')
+    with pytest.raises(LoadError) as error:
+        run(command, **arguments)
+    assert error.value.code == 'current_slow_rise_enabled'
+    assert sim.mode == 'FIX' and sim.function == 'CURR'
+    run('current-slow-rise-disable')
+    run('set-cr-led', resistance='50', range_name='auto', vdrop='0')
+    run(command, **arguments)
+    assert run('cr-led-status')['led_enabled'] is False
+
+
+def test_slow_rise_preserves_fixed_cc_slew_and_is_readable_with_input_on():
+    sim = ControlSimulator()
+
+    def run(command, **arguments):
+        return control.execute(command, mode='simulate', simulator=sim, **arguments)
+
+    run('current-slow-rise-enable')
+    run('set-cc', current='0.1', range_name='low', rise_slew='0.1', fall_slew='0.2')
+    run('input-on', confirmed=True)
+    with pytest.raises(LoadError, match='Input must be confirmed OFF'):
+        run('current-slow-rise-disable')
+    assert run('current-slow-rise-status') == {'enabled': True}
+    run('input-off')
+    assert run('current-slow-rise-status') == {'enabled': True}
+    assert run('current-slow-rise-disable')['enabled'] is False
+    assert sim.fixed_cc_slew == {'rise_slew_a_per_us': '0.1', 'fall_slew_a_per_us': '0.2'}
 
 
 @pytest.mark.parametrize('validation', [False, True])
