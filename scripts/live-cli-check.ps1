@@ -53,6 +53,7 @@ $selectedModes = @($supportedModes | Where-Object { $_ -in $requestedModes })
 $hasValidationModes = @($selectedModes | Where-Object { $_ -ne 'cc' }).Count -gt 0
 $traceSelected = 'trace' -in $selectedModes
 $traceCommunicationUntrusted = $false
+$traceFeedStopUnconfirmed = $false
 $traceStartDeadlineMs = 120000
 $traceRunName = 'readonly-live-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfff') + '-' +
     [Guid]::NewGuid().ToString('N').Substring(0, 8)
@@ -324,7 +325,8 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
         if ($process.ExitCode -ne 0 -or $result.ok -ne $true) {
             $code = [string]$result.error.code
             $entry['error_code'] = $(if ($code -cmatch '^[a-z_]+$') { $code } else { 'execution_failed' })
-            if ($script:traceSelected -and $result.error.details.feed_stop_unconfirmed -eq $true) {
+            if ($traceCase -and $result.error.details.feed_stop_unconfirmed -eq $true) {
+                $script:traceFeedStopUnconfirmed = $true
                 $script:report.trace_safe_shutdown_unconfirmed = $true
             }
             if ($traceCase -and ($code -in @('trace_session_untrusted','query_failed',
@@ -883,7 +885,9 @@ try {
             Assert-Runtime $cleanup 'cleanup-input-off'
             Assert-InputOff $cleanup 'cleanup-input-off'
             $inputOnAttempted = $false
-            if ($traceSelected) { $report.trace_safe_shutdown_unconfirmed = $false }
+            if ($traceSelected -and -not $traceFeedStopUnconfirmed) {
+                $report.trace_safe_shutdown_unconfirmed = $false
+            }
             Write-Host 'PASS Explicit Input OFF cleanup'
         } catch {
             $report.status = 'FAIL'
