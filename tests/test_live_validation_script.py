@@ -34,7 +34,7 @@ def run_script(tmp_path):
         directory = tmp_path / name.lower()
         directory.mkdir()
         env[name] = str(directory)
-    def run(extra, *, source_limits=True, mode_array=None, preflight=False):
+    def run(extra, *, source_limits=False, mode_array=None, preflight=False):
         args = ([str(ROOT / 'scripts/preflight-cli.ps1')] if preflight else
                 [str(ROOT / 'scripts/live-cli-check.ps1'), '-Target', 'itech-it8812c',
                  '-Resource', RESOURCE])
@@ -179,6 +179,7 @@ def test_plan_only_console_summary_and_verbose_steps(run_script):
     assert normal.returncode == 0, normal.stdout + normal.stderr
     assert 'PLAN ONLY COMPLETE' in normal.stdout
     assert 'Selected modes:' in normal.stdout
+    assert 'External source (operator-managed): 5 V / 0.8 A current limit.' in normal.stdout
     assert 'transient-continuous-auto-setup:' not in normal.stdout
     assert '--validation-settings-json' not in normal.stdout
     assert normal.stdout.count('Report: ') == 1
@@ -213,15 +214,65 @@ def test_hardware_script_unattended_refusal(run_script, selection):
 
 
 def test_hardware_script_selected_parameter_checks(run_script):
-    # Unselected Transient settings/source limits cannot block CC-only planning.
+    # Unselected Transient settings do not affect CC-only planning.
     assert_report(run_script(['-PlanOnly', '-Modes', 'cc', '-LevelA', '3'], source_limits=False),
                   'PLAN ONLY', ('cc',))
     # A CV-only plan does not validate CC/Transient-only settings.
     assert_report(run_script(['-PlanOnly', '-Modes', 'cv', '-Current', '3', '-LevelA', '3']),
                   'PLAN ONLY', ('cv',))
-    result = run_script(['-PlanOnly', '-Modes', 'cv'], source_limits=False)
-    assert result.returncode == 2
-    assert 'requires declared source limits' in result.stdout
+    report = assert_report(run_script(['-PlanOnly', '-Modes', 'cv'], source_limits=False),
+                           'PLAN ONLY', ('cv',))
+    assert report['declared_source_limits']['current_a'] == 0.8
+    assert report['declared_source_limits']['voltage_v'] == 5
+
+
+@pytest.mark.parametrize('parameter,value', [
+    ('-SourceCurrentLimitA', '0'),
+    ('-SourceCurrentLimitA', '2.1'),
+    ('-SourceVoltageLimitV', '0'),
+    ('-SourceVoltageLimitV', '18.1'),
+])
+def test_hardware_script_rejects_invalid_source_limits(run_script, parameter, value):
+    result = run_script(['-PlanOnly', '-Modes', 'cc', parameter, value])
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert 'Declared source limits must be' in result.stdout
+    assert 'Report:' not in result.stdout
+
+
+@pytest.mark.parametrize('selection,extra', [
+    ('cc', ['-Current', '0.9']),
+    ('trace', ['-Current', '0.9']),
+    ('transient-cc', ['-LevelA', '0.9']),
+    ('transient-cc', ['-LevelB', '0.9']),
+])
+def test_hardware_script_current_respects_source_limit(run_script, selection, extra):
+    result = run_script(['-PlanOnly', '-Modes', selection, *extra])
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert 'must not exceed the declared source current limit' in result.stdout
+    assert 'Report:' not in result.stdout
+
+
+def test_hardware_script_source_override_and_cv_defaults(run_script):
+    override = run_script([
+        '-PlanOnly', '-Modes', 'cc,transient-cc', '-Current', '1',
+        '-LevelA', '0.9', '-LevelB', '1',
+        '-SourceCurrentLimitA', '1.2', '-SourceVoltageLimitV', '12',
+    ])
+    report = assert_report(override, 'PLAN ONLY', ('cc', 'transient-cc'))
+    assert report['declared_source_limits']['current_a'] == 1.2
+    assert report['declared_source_limits']['voltage_v'] == 12
+
+    cv = assert_report(run_script(['-PlanOnly', '-Modes', 'cv,transient-cv']),
+                       'PLAN ONLY', ('cv', 'transient-cv'))
+    cases = {case['name']: case for case in cv['cases']}
+    for name in ('cv-low-setup', 'cv-high-setup'):
+        args = cases[name]['arguments']
+        assert args[args.index('--voltage') + 1] == '3'
+    for name in ('transient-cv-continuous-setup', 'transient-cv-pulse-setup',
+                 'transient-cv-toggle-setup'):
+        args = cases[name]['arguments']
+        assert args[args.index('--level-a') + 1] == '3'
+        assert args[args.index('--level-b') + 1] == '4'
 
 
 def test_transient_offline_preflight(run_script):
@@ -422,15 +473,22 @@ def test_input_timer_script_plan_and_live_refusal(run_script, planned):
 
 @pytest.mark.parametrize('extra', [['-Modes', 'cc'], ['-TimerSeconds', '0'],
                                    ['-TimerSeconds', '11'], ['-TimerSeconds', '1.5'],
-                                   ['-Current', '3']])
+                                   ['-Current', '0.9'], ['-Current', '3']])
 def test_input_timer_script_invalid_settings_and_selection(run_script, extra):
     result = run_script(['-InputTimerOnly', *extra])
     assert result.returncode != 0, result.stdout + result.stderr
+    if extra == ['-Current', '0.9']:
+        assert 'CC current must not exceed the declared source current limit.' in result.stdout
+        assert 'Report:' not in result.stdout
 
 
-def test_input_timer_script_requires_source_limits(run_script):
+def test_input_timer_script_uses_default_source_limits(run_script):
     result = run_script(['-InputTimerOnly', '-PlanOnly'], source_limits=False)
-    assert result.returncode == 2, result.stdout + result.stderr
+    assert result.returncode == 0, result.stdout + result.stderr
+    paths = re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)
+    report = json.loads(Path(paths[-1]).read_text(encoding='utf-8-sig'))
+    assert report['declared_source_limits']['current_a'] == 0.8
+    assert report['declared_source_limits']['voltage_v'] == 5
 
 
 def test_trace_validation_preflight_only(run_script):
@@ -519,6 +577,8 @@ def test_trace_validation_script_interactive_fake_cleanup_and_results(
         os.close(slave)
     assert confirmed
     console = transcript.read_text(encoding='utf-8')
+    assert 'manually set to 12 V with a 0.5 A current limit' in console
+    assert 'independent manual Input OFF procedure' in console
     assert process.returncode == (0 if failure == 'none' else 3), console
     calls = [json.loads(line) for line in command_log.read_text().splitlines()]
     commands = [row[0] for row in calls]

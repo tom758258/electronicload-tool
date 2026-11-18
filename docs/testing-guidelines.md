@@ -65,8 +65,8 @@ modes while retaining common read-only safety prechecks and each selected
 mode's explicit Input ON/OFF flow. Test its `-PlanOnly` operation and unattended
 LIVE refusal with a **fictional** USB Resource. In noninteractive LIVE runs, verify it refuses before opening any VISA
 session or sending SCPI. The Script supplies the CLI's per-command
-`input-on --confirm` during approved interactive execution. CC defaults to 0.1 A, with a
-2 A script-only hard ceiling.
+`input-on --confirm` during approved interactive execution. CC defaults to 0.1 A, with a 2 A script-only hard ceiling and a
+default operator-declared source limit of 0.8 A at 5 V.
 Verify redacted shareable case totals and normal mode's lack of private raw
 logs; `-DebugArtifacts` uses the existing private/raw location without
 changing authorization. No hardware is permitted in automated checks.
@@ -175,13 +175,17 @@ unavailable PowerShell is reported as SKIP, not a successful script check.
 For mode-selection changes alone, run only `tests/test_live_validation_script.py`
 and Ruff on that modified Python file. Verify default all-mode, every single
 mode, comma-separated/PowerShell-array selections, invalid-mode refusal,
-unchanged interactive confirmation and source-limit gates, selected case totals, and NOT RUN
+interactive confirmation and default 5 V / 0.8 A source declarations, allowed
+source overrides, selected case totals, and NOT RUN
 for planned cases. Unselected modes must have no cases or PASS counts.
 Keep every existing Transient mode/range, repeated trigger, status and OFF/disable
 step. Check CV/CR/CW Continuous/Pulse/Toggle plans, Core-resolved Auto range,
 mode-specific numeric tokens and no slew/Range where inapplicable. Preserve
 the 30-second command and 900-second total deadlines; more cases do not
-authorize a larger budget. Verify cleanup retains the active Transient scope. No unrelated Core/CLI/Worker, local full-suite, release or packaging checks
+authorize a larger budget. Verify direct CC/Transient CC current setpoints cannot exceed the declared
+source current limit, and the default CV/Transient CV plans use 3 V / 3–4 V.
+Verify cleanup retains the active Transient scope. No unrelated Core/CLI/Worker,
+local full-suite, release or packaging checks
 are required for this script-only behavior change.
 Exercise failure cleanup with a fake CLI/VISA process as appropriate: failure
 after a possible ON must attempt explicit OFF, an enabled Transient is disabled
