@@ -14,16 +14,16 @@ param(
     [ValidateSet('system')][string]$Backend = 'system',
     [string]$Current = '0.1',
     [string[]]$Modes = @('cc', 'cv', 'cr', 'cw', 'transient-cc', 'transient-cv', 'transient-cr', 'transient-cw'),
-    [double]$SourceCurrentLimitA,
-    [double]$SourceVoltageLimitV,
-    [string]$Voltage = '5',
+    [double]$SourceCurrentLimitA = 0.8,
+    [double]$SourceVoltageLimitV = 5,
+    [string]$Voltage = '3',
     [string]$ResistanceLow = '10',
     [string]$ResistanceHigh = '1000',
     [string]$Power = '1',
     [string]$LevelA = '0.1',
     [string]$LevelB = '0.2',
-    [string]$VoltageLevelA = '5',
-    [string]$VoltageLevelB = '6',
+    [string]$VoltageLevelA = '3',
+    [string]$VoltageLevelB = '4',
     [string]$ResistanceLevelA = '10',
     [string]$ResistanceLevelB = '1000',
     [string]$PowerLevelA = '1',
@@ -504,25 +504,28 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Timer validation seconds must be an integer from 3 through 10.' }
     }
 
-    if ($hasValidationModes) {
-        # Script-only operator envelope, not a substitute for source current limiting.
-        if ([double]::IsNaN($SourceCurrentLimitA) -or [double]::IsInfinity($SourceCurrentLimitA) -or
-            [double]::IsNaN($SourceVoltageLimitV) -or [double]::IsInfinity($SourceVoltageLimitV) -or
-            $SourceCurrentLimitA -le 0 -or $SourceCurrentLimitA -gt 2 -or
-            $SourceVoltageLimitV -le 0 -or $SourceVoltageLimitV -gt 18) {
-            throw 'CV/CR/CW/Transient validation requires declared source limits: >0 to 2 A and >0 to 18 V.'
-        }
-        $report.declared_source_limits = [ordered]@{
-            current_a = $SourceCurrentLimitA; voltage_v = $SourceVoltageLimitV
-            verification = 'operator-declared; script does not configure or verify the source'
-        }
+    # Script-only operator-declared envelope; this does not set or read back the source.
+    if ([double]::IsNaN($SourceCurrentLimitA) -or [double]::IsInfinity($SourceCurrentLimitA) -or
+        [double]::IsNaN($SourceVoltageLimitV) -or [double]::IsInfinity($SourceVoltageLimitV) -or
+        $SourceCurrentLimitA -le 0 -or $SourceCurrentLimitA -gt 2 -or
+        $SourceVoltageLimitV -le 0 -or $SourceVoltageLimitV -gt 18) {
+        throw 'Declared source limits must be >0 to 2 A and >0 to 18 V.'
     }
-    if ($traceSelected -and [decimal]$currentText -gt [decimal]$SourceCurrentLimitA) {
-        throw 'TRACE CC current must not exceed the declared source current limit.'
+    $report.declared_source_limits = [ordered]@{
+        current_a = $SourceCurrentLimitA; voltage_v = $SourceVoltageLimitV
+        verification = 'operator-declared; script does not configure or verify the source'
+    }
+    if (('cc' -in $selectedModes -or $traceSelected -or $InputTimerOnly) -and
+        [decimal]$currentText -gt [decimal]$SourceCurrentLimitA) {
+        throw 'CC current must not exceed the declared source current limit.'
     }
     if ('transient-cc' -in $selectedModes) {
         & $python -c 'from decimal import Decimal; import sys; a,b=map(Decimal,sys.argv[1:]); assert 0 <= a <= 2 and 0 <= b <= 2' $LevelA $LevelB
         if ($LASTEXITCODE -ne 0) { throw 'Transient levels must be within the script ceiling of 2 A.' }
+        if ([decimal]$LevelA -gt [decimal]$SourceCurrentLimitA -or
+            [decimal]$LevelB -gt [decimal]$SourceCurrentLimitA) {
+            throw 'Transient CC levels must not exceed the declared source current limit.'
+        }
     }
     $highArgs = @('--current', $currentText, '--range', 'high')
     $lowArgs = @('--current', $currentText, '--range', 'low')
@@ -718,9 +721,8 @@ try {
         Write-Host 'Transient: Continuous/Pulse/Toggle, Low/High/Auto, repeated triggers, control status and separate disable.'
         Write-Host 'Trigger/status/measure do not establish waveform shape, timing or completion.'
     }
-    if ($hasValidationModes) {
-        Write-Host "Declared source limits: $SourceCurrentLimitA A / $SourceVoltageLimitV V; configure these on the source first."
-    }
+    Write-Host "External source (operator-managed): $SourceVoltageLimitV V / $SourceCurrentLimitA A current limit."
+    Write-Host 'The script does not configure, measure or verify the external source.'
     foreach ($step in $planned) { Write-Verbose ("  {0}: {1} {2}" -f $step.name, $step.command, ($step.args -join ' ')) }
     if ('cc' -in $selectedModes) { Write-Host "CC Current=$currentText A." }
     Write-Host "Script ceiling=$($report.script_current_ceiling_a) A; USB System VISA."
@@ -754,9 +756,12 @@ try {
     }
     $report.prechecks.preflight = 'PASS'
     Write-Host "Operator resource check (LIVE): Target: $Target; Resource: $Resource; Backend: $Backend"
-    Write-Host 'Confirm safe, bounded source/DUT, current limit and a manual Input OFF contingency.'
-    Write-Host 'Each trial deliberately tests Input ON and explicitly commands/verifies OFF; source/DUT must tolerate every planned setting (use -Verbose or the report to review details).'
-    $ack = Read-Host 'With approved hardware setup, press Enter to run selected CLI cases (Ctrl+C to cancel)'
+    Write-Host 'Physical checks before pressing Enter:'
+    Write-Host "- Confirm the external source is manually set to $SourceVoltageLimitV V with a $SourceCurrentLimitA A current limit."
+    Write-Host '- Confirm physical load Input OFF, safe wiring/DUT and tolerance of every selected setting (use -Verbose or the report).'
+    Write-Host '- Confirm no other application controls this instrument and an independent manual Input OFF procedure is available.'
+    Write-Host '- Selected trials may deliberately turn Input ON; the script explicitly commands and verifies OFF, but cannot guarantee OFF after communication failures.'
+    $ack = Read-Host 'After completing these checks, press Enter to run selected CLI cases (Ctrl+C to cancel)'
     if ($ack -cne '') {
         $report.status = 'BLOCKED'
         Save-Report
