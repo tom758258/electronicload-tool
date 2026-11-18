@@ -12,7 +12,7 @@ from time import monotonic, sleep
 
 from .errors import LoadError, communication_error
 from .identity import MODEL_ID, parse_identity
-from .visa import open_session, validate_connection
+from .visa import open_session, require_trusted_session, validate_connection
 from .simulator import ControlSimulator
 
 TRANSIENT_SETUP_COMMANDS = {"set-transient-cc": "CC", "set-transient-cv": "CV",
@@ -893,6 +893,8 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
     if model_id != MODEL_ID:
         raise LoadError("unsupported_model", "The requested profile is not registered.")
     validate_connection(resource, backend, required=mode == "live")
+    if mode == "simulate":
+        require_trusted_session(simulator)
     if command in AVERAGE_COMMANDS:
         if (any(value is not None for value in (current, voltage, resistance, power, range_name,
                 transient, hardware_validation, validation_settings, list_configuration, slot,

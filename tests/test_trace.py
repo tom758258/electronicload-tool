@@ -11,7 +11,7 @@ from pyvisa.constants import StatusCode
 from pyvisa.errors import VisaIOError
 
 from electronicload_tool_cli.cli import main
-from electronicload_tool_core import trace
+from electronicload_tool_core import control, readonly, trace
 from electronicload_tool_core.errors import LoadError
 from electronicload_tool_core.simulator import ControlSimulator
 
@@ -173,6 +173,34 @@ def test_trace_start_revalidates_the_capture_duration(tmp_path):
     assert not list(tmp_path.iterdir())
 
 
+@pytest.mark.parametrize("ignored_write", ["TRAC:FEED:CONT NEXT", "TRIG"])
+def test_trace_does_not_accept_stale_data_if_arm_or_trigger_was_ignored(clock, ignored_write):
+    session = RecordingVISA({"STAT:QUES:COND?": "0"})
+    session.trace_data = "99 8,98 7"
+    write = session.write
+
+    def ignore_write(command):
+        if command == ignored_write:
+            session.calls.append(command)
+        else:
+            write(command)
+
+    session.write = ignore_write
+    with pytest.raises(LoadError) as caught:
+        start(session)
+    if ignored_write == "TRIG":
+        assert caught.value.code == "trace_timeout"
+        assert caught.value.details["feed"] == "NEVER"
+        assert session.calls.count("TRIG") == 1
+    else:
+        assert caught.value.code == "trace_arm_unconfirmed"
+        assert "TRIG" not in session.calls
+    assert ("TRAC:DATA?", 30000) not in session.calls
+    assert session.calls.count("TRAC:FEED:CONT NEXT") == 1
+    assert "TRAC:CLE" not in session.calls
+    assert session.trace_data == "99 8,98 7"
+
+
 @pytest.mark.parametrize(("source", "function", "payload", "sample", "status"), [
     ("VOLT", "CURR", "2.5,2.6,", {"voltage_v": 2.5}, "0"),
     ("CURR", "VOLT", "0.1,0.2", {"current_a": 0.1}, "32768"),
@@ -201,6 +229,8 @@ def test_trace_start_reads_one_valid_batch_with_independent_visa_timeout(
     assert result["sample_count"] == 2 and result["samples"][0] == {"sample_index": 1, **sample}
     assert datetime.fromisoformat(result["read_timestamp_utc_plus_8"]).utcoffset() == timedelta(hours=8)
     assert [call for call in session.calls if isinstance(call, str)] == ["TRAC:FEED:CONT NEXT", "TRIG"]
+    arm = session.calls.index("TRAC:FEED:CONT NEXT")
+    assert session.calls[arm + 1:arm + 3] == [("TRAC:FEED:CONT?", 5000), "TRIG"]
     assert session.calls[-3:] == [("STAT:QUES:COND?", 5000), ("TRAC:DATA?", 30000), ("SYST:ERR?", 5000)]
     assert session.input_on and session.function == function and session.timeout == 5000
 
@@ -227,6 +257,22 @@ def test_trace_unsuccessful_batch_retains_header_and_never_retriggers(responses,
         assert session.calls[-1] == ("TRAC:DATA?", 30000)
 
 
+def test_trace_data_timeout_blocks_reuse_of_same_core_session(clock):
+    session = RecordingVISA({"TRAC:DATA?": VisaIOError(StatusCode.error_timeout)})
+    with pytest.raises(LoadError) as caught:
+        start(session)
+    assert caught.value.code == "trace_session_untrusted"
+    prior_calls = session.calls.copy()
+    for command in (configure, start,
+                    lambda device: readonly.execute("measure", mode="simulate", simulator=device),
+                    lambda device: control.execute("input-off", mode="simulate", simulator=device)):
+        with pytest.raises(LoadError) as caught:
+            command(session)
+        assert caught.value.code == "trace_session_untrusted"
+    assert session.calls == prior_calls
+    assert configure(RecordingVISA())["points"] == 4
+
+
 def test_trace_host_deadline_keeps_long_polling_bounded_and_cleans_feed(clock):
     session = RecordingVISA()
     session.trace_points = 50
@@ -235,7 +281,7 @@ def test_trace_host_deadline_keeps_long_polling_bounded_and_cleans_feed(clock):
     poll_times = []
 
     def query(command):
-        if command == "TRAC:FEED:CONT?" and session.trace_feed == "NEXT":
+        if command == "TRAC:FEED:CONT?" and session.trace_feed == "NEXT" and "TRIG" in session.calls:
             poll_times.append(clock.now)
             session.trace_capturing = False
         return original_query(command)

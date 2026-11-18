@@ -22,9 +22,9 @@ from electronicload_tool_core.readonly import (COMMANDS as READ_COMMANDS, NATIVE
                                                validate_metric, execute as read_execute)
 from electronicload_tool_core.simulator import ControlSimulator
 from electronicload_tool_core.trace import (CONFIG_FIELDS, CSV_FIELDS, TRACE_COMMANDS,
-                                           TraceSessionLost, execute as trace_execute,
+                                           execute as trace_execute,
                                            validate_configuration, validate_csv)
-from electronicload_tool_core.visa import validate_connection
+from electronicload_tool_core.visa import TraceSessionLost, mark_session_untrusted, validate_connection
 from .json_input import decode_decimal_json
 
 SCHEMA = 3
@@ -180,6 +180,8 @@ class Runtime:
     def _record_trace_safety(self, command, mode, outcome, session_lost):
         error = outcome["error"]
         if session_lost:
+            if mode == "simulate":
+                mark_session_untrusted(self.simulator)
             self.fatal_error = _error(
                 "worker", "trace_session_untrusted",
                 "Instrument communication is untrusted. Safe shutdown is unconfirmed.",
@@ -187,9 +189,10 @@ class Runtime:
             )
             self.trace_safety = {"state": "session_untrusted", "code": "trace_session_untrusted",
                                  "feed": "UNKNOWN", "input_state": "UNKNOWN"}
-        elif error and error["code"] == "trace_cancel_feed_unconfirmed":
+        elif error and error["details"].get("feed_stop_unconfirmed"):
+            input_state = self.trace_safety["input_state"] if self.trace_safety else "UNKNOWN"
             self.trace_safety = {"state": "restricted_recovery", "code": error["code"],
-                                 "feed": error["details"]["feed"], "input_state": "UNKNOWN"}
+                                 "feed": error["details"]["feed"], "input_state": input_state}
         elif self.trace_safety is not None and mode != "dry_run":
             if command in {"input-state", "input-off"}:
                 result = outcome["result"]
@@ -479,10 +482,13 @@ def run_worker(*, mode="simulate", resource=None, backend="system",
             server.serve_forever(poll_interval=0.05)
             if runtime.job_thread is not None:
                 runtime.job_thread.join()
+            trace_shutdown = ({"trace_safety": {**runtime.trace_safety,
+                                               "safe_shutdown_unconfirmed": True}}
+                              if runtime.trace_safety else {})
             runtime.emit("summary", ok=runtime.fatal_error is None,
                          fatal_error=runtime.fatal_error,
                          last_job=runtime.last_job, exit_code=0 if runtime.fatal_error is None else 3,
-                         **({"trace_safety": runtime.trace_safety} if runtime.trace_safety else {}))
+                         **trace_shutdown)
             return 0 if runtime.fatal_error is None else 3
     except OSError as exc:
         runtime.emit("error", error=_error("worker", "listen_failed", "Worker HTTP bind failed.",

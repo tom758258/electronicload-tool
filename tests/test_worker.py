@@ -1277,8 +1277,10 @@ def test_trace_worker_simulation_returns_full_batch_and_preserves_decimal_tokens
     assert http(ready['status_url'])[1]['last_job']['result'] == terminal['result']
 
 
-@pytest.mark.parametrize("scenario", ["cancel", "stop", "feed_still_next", "visa_timeout", "out_of_sync"])
-def test_trace_worker_cancel_stop_and_recovery(scenario, tmp_path):
+@pytest.mark.parametrize("scenario", [
+    "cancel", "stop", "feed_still_next", "visa_timeout", "out_of_sync", "deadline", "data_timeout",
+])
+def test_trace_worker_cancel_stop_and_recovery(scenario, tmp_path, monkeypatch):
     from http.server import ThreadingHTTPServer
 
     from pyvisa.constants import StatusCode
@@ -1286,19 +1288,24 @@ def test_trace_worker_cancel_stop_and_recovery(scenario, tmp_path):
 
     from electronicload_tool_cli import worker as worker_module
     from electronicload_tool_cli.worker_client import request as client_request
+    from electronicload_tool_core import trace
     from electronicload_tool_core.simulator import ControlSimulator
 
     armed = threading.Event()
     operations = []
     outcome = queue.Queue()
     worker_threads = set()
+    now = 0
+    if scenario == "deadline":
+        monkeypatch.setattr(trace, "monotonic", lambda: now)
 
     class HoldingVISA(ControlSimulator):
         def write(self, command):
+            nonlocal now
             operations.append(command)
             worker_threads.add(threading.get_ident())
             if command == "TRAC:FEED:CONT NEVER" and self.trace_feed == "NEXT":
-                if scenario == "feed_still_next":
+                if scenario in {"feed_still_next", "deadline"}:
                     return
                 if scenario == "visa_timeout":
                     raise VisaIOError(StatusCode.error_timeout)
@@ -1307,18 +1314,24 @@ def test_trace_worker_cancel_stop_and_recovery(scenario, tmp_path):
                     return
             super().write(command)
             if command == "TRIG":
-                self.trace_capturing = False
+                if scenario != "data_timeout":
+                    self.trace_capturing = False
+                if scenario == "deadline":
+                    now = 103680
                 armed.set()
 
         def query(self, command):
             operations.append(command)
             worker_threads.add(threading.get_ident())
+            if command == "TRAC:DATA?" and scenario == "data_timeout":
+                raise VisaIOError(StatusCode.error_timeout)
             return super().query(command)
 
     runtime = worker_module.Runtime(mode="simulate")
     runtime.simulator = HoldingVISA()
-    runtime.simulator.trace_points = 50
-    runtime.simulator.trace_interval = "3600"
+    if scenario != "data_timeout":
+        runtime.simulator.trace_points = 50
+        runtime.simulator.trace_interval = "3600"
     runtime.simulator.input_on = True
 
     def emit(event, **values):
@@ -1346,28 +1359,31 @@ def test_trace_worker_cancel_stop_and_recovery(scenario, tmp_path):
             assert code == 202
             assert armed.wait(3)
             worker_job_id = accepted['worker_job_id']
-            assert http(urls['command_url'], request('input-off'))[1]['error']['code'] == 'busy'
             cancel = {'schema_version': 3, 'worker_job_id': worker_job_id, 'reason': 'test'}
-            assert http(urls['cancel_url'], {**cancel, 'reason': 3})[0] == 400
-            assert http(urls['cancel_url'], {**cancel, 'worker_job_id': 'wrong'})[0] == 409
-            assert client_request(urls['cancel_url'], '/cancel', (
-                '{"schema_version":3,"worker_job_id":"wrong","worker_job_id":"'
-                + worker_job_id + '"}').encode())[0] == 400
-            assert outcome.empty()
-            if scenario == 'stop':
-                assert http(urls['stop_url'], {'schema_version': 3})[0] == 202
-            else:
-                assert http(urls['cancel_url'], cancel) == (202, {
-                    'schema_version': 3, 'run_id': runtime.run_id, 'status': 'accepted',
-                    'worker_job_id': worker_job_id, 'error': None,
-                })
+            if scenario not in {'deadline', 'data_timeout'}:
+                assert http(urls['command_url'], request('input-off'))[1]['error']['code'] == 'busy'
+                assert http(urls['cancel_url'], {**cancel, 'reason': 3})[0] == 400
+                assert http(urls['cancel_url'], {**cancel, 'worker_job_id': 'wrong'})[0] == 409
+                assert client_request(urls['cancel_url'], '/cancel', (
+                    '{"schema_version":3,"worker_job_id":"wrong","worker_job_id":"'
+                    + worker_job_id + '"}').encode())[0] == 400
+                assert outcome.empty()
+                if scenario == 'stop':
+                    assert http(urls['stop_url'], {'schema_version': 3})[0] == 202
+                else:
+                    assert http(urls['cancel_url'], cancel) == (202, {
+                        'schema_version': 3, 'run_id': runtime.run_id, 'status': 'accepted',
+                        'worker_job_id': worker_job_id, 'error': None,
+                    })
             terminal = outcome.get(timeout=3)
             assert terminal['worker_job_id'] == worker_job_id and not terminal['ok']
             assert terminal['error']['details']['csv_incomplete'] is True
             assert len(path.read_text().splitlines()) == 1
             assert runtime.simulator.input_on
-            assert operations.count('TRIG') == operations.count('TRAC:FEED:CONT NEVER') == 1
-            assert 'TRAC:CLE' not in operations and 'TRAC:DATA?' not in operations
+            assert operations.count('TRIG') == 1
+            assert operations.count('TRAC:FEED:CONT NEVER') == int(scenario != 'data_timeout')
+            assert operations.count('TRAC:DATA?') == int(scenario == 'data_timeout')
+            assert 'TRAC:CLE' not in operations
             assert 'INP OFF' not in operations and 'INP ON' not in operations
             assert len(worker_threads) == 1  # Device I/O stays on the job thread.
             if scenario == 'stop':
@@ -1381,8 +1397,11 @@ def test_trace_worker_cancel_stop_and_recovery(scenario, tmp_path):
             assert status['active_job'] is None and status['last_job'] == terminal
             assert http(urls['cancel_url'], cancel)[0] == 409
             assert operations == observed_operations
-            if scenario in {'visa_timeout', 'out_of_sync'}:
+            if scenario in {'visa_timeout', 'out_of_sync', 'data_timeout'}:
                 assert terminal['state'] == 'failed'
+                assert terminal['error']['code'] == 'trace_session_untrusted'
+                if scenario == 'data_timeout':
+                    assert operations[-1] == 'TRAC:DATA?'
                 assert status['worker_state'] == 'failed' and status['fatal_error']
                 assert status['trace_safety']['input_state'] == status['trace_safety']['feed'] == 'UNKNOWN'
                 for command in ('input-off', 'input-state', 'measure', 'trace-start'):
@@ -1396,8 +1415,12 @@ def test_trace_worker_cancel_stop_and_recovery(scenario, tmp_path):
 
             configuration = {'source': 'CURR', 'points': 2, 'interval_s': 0.001}
             assert status['worker_state'] == 'running'
-            if scenario == 'feed_still_next':
+            if scenario in {'feed_still_next', 'deadline'}:
                 assert terminal['state'] == 'failed'
+                expected_error = ('trace_timeout' if scenario == 'deadline'
+                                  else 'trace_cancel_feed_unconfirmed')
+                assert terminal['error']['code'] == expected_error
+                assert terminal['error']['details']['feed_stop_unconfirmed'] is True
                 assert status['trace_safety']['state'] == 'restricted_recovery'
                 for command, arguments in [('trace-start', {}), ('input-on', {'confirm_input_on': True}),
                                            ('measure', {}), ('trace-configure', configuration)]:
@@ -1421,3 +1444,112 @@ def test_trace_worker_cancel_stop_and_recovery(scenario, tmp_path):
             serving.join(timeout=3)
             if runtime.job_thread is not None:
                 runtime.job_thread.join(timeout=3)
+
+
+@pytest.fixture
+def trace_worker_with_session(monkeypatch):
+    from electronicload_tool_cli import worker as worker_module
+
+    events = queue.Queue()
+    thread = None
+    ready = None
+
+    def launch(session):
+        nonlocal thread, ready
+        monkeypatch.setattr(worker_module, "ControlSimulator", lambda: session)
+
+        def emit(runtime, event, **values):
+            events.put({"event": event, "run_id": runtime.run_id, **values})
+
+        monkeypatch.setattr(worker_module.Runtime, "emit", emit)
+        thread = threading.Thread(target=worker_module.run_worker, daemon=True)
+        thread.start()
+        ready = events.get(timeout=5)
+        assert ready["event"] == "ready"
+        return ready, events
+
+    yield launch
+    if thread is not None and thread.is_alive():
+        if ready is not None:
+            try:
+                http(ready["stop_url"], {"schema_version": 3})
+            except OSError:
+                pass  # The Worker may already be shutting down.
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+
+@pytest.mark.parametrize("action", ["cancel", "stop"])
+def test_trace_worker_observes_signal_before_next_precheck_io(action, trace_worker_with_session):
+    from electronicload_tool_core.simulator import ControlSimulator
+
+    in_identity = threading.Event()
+    release = threading.Event()
+    operations = []
+
+    class BlockingIdentityVISA(ControlSimulator):
+        def query(self, command):
+            operations.append(command)
+            if command == "*IDN?":
+                in_identity.set()
+                assert release.wait(timeout=5)
+            return super().query(command)
+
+        def write(self, command):
+            operations.append(command)
+            super().write(command)
+
+    ready, events = trace_worker_with_session(BlockingIdentityVISA())
+    code, accepted = http(ready["command_url"], request("trace-start"))
+    assert code == 202
+    try:
+        assert in_identity.wait(timeout=3)
+        signal = {"schema_version": 3}
+        if action == "cancel":
+            signal["worker_job_id"] = accepted["worker_job_id"]
+        assert http(ready[f"{action}_url"], signal)[0] == 202
+    finally:
+        release.set()
+    terminal = wait_finished(events, accepted["worker_job_id"])
+    assert terminal["state"] == ("cancelled" if action == "cancel" else "failed")
+    assert operations == ["*IDN?"]
+
+
+def test_trace_worker_failed_configure_feed_stop_limits_admission_and_reports_shutdown(
+        trace_worker_with_session):
+    from electronicload_tool_core.simulator import ControlSimulator
+
+    operations = []
+
+    class StuckFeedVISA(ControlSimulator):
+        def write(self, command):
+            operations.append(command)
+            if command != "TRAC:FEED:CONT NEVER":
+                super().write(command)
+
+        def query(self, command):
+            operations.append(command)
+            return super().query(command)
+
+    session = StuckFeedVISA()
+    session.trace_feed = "NEXT"
+    ready, events = trace_worker_with_session(session)
+    config = {"source": "TWO", "points": 4, "interval_s": 1}
+    code, accepted = http(ready["command_url"], request("trace-configure", config))
+    assert code == 202
+    terminal = wait_finished(events, accepted["worker_job_id"])
+    assert terminal["state"] == "failed"
+    assert terminal["error"]["code"] == "trace_feed_active"
+    assert terminal["error"]["details"]["feed_stop_unconfirmed"] is True
+    assert operations[-2:] == ["TRAC:FEED:CONT NEVER", "TRAC:FEED:CONT?"]
+    prior_io = operations.copy()
+    _, status = http(ready["status_url"])
+    assert status["worker_state"] == "running"
+    assert status["trace_safety"]["input_state"] == "UNKNOWN"
+    assert status["trace_safety"]["feed"] == "NEXT"
+    assert http(ready["command_url"], request("measure"))[1]["error"]["code"] == "trace_recovery_required"
+    assert http(ready["stop_url"], {"schema_version": 3})[0] == 202
+    summary = events.get(timeout=3)
+    assert summary["event"] == "summary" and summary["ok"] and summary["exit_code"] == 0
+    assert summary["trace_safety"] == {**status["trace_safety"], "safe_shutdown_unconfirmed": True}
+    assert operations == prior_io

@@ -290,13 +290,15 @@ Run the TRACE tests and directly affected Worker and CLI contract checks.
 ```
 
 Cover exact decimal readback, numeric formats, model bounds, Input and
-trigger safety, Feed cleanup, independent capture and data-read deadlines,
+trigger safety including unconfirmed arming over stale data, Feed cleanup,
+independent capture and data-read deadlines,
 one batch read and source-specific parsing. Use a fake clock for long captures
 and recording Fake VISA for I/O errors and out-of-sync replies. Check CSV
 exclusive creation, headers before triggering, both formats, optional time
 columns and preservation following failure. Exercise Common v3 cancellation,
-Stop, terminal and status snapshots, restricted recovery, and session
-isolation. Verify that LIVE fails before opening VISA and that dry-run
+Stop during I/O, terminal and status snapshots, restricted recovery after
+Cancel, deadline cleanup or Configure, and Core and Worker session isolation.
+Verify that LIVE fails before opening VISA and that dry-run
 leaves simulator state and the filesystem untouched. Use Ruff on modified
 Python files. The configured CI runs its normal offline checks.
 

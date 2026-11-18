@@ -3,6 +3,7 @@
 import csv
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, localcontext
+from functools import partial
 import math
 from pathlib import Path
 import re
@@ -13,7 +14,8 @@ from .control import NUMBER, _query, _write
 from .errors import LoadError, communication_error
 from .identity import MODEL_ID, parse_identity
 from .simulator import ControlSimulator, TRACE_BUFFER_FULL
-from .visa import validate_connection
+from .visa import (TraceSessionLost, mark_session_untrusted, require_trusted_session,
+                   validate_connection)
 
 TRACE_COMMANDS = ("trace-configure", "trace-start")
 CONFIG_FIELDS = frozenset({"source", "points", "interval_s"})
@@ -28,15 +30,6 @@ READ_TIMESTAMP = "read_timestamp_utc_plus_8"
 METADATA = ("source", "points", "interval_s", "sample_count")
 TIME_COLUMNS = {"elapsed": "estimated_elapsed_s", "delta": "estimated_delta_t_s"}
 STOPPED_FEED = "TRAC:FEED:CONT NEVER"
-
-
-class TraceSessionLost(LoadError):
-    """The command/reply stream is no longer trustworthy."""
-
-    def __init__(self, operation, **details):
-        super().__init__("trace_session_untrusted",
-                         "TRACE lost reliable communication. Feed and Input states are unknown.",
-                         3, operation=operation, feed="UNKNOWN", input_state="UNKNOWN", **details)
 
 
 def _decimal(token):
@@ -102,33 +95,33 @@ def _send(session, command):
         raise TraceSessionLost(command, **exc.details) from exc
 
 
-def _choice(session, query, choices):
-    reply = _ask(session, query).upper()
+def _choice(ask, query, choices):
+    reply = ask(query).upper()
     if reply not in choices:
         raise TraceSessionLost(query)
     return reply
 
 
-def _read_decimal(session, query):
+def _read_decimal(ask, query):
     try:
-        return _decimal(_ask(session, query))
+        return _decimal(ask(query))
     except InvalidOperation as exc:
         raise TraceSessionLost(query) from exc
 
 
-def _integer(session, query, *, maximum):
-    value = _read_decimal(session, query)
+def _integer(ask, query, *, maximum):
+    value = _read_decimal(ask, query)
     if not 0 <= value <= maximum or value != value.to_integral_value():
         raise TraceSessionLost(query)
     return int(value)
 
 
-def _feed(session):
-    return _choice(session, FEED_QUERY, ("NEXT", "NEVER"))
+def _feed(ask):
+    return _choice(ask, FEED_QUERY, ("NEXT", "NEVER"))
 
 
-def _buffer_full(session):
-    return bool(_integer(session, STATUS_QUERY, maximum=65535) & TRACE_BUFFER_FULL)
+def _buffer_full(ask):
+    return bool(_integer(ask, STATUS_QUERY, maximum=65535) & TRACE_BUFFER_FULL)
 
 
 def _check_error(session):
@@ -141,58 +134,64 @@ def _check_error(session):
                         scpi_error=int(match[1]))
 
 
-def _identity(session):
+def _identity(ask):
     try:
-        parse_identity(_ask(session, "*IDN?"))
+        parse_identity(ask("*IDN?"))
     except LoadError as exc:
         if exc.code == "invalid_identity":
             raise TraceSessionLost("*IDN?") from exc
         raise
 
 
-def _check_off(session):
-    if _choice(session, "INP:STAT?", ("0", "1")) != "0":
+def _check_off(ask):
+    if _choice(ask, "INP:STAT?", ("0", "1")) != "0":
         raise LoadError("input_not_off", "TRACE configuration requires confirmed Input OFF.")
 
 
-def _read_configuration(session):
-    source = SOURCE_READBACK[_choice(session, "TRAC:FEED?", SOURCE_READBACK)]
-    points = _integer(session, "TRAC:POIN?", maximum=65535)
-    return source, points, _read_decimal(session, "TRAC:TIM?")
+def _read_configuration(ask):
+    source = SOURCE_READBACK[_choice(ask, "TRAC:FEED?", SOURCE_READBACK)]
+    points = _integer(ask, "TRAC:POIN?", maximum=65535)
+    return source, points, _read_decimal(ask, "TRAC:TIM?")
 
 
-def _check_zero(session, query):
-    if _read_decimal(session, query) != 0:
+def _check_zero(ask, query):
+    if _read_decimal(ask, query) != 0:
         raise LoadError("trace_readback_mismatch", "TRACE setting must read back as zero.", 3,
                         query=query)
 
 
+def _verify_feed_stopped(ask):
+    feed = _feed(ask)
+    if feed != "NEVER":
+        raise LoadError("trace_feed_active", "TRACE Feed did not stop.", 3,
+                        feed=feed, feed_stop_unconfirmed=True)
+
+
 def _configure(session, config, stop):
-    _identity(session)
-    _check_off(session)
+    ask = partial(_ask, session)
+    _identity(ask)
+    _check_off(ask)
     if stop is not None and stop.is_set():
         raise LoadError("stopping", "Worker stopped before TRACE configuration.", 3)
     _send(session, "SYST:REM")
-    _check_off(session)
+    _check_off(ask)
     _send(session, STOPPED_FEED)
-    if _feed(session) != "NEVER":
-        raise LoadError("trace_feed_active", "TRACE Feed did not stop.", 3)
+    _verify_feed_stopped(ask)
     for command in (f"TRAC:FEED {config['source']}", f"TRAC:POIN {config['points']}",
                     f"TRAC:TIM {config['interval_s']}", "TRAC:DEL 0", "TRAC:FILT 0", "TRAC:CLE"):
         _send(session, command)
-    source, points, interval = _read_configuration(session)
+    source, points, interval = _read_configuration(ask)
     if interval != Decimal(config["interval_s"]):
         raise LoadError("trace_interval_mismatch", "TRACE interval differs from the requested value.", 3,
                         requested_interval_s=config["interval_s"], actual_interval_s=str(interval))
     if (source, points) != (config["source"], config["points"]):
         raise LoadError("trace_readback_mismatch", "TRACE source or points differs from the request.", 3,
                         actual_source=source, actual_points=points)
-    _check_zero(session, "TRAC:DEL?")
-    _check_zero(session, "TRAC:FILT?")
-    if _feed(session) != "NEVER":
-        raise LoadError("trace_feed_active", "TRACE Feed must be idle after configuration.", 3)
+    _check_zero(ask, "TRAC:DEL?")
+    _check_zero(ask, "TRAC:FILT?")
+    _verify_feed_stopped(ask)
     deadline = monotonic() + 5
-    while _buffer_full(session):
+    while _buffer_full(ask):
         remaining = deadline - monotonic()
         if remaining <= 0:
             raise LoadError("trace_buffer_not_clear", "TRACE buffer did not clear.", 3)
@@ -201,26 +200,30 @@ def _configure(session, config, stop):
     return config
 
 
-def _start_precheck(session):
-    _identity(session)
-    config, expected = validate_configuration(*_read_configuration(session))
-    _check_zero(session, "TRAC:DEL?")
-    _check_zero(session, "TRAC:FILT?")
-    if _feed(session) != "NEVER":
+def _start_precheck(session, stop, cancel):
+    def ask(query):
+        _checkpoint(stop, cancel)
+        return _ask(session, query)
+
+    _identity(ask)
+    config, expected = validate_configuration(*_read_configuration(ask))
+    _check_zero(ask, "TRAC:DEL?")
+    _check_zero(ask, "TRAC:FILT?")
+    if _feed(ask) != "NEVER":
         raise LoadError("trace_feed_active", "TRACE Feed must be idle before starting.", 3)
-    if _buffer_full(session):
+    if _buffer_full(ask):
         raise LoadError("trace_buffer_not_clear", "Configure TRACE to clear the buffer before starting.", 3)
-    _choice(session, "INP:STAT?", ("0", "1"))
+    _choice(ask, "INP:STAT?", ("0", "1"))
     # LIST uses the function mode selector. The simulator also models TRAN as
     # a distinct mode, while the physical Transient guard is based on TRAN?.
-    mode = _choice(session, "FUNC:MODE?", ("FIX", "FIXED", "LIST", "TRAN", "TRANSIENT"))
-    function = _choice(session, "FUNC?", ("CURR", "CURRENT", "VOLT", "VOLTAGE",
-                                         "RES", "RESISTANCE", "POW", "POWER"))
+    mode = _choice(ask, "FUNC:MODE?", ("FIX", "FIXED", "LIST", "TRAN", "TRANSIENT"))
+    function = _choice(ask, "FUNC?", ("CURR", "CURRENT", "VOLT", "VOLTAGE",
+                                     "RES", "RESISTANCE", "POW", "POWER"))
     if mode not in {"FIX", "FIXED"}:
         raise LoadError("trace_unsafe_mode", "TRACE requires Fixed CC, CV, CR or CW.", 3,
                         function=function, function_mode=mode)
     for query in ("TRAN?", "INP:SHOR:STAT?", "INP:TIM?"):
-        if _choice(session, query, ("0", "1")) != "0":
+        if _choice(ask, query, ("0", "1")) != "0":
             raise LoadError("trace_unsafe_mode", "TRACE requires Transient, Short and Input Timer OFF.",
                             3, query=query)
     return config, expected
@@ -283,9 +286,15 @@ def _read_batch(session, config):
 
 def _capture(session, config, expected, stop, cancel):
     _checkpoint(stop, cancel)
+    ask = partial(_ask, session)
     feed = "NEXT"
     try:
         _send(session, "TRAC:FEED:CONT NEXT")
+        _checkpoint(stop, cancel)
+        feed = _feed(ask)
+        if feed != "NEXT":
+            raise LoadError("trace_arm_unconfirmed", "TRACE Feed did not arm for this capture.",
+                            3, feed=feed)
         _checkpoint(stop, cancel)
         started = monotonic()
         deadline = started + expected + max(expected * 0.20, 5)
@@ -303,7 +312,7 @@ def _capture(session, config, expected, stop, cancel):
             _checkpoint(stop, cancel)
             if monotonic() >= deadline:
                 raise LoadError("trace_timeout", "TRACE did not complete before its deadline.", 3)
-            feed = _feed(session)
+            feed = _feed(ask)
             if monotonic() >= deadline:
                 raise LoadError("trace_timeout", "TRACE did not complete before its deadline.", 3)
             if feed == "NEVER":
@@ -311,15 +320,17 @@ def _capture(session, config, expected, stop, cancel):
     except LoadError as exc:
         if not isinstance(exc, TraceSessionLost) and feed == "NEXT":
             _send(session, STOPPED_FEED)
-            observed = _feed(session)
-            if observed != "NEVER" and exc.code == "trace_cancelled":
-                raise LoadError("trace_cancel_feed_unconfirmed",
-                                "Cancellation could not confirm TRACE Feed stopped.", 3,
-                                feed=observed) from exc
+            observed = _feed(ask)
             exc.details["feed"] = observed
+            if observed != "NEVER":
+                exc.details["feed_stop_unconfirmed"] = True
+                if exc.code == "trace_cancelled":
+                    raise LoadError("trace_cancel_feed_unconfirmed",
+                                    "Cancellation could not confirm TRACE Feed stopped.", 3,
+                                    **exc.details) from exc
         raise
     _checkpoint(stop, cancel)
-    _buffer_full(session)  # Query diagnostic status; either TBF value is valid here.
+    _buffer_full(ask)  # Query diagnostic status; either TBF value is valid here.
     _checkpoint(stop, cancel)
     result = _read_batch(session, config)
     _checkpoint(stop, cancel)
@@ -403,15 +414,19 @@ def execute(command, *, mode="live", resource=None, backend="system", model_id=M
         return {"command": command, "hardware_access": False, **config}
 
     session = simulator if simulator is not None else ControlSimulator()
-    if command == "trace-configure":
-        return _configure(session, config, stop)
-    _checkpoint(stop, cancel)
-    config, expected = _start_precheck(session)
-    _checkpoint(stop, cancel)
-    # The built-in simulator makes its batch visible on the first FEED poll.
-    # The full configured duration is still validated before scheduling.
-    if type(session) is ControlSimulator:
-        expected = 0
-    if csv_options is None:
-        return _capture(session, config, expected, stop, cancel)
-    return _capture_with_csv(session, config, expected, stop, cancel, csv_options)
+    require_trusted_session(session)
+    try:
+        if command == "trace-configure":
+            return _configure(session, config, stop)
+        config, expected = _start_precheck(session, stop, cancel)
+        _checkpoint(stop, cancel)
+        # The built-in simulator makes its batch visible on the first FEED poll.
+        # The full configured duration is still validated before scheduling.
+        if type(session) is ControlSimulator:
+            expected = 0
+        if csv_options is None:
+            return _capture(session, config, expected, stop, cancel)
+        return _capture_with_csv(session, config, expected, stop, cancel, csv_options)
+    except TraceSessionLost:
+        mark_session_untrusted(session)
+        raise

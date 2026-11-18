@@ -6,7 +6,7 @@ import re
 from .errors import LoadError, communication_error
 from .identity import MODEL_ID, parse_identity
 from .simulator import Simulator
-from .visa import TERMINATION, TIMEOUT_MS, open_session, validate_connection
+from .visa import TERMINATION, TIMEOUT_MS, open_session, require_trusted_session, validate_connection
 
 QUERIES = {
     "identify": ("*IDN?",),
@@ -101,6 +101,7 @@ def execute(
         raise LoadError("unsupported_live_scope", "Product LIVE is not open for this command.")
     try:
         if mode == "simulate":
+            require_trusted_session(simulator)
             return _read(simulator or Simulator(), command, metric)
         with open_session(resource) as (session, runtime):
             result = _read(session, command, metric)

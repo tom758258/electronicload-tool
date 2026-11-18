@@ -217,8 +217,9 @@ match, while `0.001` differs from a request for `0.0013`.
 `trace-start` uses the current TRACE settings. It requires Feed idle, TBF
 clear, Delay and Filter zero, Fixed CC/CV/CR/CW, Transient OFF, Short OFF,
 and Input Timer disabled. These checks apply with Input ON or OFF. The
-capture deadline adds 20% to the expected time, with at least five seconds
-of margin. Once Feed reports NEVER, Start reads the batch once with a
+command confirms Feed NEXT before sending the trigger. The capture deadline
+adds 20% to the expected time, with at least five seconds of margin.
+After the trigger, once Feed reports NEVER, Start reads the batch once with a
 separate 30-second VISA timeout and checks its length, format, and instrument
 error status. Either TBF value can accompany a complete batch. The JSON
 result includes the settings, an exact decimal string for `interval_s`, and

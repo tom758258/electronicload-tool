@@ -152,9 +152,11 @@ value. A difference fails with `trace_interval_mismatch`, including
 
 Start checks the current instrument configuration, Feed idle, TBF clear,
 Input state, Fixed CC/CV/CR/CW, Transient OFF, Short OFF and Input Timer
-disabled. This applies with Input ON or OFF. A successful Start arms and
-triggers once, waits for Feed NEVER, and issues one `TRAC:DATA?` with its
-own 30-second VISA timeout. The success result contains `source`, `points`,
+disabled. This applies with Input ON or OFF. Start arms once and requires
+Feed NEXT before triggering once. If the arm readback still reports NEVER,
+Start fails with `trace_arm_unconfirmed` before triggering or reading data.
+After the trigger, it waits for Feed NEVER and issues one `TRAC:DATA?` with
+its own 30-second VISA timeout. The success result contains `source`, `points`,
 exact decimal string `interval_s`, `sample_count`,
 `read_timestamp_utc_plus_8`, and all `samples`. Sample indexes start at
 one. Configure returns the four setting and count fields. Bounds, timing and
@@ -174,8 +176,9 @@ Ready and status publish `cancel_url`. `POST /cancel` accepts required
 with an optional string `reason`. It returns HTTP 202 on acceptance, 400 for
 malformed requests, and 409 for a missing, terminal, or non-cancellable job.
 Cancel and Stop only signal the job in their HTTP handlers. They wake waits
-without interrupting in-flight VISA I/O. The job thread can attempt one Feed
-stop and verify it when communication remains reliable.
+and prevent further normal precheck queries after the current I/O returns.
+The job thread can attempt one Feed stop and verify it when communication
+remains reliable.
 
 Successful cancellation finishes with `state: "cancelled"` and `ok: false`.
 Worker Stop aborts an incomplete Start as `failed`. Completion or failure
@@ -184,13 +187,17 @@ for the matching terminal or its equivalent `last_job` snapshot and an empty
 `active_job`. Send `input-off` explicitly and confirm its result before
 stopping the Worker. Neither request performs Input OFF.
 
-`GET /status.trace_safety` is null during ordinary operation. If a cancelled
-Start cannot confirm Feed NEVER but communication stays reliable, the job
-fails and status reports `state: "restricted_recovery"`, `code`, `feed`,
-and `input_state`. Only `input-state` and explicit `input-off` are admitted
-until OFF is confirmed. After that, `trace-configure` is also admitted for
-recovery. Only successful configuration clears the restriction. Other
-commands receive HTTP 409 with `trace_recovery_required`.
+`GET /status.trace_safety` is null during ordinary operation. If TRACE tries
+to stop Feed and a reliable readback still reports NEXT, the job fails and
+status reports `state: "restricted_recovery"`, `code`, `feed`, and
+`input_state`. This covers Cancel, Start's deadline or Stop cleanup, and
+Configure's Feed stop. A deadline failure retains `trace_timeout` and a
+Configure Feed stop failure retains `trace_feed_active`. Terminal error
+details report `feed_stop_unconfirmed: true`. Only `input-state` and
+explicit `input-off` are admitted until OFF is confirmed. After that,
+`trace-configure` is also admitted for recovery. Only successful
+configuration clears the restriction. Other commands receive HTTP 409
+with `trace_recovery_required`.
 
 When TRACE loses reliable VISA communication, the job fails and Worker status
 reports `worker_state: "failed"` and a non-null `fatal_error`.
@@ -198,9 +205,10 @@ reports `worker_state: "failed"` and a non-null `fatal_error`.
 states. All domain commands are rejected with HTTP 409 and
 `trace_session_untrusted`. Status and explicit Worker Stop remain available
 without device I/O. The Worker never attempts to reconnect or send cleanup
-on that session. The shutdown summary preserves any remaining TRACE safety
-state. An unconfirmed Input state at shutdown means that safe shutdown
-remains unconfirmed.
+on that session. Core also rejects reuse of the untrusted communication
+object. If TRACE safety restrictions remain at Worker shutdown, the summary
+preserves `trace_safety` and sets `trace_safety.safe_shutdown_unconfirmed`
+to `true`. Common Worker summary and exit code semantics still apply.
 
 ## Fixed Software Auto Range
 
