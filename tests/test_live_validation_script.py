@@ -328,7 +328,7 @@ def test_validation_script_failure_cleanup_uses_active_scope(run_script, tmp_pat
         assert names[-3:] == ['input-off', 'input-state',
                               'input-timer-disable' if scope == 'input-timer' else 'transient-disable']
         disable = commands[-1]
-        assert disable[disable.index('--hardware-validation') + 1] == scope
+        assert disable[disable.index('--hardware-validation') + 1] == active_scope
     paths = re.findall(r'Report: (.+?/shareable/report\.json)', text)
     report = json.loads(Path(paths[-1]).read_text(encoding='utf-8-sig'))
     cases = {case['name']: case for case in report['cases']}
