@@ -214,7 +214,7 @@ def test_hardware_script_unattended_refusal(run_script, selection):
 
 
 def test_hardware_script_selected_parameter_checks(run_script):
-    # Unselected Transient settings/source limits cannot block CC-only planning.
+    # Unselected Transient settings do not affect CC-only planning.
     assert_report(run_script(['-PlanOnly', '-Modes', 'cc', '-LevelA', '3'], source_limits=False),
                   'PLAN ONLY', ('cc',))
     # A CV-only plan does not validate CC/Transient-only settings.
@@ -473,10 +473,13 @@ def test_input_timer_script_plan_and_live_refusal(run_script, planned):
 
 @pytest.mark.parametrize('extra', [['-Modes', 'cc'], ['-TimerSeconds', '0'],
                                    ['-TimerSeconds', '11'], ['-TimerSeconds', '1.5'],
-                                   ['-Current', '3']])
+                                   ['-Current', '0.9'], ['-Current', '3']])
 def test_input_timer_script_invalid_settings_and_selection(run_script, extra):
     result = run_script(['-InputTimerOnly', *extra])
     assert result.returncode != 0, result.stdout + result.stderr
+    if extra == ['-Current', '0.9']:
+        assert 'CC current must not exceed the declared source current limit.' in result.stdout
+        assert 'Report:' not in result.stdout
 
 
 def test_input_timer_script_uses_default_source_limits(run_script):
