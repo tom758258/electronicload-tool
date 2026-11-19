@@ -330,8 +330,9 @@ Use only fictional Resources in automated tests. Fake clock checks may replace
 real long waits. PowerShell unavailable is SKIP, never PASS. Ruff checks only
 modified Python files, and `git diff --check` checks the patch.
 
-The original eight script modes and default remain unchanged; do not add
-unrelated Fixed/Transient/LIST/Worker or release acceptance tests. Ordinary
+The script defaults to all supported validation modes. Keep TRACE-only checks
+focused; do not add unrelated Fixed/Transient/LIST/Worker or release acceptance
+tests. Ordinary
 CI retains its repository-configured offline checks, irrespective of local
 focused selection. Contributor physical TRACE remains NOT RUN until a
 separately approved, bounded interactive run using an operator-supplied Resource,
