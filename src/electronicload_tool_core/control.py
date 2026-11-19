@@ -27,10 +27,17 @@ AUXILIARY_COMMANDS = ("set-von", "von-status", "short-on", "short-off", "short-s
 INPUT_TIMER_COMMANDS = ("set-input-timer", "input-timer-enable", "input-timer-disable",
                         "input-timer-status")
 AVERAGE_COMMANDS = ("set-average", "average-status")
+CR_COMMANDS = ("set-cr", "set-cr-led")
+SLOW_RISE_COMMANDS = ("current-slow-rise-enable", "current-slow-rise-disable",
+                      "current-slow-rise-status")
+LED_QUERY = "RES:LED:STAT?"
+VDROP_QUERY = "RES:VDR?"
+SLOW_RISE_QUERY = "CURR:SLEW:STAT?"
+RESISTANCE_FUNCTIONS = {"RES", "RESISTANCE"}
 CONTROL_COMMANDS = ("set-cc", "set-cv", "set-cr", "set-cw", "input-on", "input-off",
                     *TRANSIENT_COMMANDS, *LIST_COMMANDS, *AUXILIARY_COMMANDS, *INPUT_TIMER_COMMANDS,
-                    *AVERAGE_COMMANDS)
-FIXED_RANGE_COMMANDS = ("set-cc", "set-cv", "set-cr")
+                    *AVERAGE_COMMANDS, "set-cr-led", "cr-led-status", *SLOW_RISE_COMMANDS)
+FIXED_RANGE_COMMANDS = ("set-cc", "set-cv", *CR_COMMANDS)
 FIXED_RANGE_CHOICES = ("auto", "low", "high")
 TRANSIENT_FIELDS = frozenset({"transient_mode", "range", "level_a", "level_b", "rise_slew",
                               "fall_slew", "width_a", "width_b", "pulse_width"})
@@ -297,6 +304,7 @@ def _list_simulation(session, command, configuration, slot, stop):
             _list_selected(session)
         check_stop()
         if command in {"set-list-cc", "list-recall"}:
+            _leave_cr_led(session, _check_mode_change(session), stop)
             session.list_configuration = configuration
             session.list_last_trigger = None
             session.list_slot = slot
@@ -338,6 +346,7 @@ def _transient_simulation(session, command, configuration, stop):
         if command in TRANSIENT_SETUP_COMMANDS:
             if session.transient_enabled:
                 raise LoadError("transient_enabled", "Disable Transient before setup.")
+            _leave_cr_led(session, _check_mode_change(session), stop)
             session.transient_configuration = dict(configuration)
             session.last_trigger = None
             session.mode = "TRAN"
@@ -346,6 +355,7 @@ def _transient_simulation(session, command, configuration, stop):
         elif command == "transient-enable":
             if session.transient_configuration is None:
                 raise LoadError("transient_not_configured", "Enable requires Transient setup.")
+            _leave_cr_led(session, _check_mode_change(session), stop)
             session.transient_enabled = True
         elif command == "transient-disable":
             session.transient_enabled = False
@@ -401,10 +411,20 @@ def validate_resistance(value: object, range_name: str) -> Decimal:
     return resistance
 
 
+def validate_vdrop(value: object) -> Decimal:
+    try:
+        voltage = _decimal(value)
+    except LoadError as exc:
+        raise LoadError("invalid_vdrop", "Vdrop must be a finite nonnegative number.") from exc
+    if voltage < 0:
+        raise LoadError("invalid_vdrop", "Vdrop must be a finite nonnegative number.")
+    return voltage
+
+
 def resolve_fixed_range(command: str, value: object, selection: str) -> str:
     """Validate the original setpoint and resolve software Auto before any I/O."""
     validators = {"set-cc": validate_current, "set-cv": validate_voltage,
-                  "set-cr": validate_resistance}
+                  **dict.fromkeys(CR_COMMANDS, validate_resistance)}
     if command not in validators:
         raise LoadError("argument_error", "Fixed range requires CC, CV or CR.")
     if not isinstance(selection, str) or selection not in FIXED_RANGE_CHOICES:
@@ -424,16 +444,21 @@ def resolve_fixed_range(command: str, value: object, selection: str) -> str:
     raise LoadError("no_matching_range", "Neither range accepts the Fixed setpoint.", ranges=errors)
 
 
-def _offline_cr_settings(session) -> dict:
-    # These range ceilings are simulator conventions, not physical SCPI evidence.
-    raw_range = _number(session, "RES:RANG?")
-    if raw_range not in (10.0, 7500.0):
-        raise LoadError("invalid_range_readback", "Unknown simulated CR range.", 3,
-                        range_readback_ohm=raw_range)
-    name = "low" if raw_range == 10.0 else "high"
+def _cr_settings(session, *, expected=None) -> dict:
+    # Physical range interpretation is restricted to contributor validation.
+    raw_range = _decimal_readback(session, "RES:RANG?")
+    ranges = {limits[1]: name for name, limits in CR_RANGE_LIMITS.items()}
+    if raw_range not in ranges:
+        raise LoadError("invalid_range_readback", "Unrecognized CR range.", 3,
+                        range_readback_ohm=str(raw_range))
+    name = ranges[raw_range]
     resistance = validate_resistance(_query(session, "RES?"), name)
-    return {"range": name, "range_readback_ohm": raw_range,
-            "resistance_ohm": float(resistance)}
+    settings = {"range": name, "range_readback_ohm": float(raw_range),
+                "resistance_ohm": float(resistance)}
+    if expected is not None and (name, resistance) != expected:
+        raise LoadError("readback_mismatch", "CR range or resistance did not match readback.",
+                        3, observed=settings)
+    return settings
 
 
 def validate_power(value: object) -> Decimal:
@@ -547,6 +572,209 @@ def _flag(session, query: str) -> str:
 def _input_off(session) -> None:
     if _flag(session, "INP:STAT?") != "OFF":
         raise LoadError("input_not_off", "Input must be confirmed OFF before configuration.")
+
+
+def _decimal_readback(session, query):
+    raw = _query(session, query)
+    try:
+        if NUMBER.fullmatch(raw):
+            return Decimal(raw)
+    except InvalidOperation:
+        pass
+    raise LoadError("invalid_response", "Instrument returned an invalid number.", 3, query=query)
+
+
+def _load_mode(session):
+    return _query(session, "FUNC:MODE?").upper(), _query(session, "FUNC?").upper()
+
+
+def _check_mode_change(session, *, fixed_cc=False, force_led_off=False):
+    """Check interlocks before changing the selected load mode."""
+    if not fixed_cc and _flag(session, SLOW_RISE_QUERY) == "ON":
+        raise LoadError("current_slow_rise_enabled",
+                        "Disable Current Slow Rise before selecting a non-Fixed-CC mode.")
+    if force_led_off:
+        return True
+    mode, function = _load_mode(session)
+    if mode not in {"FIX", "FIXED", "TRAN", "LIST"}:
+        raise LoadError("unsafe_mode", "Cannot determine the current load mode.")
+    if mode in {"FIX", "FIXED"} and function not in {
+            "CURR", "CURRENT", "VOLT", "VOLTAGE", "RES", "RESISTANCE", "POW", "POWER"}:
+        raise LoadError("unsafe_mode", "Cannot determine the current Fixed load function.")
+    if mode in {"FIX", "FIXED"} and function in RESISTANCE_FUNCTIONS:
+        try:
+            return _flag(session, LED_QUERY) == "ON"
+        except LoadError as exc:
+            exc.details.update(led_enabled=None, completed_steps=[])
+            raise
+    return False
+
+
+def _mutation_off(session, stop):
+    _input_off(session)
+    if stop is not None and stop.is_set():
+        raise LoadError("stopping", "Configuration was blocked because Worker is stopping.")
+
+
+def _fixed_setup_guard(session, stop):
+    _mutation_off(session, stop)
+    mode = _query(session, "FUNC:MODE?").upper()
+    if mode == "LIST":
+        raise LoadError("list_selected", "Exit LIST explicitly before Fixed setup.")
+    if mode not in {"FIX", "FIXED", "TRAN"}:
+        raise LoadError("unsafe_mode", "Cannot determine the current load mode.")
+    if _flag(session, "TRAN?") != "OFF":
+        raise LoadError("transient_enabled", "Disable Transient before Fixed setup.")
+    if not isinstance(session, ControlSimulator) and _flag(session, "INP:SHOR:STAT?") != "OFF":
+        raise LoadError("unsafe_mode", "Setup requires Short OFF.")
+
+
+def _check_cc_origin_without_led_access(session, *, before_remote):
+    # FUNC? belongs to the verified CC path. Scopes without CR-LED access
+    # cannot distinguish ordinary CR from CR-LED.
+    function = _query(session, "FUNC?").upper()
+    if function in RESISTANCE_FUNCTIONS:
+        raise LoadError("unsupported_live_scope",
+                        "This CC scope cannot verify LED OFF when switching from CR.",
+                        function=function, before_remote=before_remote)
+    if function not in {"CURR", "CURRENT", "VOLT", "VOLTAGE", "POW", "POWER"}:
+        raise LoadError("unsafe_mode", "Cannot determine the current load function.")
+
+
+def _set_led(session, enabled, stop):
+    _mutation_off(session, stop)
+    try:
+        _write(session, f"RES:LED:STAT {int(enabled)}")
+        observed = _flag(session, LED_QUERY) == "ON"
+    except LoadError as exc:
+        exc.details.update(led_enabled=None)
+        raise
+    if observed != enabled:
+        raise LoadError("readback_mismatch", "LED state did not match the requested setting.", 3,
+                        led_enabled=observed)
+
+
+def _leave_cr_led(session, required, stop):
+    if required:
+        try:
+            _set_led(session, False, stop)
+        except LoadError as exc:
+            exc.details.setdefault("completed_steps", [])
+            raise
+
+
+def _fixed_cr_mode(session):
+    mode, function = _load_mode(session)
+    fixed_cr = (mode in {"FIX", "FIXED"} and function in RESISTANCE_FUNCTIONS
+                and _flag(session, "TRAN?") == "OFF")
+    return {"function_mode": mode, "function": function, "fixed_cr": fixed_cr}
+
+
+def _cr_status(session, *, expected=None):
+    mode = _fixed_cr_mode(session)
+    vdrop = _decimal_readback(session, VDROP_QUERY)
+    if vdrop < 0:
+        raise LoadError("invalid_response", "Instrument returned a negative Vdrop.", 3,
+                        query=VDROP_QUERY)
+    return {**mode, "led_enabled": _flag(session, LED_QUERY) == "ON", "vdrop_v": str(vdrop),
+            **_cr_settings(session, expected=expected)}
+
+
+def _cr_sequence(resistance, range_name):
+    return ("FUNC:MODE FIX", "FUNC RES", f"RES:RANG {CR_RANGE_LIMITS[range_name][1]}",
+            f"RES {resistance:f}")
+
+
+def _cr_setup(session, resistance, range_name, vdrop, stop):
+    """Configure Fixed CR, optionally enabling LED after the setpoints apply."""
+    physical = not isinstance(session, ControlSimulator)
+    completed = []
+
+    def guard():
+        _fixed_setup_guard(session, stop)
+        _check_mode_change(session, force_led_off=True)
+
+    expected = (range_name, resistance)
+    try:
+        guard()
+        maximum = None
+        if physical and vdrop is not None:
+            maximum = _decimal_readback(session, f"{VDROP_QUERY} MAX")
+            if maximum < 0:
+                raise LoadError("invalid_response", "Instrument returned a negative Vdrop maximum.", 3)
+            if vdrop > maximum:
+                raise LoadError("vdrop_out_of_range", "Vdrop exceeds the instrument maximum.",
+                                vdrop_max_v=str(maximum))
+        _mutation_off(session, stop)
+        _write(session, "SYST:REM")
+        completed.append("remote")
+        guard()
+        if vdrop is None:
+            _set_led(session, False, stop)
+            completed.append("led_off")
+        if physical:
+            for write in _cr_sequence(resistance, range_name):
+                _mutation_off(session, stop)
+                _write(session, write)
+                completed.append(write)
+        else:
+            session.configure_cr(resistance, range_name)
+            completed.append("cr_settings")
+        if vdrop is not None:
+            if not _fixed_cr_mode(session)["fixed_cr"]:
+                raise LoadError("readback_mismatch", "Fixed CR mode was not confirmed.", 3)
+            _cr_settings(session, expected=expected)
+            _mutation_off(session, stop)
+            _write(session, f"RES:VDR {vdrop}")
+            completed.append("vdrop")
+            if _decimal_readback(session, VDROP_QUERY) != vdrop:
+                raise LoadError("readback_mismatch", "Vdrop did not match the requested setting.", 3)
+            _set_led(session, True, stop)
+            completed.append("led_on")
+        settings = _cr_status(session, expected=expected)
+        if (not settings["fixed_cr"]
+                or settings["led_enabled"] != (vdrop is not None)
+                or (vdrop is not None and Decimal(settings["vdrop_v"]) != vdrop)):
+            raise LoadError("readback_mismatch", "CR setting did not match readback.", 3,
+                            observed=settings)
+        _input_off(session)
+        if maximum is not None:
+            settings["vdrop_max_v"] = str(maximum)
+        return {"input_state": "OFF", **settings}
+    except LoadError as exc:
+        exc.details["completed_steps"] = completed
+        raise
+
+
+def _slow_rise(session, command, stop):
+    if command == "current-slow-rise-status":
+        return {"enabled": _flag(session, SLOW_RISE_QUERY) == "ON"}
+    enable = command == "current-slow-rise-enable"
+
+    def guard():
+        _mutation_off(session, stop)
+        if enable:
+            mode, function = _load_mode(session)
+            if (mode not in {"FIX", "FIXED"} or function not in {"CURR", "CURRENT"}
+                    or _flag(session, "TRAN?") != "OFF"):
+                raise LoadError("unsafe_mode", "Enabling Current Slow Rise requires Fixed CC.")
+
+    guard()
+    _mutation_off(session, stop)
+    _write(session, "SYST:REM")
+    guard()
+    _mutation_off(session, stop)
+    try:
+        _write(session, f"CURR:SLEW:STAT {int(enable)}")
+        observed = _flag(session, SLOW_RISE_QUERY) == "ON"
+        _input_off(session)
+    except LoadError as exc:
+        exc.details["enabled"] = None
+        raise
+    if observed != enable:
+        raise LoadError("readback_mismatch", "Current Slow Rise did not match the requested state.",
+                        3, enabled=observed)
+    return {"enabled": observed, "input_state": "OFF"}
 
 
 def _average(session, command, count, stop):
@@ -681,7 +909,7 @@ def _settings(session, *, allow_cv: bool = False, allow_cr: bool = False,
             raise LoadError("unsupported_live_scope",
                             "Physical CR Input ON requires hardware validation.")
         return {"function_mode": fixed, "function": function,
-                **_offline_cr_settings(session)}
+                **_cr_settings(session)}
     if function in {"POW", "POWER"}:
         if not allow_cw:
             raise LoadError("unsupported_live_scope",
@@ -756,11 +984,31 @@ def _check_input_on_conditions(session, stop: Event | None, *, allow_cv: bool,
 def _perform(session, command: str, *, current: object | None,
              voltage: object | None, resistance: object | None, power: object | None,
              range_name: str | None, confirmed: bool, stop: Event | None,
-             allow_cv: bool, allow_cr: bool, allow_cw: bool) -> dict:
+             allow_cv: bool, allow_cr: bool, allow_cw: bool,
+             vdrop: Decimal | None = None, cc_mode_scope: str | None = None) -> dict:
     parse_identity(_query(session, "*IDN?"))
+    if command == "cr-led-status":
+        return _cr_status(session)
+    if command in SLOW_RISE_COMMANDS:
+        return _slow_rise(session, command, stop)
+    if command in CR_COMMANDS:
+        return _cr_setup(session, validate_resistance(resistance, range_name), range_name, vdrop, stop)
     if command == "set-cc":
         requested = validate_current(current, range_name)
+        simulated = isinstance(session, ControlSimulator)
+        guard_mode = cc_mode_scope is not None or simulated
+        allow_led_cleanup = cc_mode_scope == "cr-led" or simulated
+        setup_stop = stop if guard_mode else None
         completed = []
+
+        def check_origin(*, before_remote):
+            if guard_mode:
+                _fixed_setup_guard(session, stop)
+            if allow_led_cleanup:
+                return _check_mode_change(session, fixed_cc=True)
+            _check_cc_origin_without_led_access(session, before_remote=before_remote)
+            return False
+
         # IT8812C hardware rejects nonzero CURR after CURR:RANG MIN
         # (error 120). A numeric selector equal to the requested low-range
         # setpoint was verified on physical hardware with Input OFF.
@@ -773,9 +1021,16 @@ def _perform(session, command: str, *, current: object | None,
             # Remote is a control-state change: never send it for a read-only
             # operation or before a fresh physical Input OFF confirmation.
             _input_off(session)
+            check_origin(before_remote=True)
+            _mutation_off(session, setup_stop)
             _write(session, "SYST:REM")
+            if guard_mode:
+                completed.append("remote")
+            if check_origin(before_remote=False):
+                _set_led(session, False, stop)
+                completed.append("led_off")
             for action, name in sequence:
-                _input_off(session)
+                _mutation_off(session, setup_stop)
                 _write(session, action)
                 completed.append(name)
             settings = _settings(session)
@@ -800,6 +1055,7 @@ def _perform(session, command: str, *, current: object | None,
         # The simulation model applies settings internally until hardware proof.
         if not isinstance(session, ControlSimulator):
             raise LoadError("unsupported_live_scope", "CV LIVE range semantics unverified.")
+        _leave_cr_led(session, _check_mode_change(session), stop)
         session.configure_cv(requested, range_name)
         settings = _settings(session, allow_cv=True)
         if (settings["function_mode"] not in {"FIX", "FIXED"}
@@ -811,26 +1067,12 @@ def _perform(session, command: str, *, current: object | None,
                             requested_voltage_v=float(requested), observed=settings)
         _input_off(session)
         return {"input_state": "OFF", **settings}
-    if command == "set-cr":
-        requested = validate_resistance(resistance, range_name)
-        _input_off(session)
-        if not isinstance(session, ControlSimulator):
-            raise LoadError("unsupported_live_scope", "CR LIVE requires hardware validation.")
-        session.configure_cr(requested, range_name)
-        settings = _settings(session, allow_cr=True)
-        if (settings["function_mode"] not in {"FIX", "FIXED"}
-                or settings["function"] not in {"RES", "RESISTANCE"}
-                or settings["range"] != range_name
-                or validate_resistance(_query(session, "RES?"), range_name) != requested):
-            raise LoadError("readback_mismatch", "CR simulation did not match readback.", 3,
-                            requested_resistance_ohm=float(requested), observed=settings)
-        _input_off(session)
-        return {"input_state": "OFF", **settings}
     if command == "set-cw":
         requested = validate_power(power)
         _input_off(session)
         if not isinstance(session, ControlSimulator):
             raise LoadError("unsupported_live_scope", "CW LIVE requires hardware validation.")
+        _leave_cr_led(session, _check_mode_change(session), stop)
         session.configure_cw(requested)
         settings = _settings(session, allow_cw=True)
         if (settings["function_mode"] not in {"FIX", "FIXED"}
@@ -887,7 +1129,7 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
             list_configuration: dict | None = None, slot: int | None = None,
             rise_slew: object | None = None, fall_slew: object | None = None,
             latch: str | None = None, seconds: int | None = None,
-            count: int | None = None) -> dict:
+            count: int | None = None, vdrop: object | None = None) -> dict:
     if command not in CONTROL_COMMANDS or mode not in {"live", "simulate", "dry-run"}:
         raise LoadError("argument_error", "Unknown control command or mode.")
     if model_id != MODEL_ID:
@@ -895,6 +1137,29 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
     validate_connection(resource, backend, required=mode == "live")
     if mode == "simulate":
         require_trusted_session(simulator)
+    if command == "set-cr-led":
+        if (any(value is not None for value in (current, voltage, power, transient,
+                list_configuration, slot, rise_slew, fall_slew, latch, seconds, count)) or confirmed):
+            raise LoadError("argument_error", "CR-LED requires only resistance, range and Vdrop.")
+        vdrop = validate_vdrop(vdrop)
+    elif vdrop is not None:
+        raise LoadError("argument_error", "Vdrop applies only to set-cr-led.")
+    if command == "cr-led-status" or command in SLOW_RISE_COMMANDS:
+        if (any(value is not None for value in (current, voltage, resistance, power, range_name,
+                transient, list_configuration, slot, rise_slew, fall_slew, latch, seconds, count))
+                or confirmed):
+            raise LoadError("argument_error", "This command does not accept setup arguments.")
+        if hardware_validation is None:
+            if validation_settings is not None:
+                raise LoadError("argument_error", "Validation settings require --hardware-validation.")
+            if mode == "live":
+                raise LoadError("unsupported_live_scope", "This command is offline only.")
+            if mode == "dry-run":
+                return {"command": command, "hardware_access": False}
+            simulated = simulator or ControlSimulator()
+            if command == "cr-led-status":
+                return _cr_status(simulated)
+            return _slow_rise(simulated, command, stop)
     if command in AVERAGE_COMMANDS:
         if (any(value is not None for value in (current, voltage, resistance, power, range_name,
                 transient, hardware_validation, validation_settings, list_configuration, slot,
@@ -997,7 +1262,7 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
                                  resource=resource, current=current, voltage=voltage,
                                  resistance=resistance, power=power, range_name=range_name,
                                  transient=transient, expected=validation_settings,
-                                 confirmed=confirmed, stop=stop)
+                                 confirmed=confirmed, stop=stop, vdrop=vdrop)
     if validation_settings is not None:
         raise LoadError("argument_error", "Validation settings require --hardware-validation.")
     if command in TRANSIENT_COMMANDS:
@@ -1027,14 +1292,14 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
         raise LoadError("argument_error", "CC requires current and auto/low/high range.")
     if command == "set-cv" and voltage is None:
         raise LoadError("argument_error", "CV requires voltage and auto/low/high range.")
-    if command == "set-cr" and resistance is None:
+    if command in CR_COMMANDS and resistance is None:
         raise LoadError("argument_error", "CR requires resistance and auto/low/high range.")
     if command == "set-cw" and (power is None or range_name is not None):
         raise LoadError("argument_error", "CW requires power and does not accept a range.")
     if mode == "live" and command == "set-cv":
         raise LoadError("unsupported_live_scope",
                         "CV LIVE range programming requires hardware confirmation.")
-    if mode == "live" and command == "set-cr":
+    if mode == "live" and command in CR_COMMANDS:
         raise LoadError("unsupported_live_scope",
                         "CR LIVE programming requires hardware confirmation.")
     if mode == "live" and command == "set-cw":
@@ -1043,7 +1308,8 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
     if mode == "live" and command not in PRODUCT_LIVE_COMMANDS and not validation:
         raise LoadError("unsupported_live_scope", "Control is pending LIVE validation.")
     if command in FIXED_RANGE_COMMANDS:
-        value = {"set-cc": current, "set-cv": voltage, "set-cr": resistance}[command]
+        value = {"set-cc": current, "set-cv": voltage,
+                 **dict.fromkeys(CR_COMMANDS, resistance)}[command]
         range_name = resolve_fixed_range(command, value, range_name)
     slew = validate_fixed_cc_slew(range_name, rise_slew, fall_slew) if has_slew else {}
     if command == "set-cw":
@@ -1058,22 +1324,27 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
                 "voltage_v": float(validate_voltage(voltage, range_name))
                 if command == "set-cv" else None,
                 "input_on_requires_confirmation": command == "input-on", **slew}
-        if command == "set-cr":
-            result["resistance_ohm"] = float(validate_resistance(resistance, range_name))
+        if command in CR_COMMANDS:
+            result.update(resistance_ohm=float(validate_resistance(resistance, range_name)),
+                          led_enabled=vdrop is not None)
+            if vdrop is not None:
+                result["vdrop_v"] = str(vdrop)
         return result
     if mode == "simulate":
         simulated = simulator or ControlSimulator()
-        if command in {"set-cc", "set-cv", "set-cr", "set-cw"} and simulated.mode == "LIST":
+        fixed_setup = command in (*FIXED_RANGE_COMMANDS, "set-cw")
+        if fixed_setup and simulated.mode == "LIST":
             raise LoadError("list_selected", "Exit LIST explicitly before Fixed setup.")
-        if command in {"set-cc", "set-cv", "set-cr", "set-cw"} and simulated.transient_enabled:
+        if fixed_setup and simulated.transient_enabled:
             raise LoadError("transient_enabled", "Disable Transient before Fixed setup.")
         result = _perform(simulated, command, current=current,
                         voltage=voltage, resistance=resistance, power=power, range_name=range_name,
-                        confirmed=confirmed, stop=stop, allow_cv=True, allow_cr=True, allow_cw=True)
+                        confirmed=confirmed, stop=stop, allow_cv=True, allow_cr=True, allow_cw=True,
+                        vdrop=vdrop)
         if slew:
             simulated.fixed_cc_slew = slew
             result.update(simulated.fixed_cc_slew)
-        if command in {"set-cc", "set-cv", "set-cr", "set-cw"}:
+        if fixed_setup:
             simulated.transient_configuration = None
             simulated.last_trigger = None
         return result

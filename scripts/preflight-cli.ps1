@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param([switch]$TransientOnly, [switch]$FixedAutoOnly, [switch]$FixedSlewVonShortOnly,
-      [switch]$InputTimerOnly, [switch]$TraceOnly)
+      [switch]$InputTimerOnly, [switch]$TraceOnly, [switch]$CrLedSlowRiseOnly)
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -20,12 +20,42 @@ function Invoke-PreflightCli {
 }
 
 try {
-    if (@($TransientOnly, $FixedAutoOnly, $FixedSlewVonShortOnly, $InputTimerOnly, $TraceOnly |
+    if (@($TransientOnly, $FixedAutoOnly, $FixedSlewVonShortOnly, $InputTimerOnly, $TraceOnly, $CrLedSlowRiseOnly |
             Where-Object { $_ }).Count -gt 1) {
         throw 'Select only one focused preflight switch.'
     }
     if (-not (Test-Path -LiteralPath $cli)) {
         throw 'Sync the repository .venv with uv before running preflight.'
+    }
+    if ($CrLedSlowRiseOnly) {
+        $cr = @('--resistance','50','--range','auto')
+        $led = @('set-cr-led') + $cr + @('--vdrop','1.0000000000000001')
+        $commands = @('set-cr-led','cr-led-status','current-slow-rise-enable',
+                      'current-slow-rise-disable','current-slow-rise-status')
+        foreach ($mode in @('--simulate','--dry-run')) {
+            $configured = Invoke-PreflightCli ($led + $mode)
+            $plain = Invoke-PreflightCli (@('set-cr') + $cr + $mode)
+            if ($configured.result.range -cne 'high' -or $configured.result.led_enabled -ne $true -or
+                $configured.result.vdrop_v -cne '1.0000000000000001' -or $plain.result.led_enabled -ne $false) {
+                throw 'CR-LED/CR settings differ from the request.'
+            }
+            $enabled = Invoke-PreflightCli @('current-slow-rise-enable',$mode)
+            if (($mode -eq '--simulate' -and $enabled.result.enabled -ne $true) -or
+                ($mode -eq '--dry-run' -and ($enabled.result.hardware_access -ne $false -or
+                 $configured.result.hardware_access -ne $false))) {
+                throw 'Current Slow Rise preview/setting failed.'
+            }
+        }
+        $manifest = Invoke-PreflightCli @('manifest')
+        foreach ($command in $commands) {
+            if ($manifest.commands.$command.kind -cne 'async_job') { throw 'Manifest command missing.' }
+            $arguments = @(if ($command -eq 'set-cr-led') { $led } else { $command })
+            $refused = Invoke-PreflightCli ($arguments + @('--validation-allow-pending-live-support',
+                '--resource','USB0::0xFFFF::0x0001::SYNTHETIC::INSTR')) 2
+            if ($refused.error.code -cne 'unsupported_live_scope') { throw 'LIVE refusal failed.' }
+        }
+        Write-Host 'PASS: CR-LED and Current Slow Rise preflight'
+        exit 0
     }
     if ($TraceOnly) {
         $scope = @('--hardware-validation','trace')

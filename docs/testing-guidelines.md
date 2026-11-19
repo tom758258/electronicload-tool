@@ -336,6 +336,24 @@ focused selection. Contributor physical TRACE remains NOT RUN until a
 separately approved, bounded interactive run using an operator-supplied Resource,
 safe DUT/source, and independent manual Input OFF contingency.
 
+## Offline CR-LED and Current Slow Rise focused checks
+
+Select CR-LED, Slow Rise and directly affected Fixed/Transient/LIST cases in
+`test_control_core.py`, `test_hardware_validation.py`, `test_transient_core.py`
+and `test_list_core.py`. Use Fake VISA to check write order, LED OFF before
+leaving CR, failed readback without further writes, and protection of Product
+LIVE `set-cc` from LED and Slow Rise SCPI. Check CLI parser/help and Manifest,
+and select related Worker validation, state and LIVE-refusal cases.
+
+Use `scripts/preflight-cli.ps1 -CrLedSlowRiseOnly` and the corresponding
+script tests for PlanOnly and noninteractive refusal with a fictional USB
+resource and child-process VISA blocking. Physical CR-LED and Slow Rise
+trials require separate approval and keep Input OFF. For changes to the
+Slow Rise interlock case, verify with recording Fake VISA that the planned
+CV setup is refused before any control write and that the report recognizes
+only the expected refusal. Run Ruff on modified Python files. Configured
+CI retains its normal checks.
+
 ## Packaging checks
 
 For packaging, dependency, or entry-point changes:

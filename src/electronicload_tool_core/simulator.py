@@ -38,6 +38,9 @@ class ControlSimulator:
         self.voltage_v = 0.1
         self.cr_range = "high"
         self.resistance_ohm = Decimal("10")
+        self.cr_led_enabled = False
+        self.cr_vdrop_v = Decimal("0")
+        self.current_slow_rise_enabled = False
         self.power_w = Decimal("0")
         self.remote = False
         self.fixed_cc_slew = {}
@@ -129,6 +132,9 @@ class ControlSimulator:
             "VOLT?": str(self.voltage_v),
             "RES:RANG?": str(10.0 if self.cr_range == "low" else 7500.0),
             "RES?": str(self.resistance_ohm),
+            "RES:LED:STAT?": str(int(self.cr_led_enabled)),
+            "RES:VDR?": str(self.cr_vdrop_v),
+            "CURR:SLEW:STAT?": str(int(self.current_slow_rise_enabled)),
             "POW?": str(self.power_w),
             "TRAN?": "1" if self.transient_enabled else "0",
             "INP:SHOR:STAT?": "1" if self.short_on else "0",
@@ -212,6 +218,12 @@ class ControlSimulator:
             self.current_a = value
         elif command in {"INP ON", "INP OFF"}:
             self.input_on = command.endswith("ON")
+        elif command.startswith("RES:LED:STAT "):
+            self.cr_led_enabled = command.endswith(" 1")
+        elif command.startswith("RES:VDR "):
+            self.cr_vdrop_v = Decimal(command.split(" ", 1)[1])
+        elif command.startswith("CURR:SLEW:STAT "):
+            self.current_slow_rise_enabled = command.endswith(" 1")
         elif command.startswith("SENS:AVER:COUN "):
             self.average_count = int(command.split(" ", 1)[1])
         else:

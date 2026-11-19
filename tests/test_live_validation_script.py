@@ -1,4 +1,4 @@
-"""Run the real PowerShell planner/refusal gates with VISA forbidden in child CLIs."""
+"""Run the real PowerShell script with physical VISA forbidden in child CLIs."""
 import json
 import os
 from pathlib import Path
@@ -76,9 +76,13 @@ def assert_report(result, expected, modes):
     assert all(case['status'] == 'NOT RUN' for case in cases.values())
     expected_names = ['input-state', 'measure-off']
     if 'cc' in modes:
-        expected_names += ['set-cc-high', 'set-cc-auto', 'set-cc-low', 'input-on', 'measure-on',
+        expected_names += ['set-cc-high', 'cc-handoff-from-cr', 'set-cc-auto', 'set-cc-low', 'input-on', 'measure-on',
                            'input-off', 'final-input-state']
         assert cases['set-cc-high']['arguments'][-1] == 'high'
+        assert cases['cc-handoff-from-cr']['arguments'] == [
+            *cases['set-cc-high']['arguments'], '--hardware-validation', 'cr-led',
+        ]
+        assert cases['cc-handoff-from-cr']['condition']
         assert cases['set-cc-low']['arguments'][-1] == 'low'
         assert cases['set-cc-auto']['arguments'][-1] == 'auto'
         assert cases['set-cc-auto']['expected_range'] == 'low'
@@ -114,6 +118,26 @@ def assert_report(result, expected, modes):
                 for step in ('trigger-1', 'trigger-2'):
                     assert cases[f'{prefix}-{step}']['command'] == 'transient-trigger'
                 assert cases[f'{prefix}-disable']['command'] == 'transient-disable'
+    if 'cr-led' in modes:
+        expected_names += ['cr-led-set', 'cr-led-status-on', 'cr-led-plain-cr', 'cr-led-status-off',
+                           'cr-led-set-again', 'cr-led-leave-for-cc', 'cr-led-status-after-cc',
+                           'cr-led-final-input-state']
+        assert cases['cr-led-set']['expected_range'] == cases['cr-led-plain-cr']['expected_range'] == 'high'
+        assert cases['cr-led-leave-for-cc']['arguments'][-2:] == ['--hardware-validation', 'cr-led']
+    if 'current-slow-rise' in modes:
+        expected_names += ['slow-rise-set-cc', 'slow-rise-enable', 'slow-rise-explicit-input-off',
+                           'slow-rise-status-after-off', 'slow-rise-repeat-cc', 'slow-rise-status-after-cc',
+                           'slow-rise-block-cv', 'slow-rise-disable', 'slow-rise-status-disabled',
+                           'slow-rise-final-input-state', 'cleanup-slow-rise-input-state',
+                           'cleanup-slow-rise-disable', 'cleanup-slow-rise-status']
+        assert cases['slow-rise-explicit-input-off']['command'] == 'input-off'
+        assert cases['slow-rise-disable']['arguments'] == ['--hardware-validation', 'current-slow-rise']
+        assert cases['cleanup-slow-rise-disable']['arguments'] == cases['slow-rise-disable']['arguments']
+        assert all(cases[name]['condition'] for name in expected_names[-3:])
+        refusal = cases['slow-rise-block-cv']
+        assert refusal['command'] == 'set-cv'
+        assert refusal['arguments'][-2:] == ['--hardware-validation', 'cv']
+        assert refusal['expected_error'] == 'current_slow_rise_enabled'
     assert list(cases) == expected_names
     assert report['summary_counts']['total'] == report['summary_counts']['not_run'] == len(expected_names)
     assert len(report['cases']) == len(expected_names)  # No duplicate selected trials.
@@ -134,6 +158,22 @@ def assert_report(result, expected, modes):
 def test_fixed_auto_offline_preflight(run_script):
     result = run_script(['-FixedAutoOnly'], preflight=True)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_cr_led_slow_rise_offline_preflight(run_script):
+    result = run_script(['-CrLedSlowRiseOnly'], preflight=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'PASS: CR-LED and Current Slow Rise preflight' in result.stdout
+
+
+@pytest.mark.parametrize('modes', [('cr-led',), ('current-slow-rise',), ('cr-led', 'current-slow-rise')])
+def test_cr_led_slow_rise_script_plans_and_refuses_unattended(run_script, modes):
+    selection = ['-Modes', ','.join(modes)]
+    for args, expected in [(selection + ['-PlanOnly'], 'PLAN ONLY'), (selection, 'BLOCKED')]:
+        result = run_script(args)
+        report = assert_report(result, expected, modes)
+        assert all(case['command'] != 'input-on' for case in report['cases'])
+    assert 'requires an interactive console' in result.stdout
 
 
 def test_fixed_slew_von_short_offline_preflight(run_script):
@@ -507,11 +547,15 @@ def test_trace_validation_script_plan_only_and_noninteractive_refusal(run_script
     assert report['hardware_touched'] is False
     assert report['trace_start_deadline_ms'] == 120000
     cases = {case['name']: case for case in report['cases']}
-    assert len(cases) == 16
+    assert len(cases) == 17
     assert all(case['status'] == 'NOT RUN' for case in cases.values())
     assert sum(case['command'] == 'trace-configure' for case in cases.values()) == 5
     assert sum(case['command'] == 'trace-start' for case in cases.values()) == 5
     assert 'trace-powered-on' in cases and 'trace-powered-off' in cases
+    assert cases['trace-powered-cc-handoff-from-cr']['arguments'] == [
+        *cases['trace-powered-setup-cc']['arguments'], '--hardware-validation', 'cr-led',
+    ]
+    assert cases['trace-powered-cc-handoff-from-cr']['condition']
     assert not any('transient-' in name or name.startswith('cv-') for name in cases)
     assert cases['trace-powered-start']['arguments'][-1] == 'elapsed,delta'
     csv_args = cases['trace-powered-start']['arguments']
@@ -524,37 +568,22 @@ def test_trace_validation_script_plan_only_and_noninteractive_refusal(run_script
     assert 'requires an interactive console' in refused.stdout
 
 
-@pytest.mark.skipif(os.name == 'nt', reason='Requires a POSIX pseudo-terminal for fake operator input.')
-@pytest.mark.parametrize('failure', [
-    'none', 'untrusted', 'feed_unconfirmed', 'off_failed',
-    'off_unconfirmed', 'final_state_on',
-])
-def test_trace_validation_script_interactive_fake_cleanup_and_results(
-    run_script, tmp_path, failure,
-):
+def run_interactive_script(run_script, tmp_path, modes):
+    # Preserve the actual interactive gate and stub only unrelated offline preflight.
     import pty
 
-    command_log = tmp_path / 'trace-calls.jsonl'
-    state_file = tmp_path / 'trace-state.json'
-    customization = tmp_path / 'sitecustomize.py'
-    with customization.open('a', encoding='utf-8') as output:
-        output.write(
-            f"\nTRACE_CALLS = {str(command_log)!r}\n"
-            f"TRACE_STATE = {str(state_file)!r}\nTRACE_FAILURE = {failure!r}\n"
-        )
-        output.write(FAKE_TRACE_CLI)
     scripts = tmp_path / 'scripts'
     scripts.mkdir()
     shutil.copyfile(ROOT / 'scripts/live-cli-check.ps1', scripts / 'live-cli-check.ps1')
     (scripts / 'preflight-cli.ps1').write_text('exit 0\n', encoding='utf-8')
     (tmp_path / '.venv').symlink_to(ROOT / '.venv', target_is_directory=True)
     master, slave = pty.openpty()
-    transcript = tmp_path / 'trace-console.txt'
+    transcript = tmp_path / 'powershell-console.txt'
     try:
         with transcript.open('w', encoding='utf-8') as output:
             process = subprocess.Popen(
                 [run_script.powershell, '-NoProfile', '-File', str(scripts / 'live-cli-check.ps1'),
-                 '-Target', 'itech-it8812c', '-Resource', RESOURCE, '-Modes', 'trace',
+                 '-Target', 'itech-it8812c', '-Resource', RESOURCE, '-Modes', modes,
                  '-SourceCurrentLimitA', '0.5', '-SourceVoltageLimitV', '12'],
                 cwd=ROOT, env=run_script.env,
                 stdin=slave, stdout=output, stderr=subprocess.STDOUT)
@@ -576,10 +605,30 @@ def test_trace_validation_script_interactive_fake_cleanup_and_results(
         os.close(master)
         os.close(slave)
     assert confirmed
-    console = transcript.read_text(encoding='utf-8')
+    return process.returncode, transcript.read_text(encoding='utf-8')
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='Requires a POSIX pseudo-terminal for fake operator input.')
+@pytest.mark.parametrize('failure', [
+    'none', 'untrusted', 'feed_unconfirmed', 'off_failed',
+    'off_unconfirmed', 'final_state_on',
+])
+def test_trace_validation_script_interactive_fake_cleanup_and_results(
+    run_script, tmp_path, failure,
+):
+    command_log = tmp_path / 'trace-calls.jsonl'
+    state_file = tmp_path / 'trace-state.json'
+    customization = tmp_path / 'sitecustomize.py'
+    with customization.open('a', encoding='utf-8') as output:
+        output.write(
+            f"\nTRACE_CALLS = {str(command_log)!r}\n"
+            f"TRACE_STATE = {str(state_file)!r}\nTRACE_FAILURE = {failure!r}\n"
+        )
+        output.write(FAKE_TRACE_CLI)
+    exit_code, console = run_interactive_script(run_script, tmp_path, 'trace')
     assert 'manually set to 12 V with a 0.5 A current limit' in console
     assert 'independent manual Input OFF procedure' in console
-    assert process.returncode == (0 if failure == 'none' else 3), console
+    assert exit_code == (0 if failure == 'none' else 3), console
     calls = [json.loads(line) for line in command_log.read_text().splitlines()]
     commands = [row[0] for row in calls]
     assert commands.count('trace-configure') == 5
@@ -711,4 +760,172 @@ def fake_trace_main(argv=None):
     return 3 if failed else 0
 
 cli.main = fake_trace_main
+'''
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='Requires a POSIX pseudo-terminal for fake operator input.')
+@pytest.mark.parametrize('scenario,modes', [
+    ('cc-origin', 'cc'), ('cr-origin', 'cc'), ('led-unconfirmed', 'cc'),
+    ('late-resistance', 'cc'), ('plain-cr-to-trace', 'cr,trace'),
+    ('slow-normal', 'current-slow-rise'), ('slow-trusted-failure', 'current-slow-rise'),
+    ('slow-input-on', 'current-slow-rise'), ('slow-untrusted', 'current-slow-rise'),
+])
+def test_validation_script_mode_handoff_and_slow_rise_cleanup(run_script, tmp_path, scenario, modes):
+    events = tmp_path / 'visa-calls.jsonl'
+    state = tmp_path / 'instrument.json'
+    with (tmp_path / 'sitecustomize.py').open('a', encoding='utf-8') as output:
+        output.write(f'\nEVENTS = {str(events)!r}\nSTATE = {str(state)!r}\nSCENARIO = {scenario!r}\n')
+        output.write(RECORDING_LIVE_VISA)
+    run_script.env['PYTHONPATH'] += os.pathsep + str(ROOT / 'tests')
+    exit_code, console = run_interactive_script(run_script, tmp_path, modes)
+    paths = re.findall(r'Report: (.+?/shareable/report\.json)', console)
+    assert paths, console
+    report_text = Path(paths[-1]).read_text(encoding='utf-8-sig')
+    report = json.loads(report_text)
+    cases = {case['name']: case for case in report['cases']}
+    calls = [(event['args'], event['calls']) for event in map(json.loads, events.read_text().splitlines())]
+    writes = [call for _, batch in calls for call in batch if '?' not in call]
+    success = scenario in {'cc-origin', 'cr-origin', 'plain-cr-to-trace', 'slow-normal'}
+    assert exit_code == (0 if success else 3), console
+    assert report['overall_status'] == ('PASS' if success else 'FAIL')
+    assert RESOURCE not in report_text
+    assert not (tmp_path / 'visa-attempt').exists()
+    assert not (Path(paths[-1]).parents[1] / 'private').exists()
+
+    if modes in {'cc', 'cr,trace'}:
+        trace = modes == 'cr,trace'
+        regular = 'trace-powered-setup-cc' if trace else 'set-cc-high'
+        handoff = 'trace-powered-cc-handoff-from-cr' if trace else 'cc-handoff-from-cr'
+        scoped_calls = [batch for args, batch in calls if args[0] == 'set-cc' and 'cr-led' in args]
+        if scenario in {'cc-origin', 'late-resistance'}:
+            assert not scoped_calls
+            assert cases[regular]['status'] == ('PASS' if success else 'FAIL')
+            assert cases[handoff]['status'] == ('SKIP' if success else 'NOT RUN')
+        else:
+            assert cases[regular]['status'] == 'SKIP' and cases[regular]['origin_function'] == 'RES'
+            [scoped] = scoped_calls
+            if success:
+                report_handoff = cases[handoff]
+                assert report_handoff['status'] == 'PASS'
+                assert report_handoff['validation_scope'] == 'cr-led'
+                assert report_handoff['function'] == 'CURR' and report_handoff['input_state'] == 'OFF'
+                assert scoped.index('RES:LED:STAT?') < scoped.index('FUNC CURR')
+                if trace:
+                    assert cases['cr-high-final-state']['input_state'] == 'OFF'
+                    assert cases['trace-powered-start']['trace_csv_complete'] is True
+                    assert cases['trace-powered-final-state']['input_state'] == 'OFF'
+                else:
+                    assert scoped.count('RES:LED:STAT 0') == 1
+                    assert cases['final-input-state']['input_state'] == 'OFF'
+            else:
+                assert cases[handoff]['status'] == 'FAIL'
+                assert 'RES:LED:STAT 0' in scoped
+        assert writes.count('INP ON') == (3 if trace else int(success))
+        if not success:
+            assert 'FUNC CURR' not in writes and 'CURR:RANG MAX' not in writes
+        return
+
+    assert 'INP ON' not in writes
+    assert writes.count('CURR:SLEW:STAT 1') == 1
+    assert writes.count('CURR:SLEW:STAT 0') == int(scenario in {'slow-normal', 'slow-trusted-failure'})
+    state_case = cases['cleanup-slow-rise-input-state']
+    disable_case = cases['cleanup-slow-rise-disable']
+    status_case = cases['cleanup-slow-rise-status']
+    needs_operator = scenario in {'slow-input-on', 'slow-untrusted'}
+    assert report['slow_rise_cleanup_unconfirmed'] is needs_operator
+    assert ('Independent operator action is required' in console) is needs_operator
+    summary = Path(paths[-1]).with_name('summary.md').read_text(encoding='utf-8-sig')
+    assert ('Independent operator action is required' in summary) is needs_operator
+    if scenario == 'slow-normal':
+        assert cases['slow-rise-status-disabled']['enabled'] is False
+        assert all(item['status'] == 'SKIP' for item in (state_case, disable_case, status_case))
+    elif scenario == 'slow-trusted-failure':
+        assert cases['slow-rise-status-after-off']['status'] == 'FAIL'
+        assert cases['slow-rise-disable']['status'] == 'NOT RUN'
+        assert state_case['input_state'] == 'OFF'
+        assert disable_case['status'] == 'PASS' and status_case['enabled'] is False
+        assert [args[0] for args, _ in calls[-3:]] == [
+            'input-state', 'current-slow-rise-disable', 'current-slow-rise-status',
+        ]
+    else:
+        assert state_case['status'] == ('FAIL' if scenario == 'slow-input-on' else 'NOT RUN')
+        assert disable_case['status'] == status_case['status'] == 'NOT RUN'
+        if scenario == 'slow-untrusted':
+            assert calls[-1][0][0] == 'current-slow-rise-enable'
+
+
+RECORDING_LIVE_VISA = r'''
+import json
+import sys
+
+from test_hardware_validation import ValidationFake
+from test_trace import RecordingVISA
+
+class Device(ValidationFake):
+    open_status = pyvisa.constants.StatusCode.success
+    fields = ('input', 'mode', 'function', 'range', 'current', 'transient', 'short', 'remote', 'values')
+
+    def __init__(self):
+        super().__init__()
+        self.trace = RecordingVISA()
+        self.args = sys.argv[1:]
+        if Path(STATE).is_file():
+            device, trace = json.loads(Path(STATE).read_text())
+            self.__dict__.update(device)
+            self.trace.__dict__.update(trace)
+        elif SCENARIO in ('cr-origin', 'led-unconfirmed'):
+            self.function = 'RES'
+            self.values['RES:LED:STAT'] = '1'
+        if SCENARIO == 'led-unconfirmed':
+            self.ignore = 'RES:LED:STAT 0'
+
+    def query(self, command):
+        if command == 'CURR:SLEW:STAT?' and self.args[0] == 'current-slow-rise-status':
+            if SCENARIO in ('slow-trusted-failure', 'slow-input-on') and self.values['CURR:SLEW:STAT'] == '1':
+                self.calls.append(command)
+                return '0'  # Valid but unexpected readback.
+        if SCENARIO == 'slow-input-on' and self.args[0] == 'input-state' and self.values['CURR:SLEW:STAT'] == '1':
+            self.input = True
+        if command == 'INP:TIM?' or command.startswith(('TRAC:', 'STAT:QUES:', 'MEAS:', 'FETC:')):
+            self.calls.append(command)
+            self.trace.input_on = self.input
+            self.trace.current_a = self.current
+            return self.trace.query(command)
+        return super().query(command)
+
+    def write(self, command):
+        if command == 'TRIG' or command.startswith('TRAC:'):
+            self.calls.append(command)
+            self.trace.write(command)
+            return
+        super().write(command)
+        if SCENARIO == 'late-resistance' and command == 'SYST:REM':
+            self.function = 'RES'
+        if SCENARIO == 'slow-untrusted' and command == 'CURR:SLEW:STAT 1':
+            raise TimeoutError('Enable may have reached the fake instrument.')
+
+    def get_visa_attribute(self, _attr):
+        return 'FAKE'
+
+    def close(self):
+        device_state = {key: getattr(self, key) for key in self.fields}
+        trace_state = {key: value for key, value in vars(self.trace).items() if key.startswith('trace_')}
+        Path(STATE).write_text(json.dumps([device_state, trace_state]))
+        with Path(EVENTS).open('a', encoding='utf-8') as out:
+            out.write(json.dumps({'args': self.args, 'calls': self.calls}) + '\n')
+
+class Manager:
+    visalib = type('FakeLibrary', (), {'library_path': 'FAKE'})
+
+    def __init__(self, backend):
+        assert backend == '@ivi'
+
+    def open_resource(self, resource, **_kwargs):
+        assert resource == 'USB0::0xFFFF::0x0001::SYNTHETIC::INSTR'
+        return Device()
+
+    def close(self):
+        pass
+
+pyvisa.ResourceManager = Manager
 '''

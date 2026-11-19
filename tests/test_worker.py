@@ -70,6 +70,68 @@ def request(command,arguments=None):
             'context':{'mode':'simulate','planning_model_id':'itech-it8812c'}}
 
 
+def test_cr_led_and_slow_rise_worker_persist_settings_and_validate_decimal_input(worker, capsys):
+    from electronicload_tool_cli.cli import main
+
+    _, out, ready = worker
+    command_url = ready['command_url']
+    status_keys = http(ready['status_url'])[1].keys()
+    for command, arguments in [
+        ('set-cr-led', {'range': 'auto', 'resistance': 50}),
+        ('set-cr-led', {'range': 'auto', 'resistance': 50, 'vdrop': '1'}),
+        ('set-cr-led', {'range': 'auto', 'resistance': 50, 'vdrop': True}),
+        ('current-slow-rise-status', {'vdrop': 1}),
+        ('cr-led-status', {'hardware_validation': 'cr-led'}),
+    ]:
+        code, result = http(command_url, request(command, arguments))
+        assert code == 400 and result['worker_job_id'] is None
+
+    args = '{"resistance":50,"range":"auto","vdrop":1.000000000000000001}'
+    context = json.dumps(request('set-cr-led')['context'])
+    assert main(['send-command', '--url', command_url, '--worker-command', 'set-cr-led',
+                 '--arguments-json', args, '--context-json', context, '--json']) == 0
+    accepted = json.loads(capsys.readouterr().out)
+    assert wait_finished(out, accepted['worker_job_id'])['result']['vdrop_v'] == '1.000000000000000001'
+
+    def run(command, arguments=None, *, dry=False, error=None):
+        payload = request(command, arguments)
+        if dry:
+            payload['context']['mode'] = 'dry_run'
+        code, accepted = http(command_url, payload)
+        assert code == 202
+        finished = wait_finished(out, accepted['worker_job_id'])
+        assert finished['state'] == ('failed' if error else 'succeeded')
+        if error:
+            assert finished['error']['code'] == error
+        return finished['result']
+
+    assert run('set-cr', {'range': 'auto', 'resistance': 50}, dry=True)['hardware_access'] is False
+    assert run('cr-led-status')['led_enabled']
+    run('current-slow-rise-enable', error='unsafe_mode')
+    run('set-cc', {'range': 'low', 'current': 0.1})
+    assert not run('cr-led-status')['led_enabled']
+    assert run('current-slow-rise-enable')['enabled']
+    run('set-cr-led', {'range': 'auto', 'resistance': 50, 'vdrop': 1},
+        error='current_slow_rise_enabled')
+    assert run('current-slow-rise-status')['enabled']
+    assert not run('current-slow-rise-disable')['enabled']
+    assert http(ready['status_url'])[1].keys() == status_keys
+
+
+def test_cr_led_and_slow_rise_worker_live_refuses_before_visa(monkeypatch, capsys):
+    from electronicload_tool_cli.worker import Runtime
+    from electronicload_tool_core import control
+
+    monkeypatch.setattr(control, 'open_session', lambda *_: pytest.fail('VISA opened'))
+    runtime = Runtime(mode='live', resource='USB0::0xFFFF::0x0001::SYNTHETIC::INSTR')
+    for command in ('set-cr-led', 'cr-led-status', *control.SLOW_RISE_COMMANDS):
+        arguments = {'resistance': 50, 'range': 'auto', 'vdrop': 1} if command == 'set-cr-led' else {}
+        runtime.run_job({'worker_job_id': command, 'job_id': None, 'command': command},
+                        arguments, {'mode': 'live'})
+        result = json.loads(capsys.readouterr().out.splitlines()[-1])
+        assert result['state'] == 'failed' and result['error']['code'] == 'unsupported_live_scope'
+
+
 def test_measurement_worker_admission_results_and_average_state(worker, capsys):
     from electronicload_tool_cli.cli import main
     _, out, ready = worker

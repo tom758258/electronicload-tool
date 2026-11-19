@@ -104,12 +104,35 @@ def test_manifest_static(capsys):
     }
     for command in ('trace-configure', 'trace-start'):
         assert p['commands'][command] == {'kind': 'async_job'}
-    for command in ('set-cc', 'set-cv', 'set-cr'):
+    for command in ('set-cc', 'set-cv', 'set-cr', 'set-cr-led'):
         assert p['commands'][command] == {
             'kind': 'async_job', 'range_options': ['auto', 'low', 'high']}
     assert p['commands']['set-cw'] == {'kind': 'async_job'}
     for command in ('set-von', 'von-status', 'short-on', 'short-off', 'short-status'):
         assert p['commands'][command] == {'kind': 'async_job'}
+    for command in ('cr-led-status', 'current-slow-rise-enable', 'current-slow-rise-disable',
+                    'current-slow-rise-status'):
+        assert p['commands'][command] == {'kind': 'async_job'}
+
+
+@pytest.mark.parametrize('extra,code', [
+    ([], 'argument_error'), (['--vdrop', '-1'], 'invalid_vdrop'),
+    (['--vdrop', 'NaN'], 'invalid_vdrop'),
+])
+def test_cr_led_cli_requires_finite_nonnegative_vdrop(capsys, extra, code):
+    assert main(['set-cr-led', '--resistance', '50', '--range', 'auto', '--simulate',
+                 '--json', *extra]) == 2
+    assert json.loads(capsys.readouterr().out)['error']['code'] == code
+
+
+@pytest.mark.parametrize('command', ['set-cr-led', 'cr-led-status', 'current-slow-rise-enable',
+                                    'current-slow-rise-disable', 'current-slow-rise-status'])
+def test_cr_led_and_slow_rise_cli_override_cannot_open_live(capsys, fake_visa, command):
+    arguments = ['--resistance', '50', '--range', 'auto', '--vdrop', '1'] if command == 'set-cr-led' else []
+    assert main([command, '--resource', 'USB0::0xFFFF::0x0001::SYNTHETIC::INSTR',
+                 '--validation-allow-pending-live-support', '--json', *arguments]) == 2
+    assert json.loads(capsys.readouterr().out)['error']['code'] == 'unsupported_live_scope'
+    assert fake_visa.calls == []
 
 
 def test_normal_live_cli_control_dispatches_without_validation_override(monkeypatch, capsys):
