@@ -332,8 +332,7 @@ modified Python files, and `git diff --check` checks the patch.
 
 The script defaults to all supported validation modes. Keep TRACE-only checks
 focused; do not add unrelated Fixed/Transient/LIST/Worker or release acceptance
-tests. Ordinary
-CI retains its repository-configured offline checks, irrespective of local
+tests. Ordinary CI retains its repository-configured offline checks, irrespective of local
 focused selection. Contributor physical TRACE remains NOT RUN until a
 separately approved, bounded interactive run using an operator-supplied Resource,
 safe DUT/source, and independent manual Input OFF contingency.
