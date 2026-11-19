@@ -317,8 +317,12 @@ with the CR-LED interlock enabled. A future Product LIVE approval for this
 transition requires model-specific physical evidence and a support-policy
 update to allow that same Core path. A switch performed outside the tool
 may leave LED state that the current Product LIVE guard cannot establish.
-In a combined CR and TRACE validation run, the powered TRACE setup uses
-Product LIVE `set-cc` and inherits this refusal if the instrument is still in CR.
+The controlled script plans a conditional contributor handoff before the CC
+trial and the powered TRACE capture. It uses the handoff only if ordinary
+`set-cc` reads a resistance function and refuses before entering remote.
+The handoff confirms Input OFF and uses the Core LED OFF interlock before CC
+setup. Other setup errors stop validation. The plan and report record the
+conditional step and which path ran.
 
 Product LIVE rechecks Input OFF before **each** of the four CC setup writes. After all four
 setting readbacks it verifies Input OFF once more. Configuration never turns
@@ -409,9 +413,10 @@ also verifies that Fixed CV setup is refused before any writes while
 Slow Rise is enabled.
 
 Product LIVE Input ON cannot confirm the Slow Rise state. Before resuming
-ordinary powered CLI or Worker operation after a Slow Rise trial, explicitly
-disable Slow Rise with Input OFF and confirm the disabled state. This also
-applies after an interrupted trial.
+ordinary powered CLI or Worker operation after a Slow Rise trial, require
+confirmed Disable and Input OFF. If the controlled script reports unconfirmed
+cleanup, use the independent operator safety procedure and confirm both states
+before resuming.
 
 ```powershell
 .\scripts\preflight-cli.ps1 -CrLedSlowRiseOnly
@@ -1041,7 +1046,11 @@ Failures stop further normal cases. If ON may have been attempted, the script
 makes bounded explicit OFF cleanup and confirms it only by physical readback.
 Transient Disable requires confirmed OFF. An **untrusted TRACE VISA session**
 must not be blindly reconnected for OFF; if OFF is unconfirmed, independent
-operator action is required. No automatic Reset, `SYST:LOC`, protection clear,
+operator action is required. After a Slow Rise Enable attempt without normal
+OFF readback, the script attempts one bounded Disable and status check only
+with trusted communication and a fresh Input OFF readback. It retains the
+trial failure and reports when independent operator action is required.
+No automatic Reset, `SYST:LOC`, protection clear,
 error-queue read or reconnect is added. VISA Close alone does not imply OFF.
 
 | Existing deadline | Value |

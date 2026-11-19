@@ -443,6 +443,9 @@ def test_product_live_cc_refuses_cr_origin_without_unapproved_scpi(monkeypatch, 
         live('set-cc', current='0.1', range_name='low')
     assert error.value.code == 'unsupported_live_scope'
     assert [call for call in fake.calls if '?' not in call] == (['SYST:REM'] if after_remote else [])
+    assert error.value.details['function'] == fake.function
+    assert error.value.details['before_remote'] is (not after_remote)
+    assert error.value.details['completed_steps'] == []
     assert not any(call.startswith(('RES:LED', 'RES:VDR', 'CURR:SLEW:STAT')) for call in fake.calls)
 
 

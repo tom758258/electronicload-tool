@@ -629,13 +629,14 @@ def _fixed_setup_guard(session, stop):
         raise LoadError("unsafe_mode", "Setup requires Short OFF.")
 
 
-def _check_cc_origin_without_led_access(session):
+def _check_cc_origin_without_led_access(session, *, before_remote):
     # FUNC? belongs to the verified CC path. Scopes without CR-LED access
     # cannot distinguish ordinary CR from CR-LED.
     function = _query(session, "FUNC?").upper()
     if function in RESISTANCE_FUNCTIONS:
         raise LoadError("unsupported_live_scope",
-                        "This CC scope cannot verify LED OFF when switching from CR.")
+                        "This CC scope cannot verify LED OFF when switching from CR.",
+                        function=function, before_remote=before_remote)
     if function not in {"CURR", "CURRENT", "VOLT", "VOLTAGE", "POW", "POWER"}:
         raise LoadError("unsafe_mode", "Cannot determine the current load function.")
 
@@ -1000,12 +1001,12 @@ def _perform(session, command: str, *, current: object | None,
         setup_stop = stop if guard_mode else None
         completed = []
 
-        def check_origin():
+        def check_origin(*, before_remote):
             if guard_mode:
                 _fixed_setup_guard(session, stop)
             if allow_led_cleanup:
                 return _check_mode_change(session, fixed_cc=True)
-            _check_cc_origin_without_led_access(session)
+            _check_cc_origin_without_led_access(session, before_remote=before_remote)
             return False
 
         # IT8812C hardware rejects nonzero CURR after CURR:RANG MIN
@@ -1020,12 +1021,12 @@ def _perform(session, command: str, *, current: object | None,
             # Remote is a control-state change: never send it for a read-only
             # operation or before a fresh physical Input OFF confirmation.
             _input_off(session)
-            check_origin()
+            check_origin(before_remote=True)
             _mutation_off(session, setup_stop)
             _write(session, "SYST:REM")
             if guard_mode:
                 completed.append("remote")
-            if check_origin():
+            if check_origin(before_remote=False):
                 _set_led(session, False, stop)
                 completed.append("led_off")
             for action, name in sequence:
