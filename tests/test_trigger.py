@@ -107,7 +107,7 @@ def test_trigger_setup_dry_run_and_stop_preserve_input_and_configuration():
     assert error.value.code == "stopping" and simulator.trigger_source == "HOLD"
 
 
-@pytest.mark.parametrize("fault", [None, "input", "remote", "snapshot", "write", "interval"])
+@pytest.mark.parametrize("fault", [None, "input", "remote", "snapshot", "write", "interval", "source"])
 def test_trigger_physical_snapshot_write_and_restore(monkeypatch, fault):
     fake = TriggerFake()
     session(fake, monkeypatch)
@@ -124,14 +124,22 @@ def test_trigger_physical_snapshot_write_and_restore(monkeypatch, fault):
             fake.values["TRIG:SOUR"] = "UNKNOWN"
         elif fault == "write":
             fake.write_fail = "TRIG:TIM 0.25"
+        elif fault == "source":
+            fake.ignore = "TRIG:SOUR TIM"
         else:
             fake.ignore = "TRIG:TIM 0.25"
-        with pytest.raises(LoadError):
+        with pytest.raises(LoadError) as error:
             physical("trigger-configure", trigger_source="TIMER", trigger_interval="0.25")
         expected = {"input": [], "remote": ["SYST:REM"], "snapshot": [],
                     "write": ["SYST:REM", "TRIG:TIM 0.25"],
-                    "interval": ["SYST:REM", "TRIG:TIM 0.25"]}[fault]
+                    "interval": ["SYST:REM", "TRIG:TIM 0.25"],
+                    "source": ["SYST:REM", "TRIG:TIM 0.25", "TRIG:SOUR TIM"]}[fault]
         assert [command for command in fake.calls if "?" not in command] == expected
+        if fault in {"interval", "source"}:
+            assert error.value.details["trigger_readbacks"] == (
+                {"source": "UNCONFIRMED", "interval_s": "MISMATCH"} if fault == "interval" else
+                {"source": "MISMATCH", "interval_s": "CONFIRMED"}
+            )
         return
     result = physical("trigger-configure", trigger_source="TIMER", trigger_interval="0.25")
     assert result["source"] == "TIMER" and result["interval_s"] == "0.25"
@@ -142,11 +150,7 @@ def test_trigger_physical_snapshot_write_and_restore(monkeypatch, fault):
     assert restored == original and not fake.input
 
 
-@pytest.mark.parametrize("function,source,scpi", [
-    ("CC", "HOLD", "TRIG:IMM"), ("CV", "BUS", "*TRG"), ("CR", "HOLD", "TRIG:IMM"),
-    ("CW", "BUS", "*TRG"), ("LIST", "BUS", "*TRG"),
-])
-def test_native_trigger_scpi_dispatch_and_off(monkeypatch, function, source, scpi):
+def prepare_native_trigger(monkeypatch, function, source):
     fake = TriggerFake()
     session(fake, monkeypatch)
     physical("trigger-configure", trigger_source=source)
@@ -161,6 +165,15 @@ def test_native_trigger_scpi_dispatch_and_off(monkeypatch, function, source, scp
     expected = {"function": function, "configuration": settings, "trigger": {"source": source}}
     if function != "LIST":
         physical("transient-enable", validation_settings=expected)
+    return fake, trigger_command, expected
+
+
+@pytest.mark.parametrize("function,source,scpi", [
+    ("CC", "HOLD", "TRIG:IMM"), ("CV", "BUS", "*TRG"), ("CR", "HOLD", "TRIG:IMM"),
+    ("CW", "BUS", "*TRG"), ("LIST", "BUS", "*TRG"),
+])
+def test_native_trigger_scpi_dispatch_and_off(monkeypatch, function, source, scpi):
+    fake, trigger_command, expected = prepare_native_trigger(monkeypatch, function, source)
     assert physical("input-on", confirmed=True, validation_settings=expected)["input_state"] == "ON"
     fake.calls.clear()
     if function == "LIST":
@@ -176,6 +189,31 @@ def test_native_trigger_scpi_dispatch_and_off(monkeypatch, function, source, scp
     assert physical("input-off")["input_state"] == "OFF"
     physical("list-exit" if function == "LIST" else "transient-disable")
     assert not fake.input and fake.mode == "FIX" and not fake.transient
+
+
+@pytest.mark.parametrize("function,last_read", [("CC", "INP:TIM?"), ("LIST", "LIST:WID? 2")])
+@pytest.mark.parametrize("trigger", [False, True])
+def test_native_trigger_rechecks_input_after_settings_readback(monkeypatch, function, last_read, trigger):
+    fake, trigger_command, expected = prepare_native_trigger(monkeypatch, function, "BUS")
+    if trigger:
+        physical("input-on", confirmed=True, validation_settings=expected)
+    fake.calls.clear()
+    original_query = fake.query
+
+    def query(command):
+        response = original_query(command)
+        if command == last_read and "SYST:REM" in fake.calls:
+            fake.input = not trigger
+        return response
+
+    monkeypatch.setattr(fake, "query", query)
+    with pytest.raises(LoadError) as error:
+        if trigger:
+            physical(trigger_command, validation_settings=expected)
+        else:
+            physical("input-on", confirmed=True, validation_settings=expected)
+    assert error.value.code == ("input_not_on" if trigger else "input_not_off")
+    assert [command for command in fake.calls if "?" not in command] == ["SYST:REM"]
 
 
 def test_trigger_cli_and_native_refusals_do_not_open_visa(monkeypatch, capsys):

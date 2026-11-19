@@ -352,6 +352,8 @@ def _perform(session, command, scope, expected, sequence, stop, *, trigger=None,
             exc.details["completed_steps"] = completed
         raise
     if command == "input-on":
+        if trigger_scope:
+            c._mutation_off(session, stop)
         try:
             c._write(session, "INP ON")
             if not c._confirm_input_state(session, "ON"):
@@ -361,6 +363,8 @@ def _perform(session, command, scope, expected, sequence, stop, *, trigger=None,
             raise
         return {**snapshot, "input_state": "ON"}
     if command == "transient-trigger":
+        if trigger_scope:
+            _require_trigger_input_on(session, stop, "Transient")
         c._write(session, software_trigger(trigger["source"]) if trigger else "TRIG:IMM")
         return {**snapshot, "trigger_dispatched_at_utc": datetime.now(timezone.utc).isoformat(),
                 "waveform_completion_known": False}
@@ -374,12 +378,16 @@ def _perform(session, command, scope, expected, sequence, stop, *, trigger=None,
 
 def _trigger_snapshot(session):
     source = read_source(c._query(session, TRIGGER_SOURCE_QUERY))
+    return {"source": source, "interval_s": _trigger_interval(session)}
+
+
+def _trigger_interval(session):
     interval = _number(session, TRIGGER_INTERVAL_QUERY)
     try:
         validate_interval(interval)
     except LoadError as exc:
         raise LoadError("invalid_response", "Trigger Timer readback is outside its documented bounds.", 3) from exc
-    return {"source": source, "interval_s": interval}
+    return interval
 
 
 def _check_trigger(session, expected):
@@ -390,18 +398,42 @@ def _check_trigger(session, expected):
 
 
 def _configure_trigger(session, settings, writes, stop):
-    c._mutation_off(session, stop)
-    original = _trigger_snapshot(session)
-    c._mutation_off(session, stop)
-    c._write(session, "SYST:REM")
-    for write in writes:
+    readbacks = {"source": "UNCONFIRMED", "interval_s": "UNCONFIRMED"}
+    try:
         c._mutation_off(session, stop)
-        c._write(session, write)
-        if write.startswith("TRIG:TIM "):
-            _check_trigger(session, {"interval_s": settings["interval_s"]})
-    checked = _check_trigger(session, {**original, **settings})
-    c._input_off(session)
-    return {**_serial(checked), "input_state": "OFF", "state_source": "instrument_readback"}
+        expected = {**_trigger_snapshot(session), **settings}
+        c._mutation_off(session, stop)
+        c._write(session, "SYST:REM")
+        for write in writes:
+            c._mutation_off(session, stop)
+            writing_interval = write.startswith("TRIG:TIM ")
+            if not writing_interval:
+                # A Source write invalidates the earlier Timer readback.
+                readbacks["interval_s"] = "UNCONFIRMED"
+            c._write(session, write)
+            if writing_interval:
+                if _trigger_interval(session) != expected["interval_s"]:
+                    readbacks["interval_s"] = "MISMATCH"
+                    raise LoadError("readback_mismatch", "Trigger Timer did not match.", 3)
+                readbacks["interval_s"] = "CONFIRMED"
+        interval = _trigger_interval(session)
+        readbacks["interval_s"] = "CONFIRMED" if interval == expected["interval_s"] else "MISMATCH"
+        source = read_source(c._query(session, TRIGGER_SOURCE_QUERY))
+        readbacks["source"] = "CONFIRMED" if source == expected["source"] else "MISMATCH"
+        if "MISMATCH" in readbacks.values():
+            raise LoadError("readback_mismatch", "Trigger Setup differs from the requested settings.", 3)
+        c._input_off(session)
+        return {"source": source, "interval_s": str(interval), "input_state": "OFF",
+                "state_source": "instrument_readback"}
+    except LoadError as exc:
+        exc.details["trigger_readbacks"] = readbacks
+        raise
+
+
+def _require_trigger_input_on(session, stop, function):
+    if c._flag(session, "INP:STAT?") != "ON":
+        raise LoadError("input_not_on", f"{function} trigger requires Input ON.")
+    _stopping(stop)
 
 
 def _list_writes(configuration):
@@ -440,8 +472,7 @@ def _validation_list(session, command, configuration, trigger, writes, stop):
     def guard():
         _stopping(stop)
         if command == "list-trigger":
-            if c._flag(session, "INP:STAT?") != "ON":
-                raise LoadError("input_not_on", "LIST trigger requires Input ON.")
+            _require_trigger_input_on(session, stop, "LIST")
             if c._flag(session, "TRAN?") != "OFF" or c._flag(session, "INP:SHOR:STAT?") != "OFF":
                 raise LoadError("unsafe_mode", "LIST trigger requires Transient and Short OFF.")
         else:
@@ -469,7 +500,7 @@ def _validation_list(session, command, configuration, trigger, writes, stop):
             c._write(session, write)
         result = _list_snapshot(session, configuration)
     elif command == "input-on":
-        _stopping(stop)
+        c._mutation_off(session, stop)
         try:
             c._write(session, "INP ON")
             if not c._confirm_input_state(session, "ON"):
@@ -479,7 +510,7 @@ def _validation_list(session, command, configuration, trigger, writes, stop):
             raise
         return {**result, "input_state": "ON"}
     elif command == "list-trigger":
-        _stopping(stop)
+        _require_trigger_input_on(session, stop, "LIST")
         c._write(session, software_trigger(trigger["source"]))
         return {**result, "input_state": "ON",
                 "trigger_dispatched_at_utc": datetime.now(timezone.utc).isoformat(),

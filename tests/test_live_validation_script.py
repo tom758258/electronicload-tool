@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import time
 
@@ -568,13 +569,18 @@ def test_trace_validation_script_plan_only_and_noninteractive_refusal(run_script
     assert 'requires an interactive console' in refused.stdout
 
 
-def run_interactive_script(run_script, tmp_path, modes, *, extra=(), readiness=None, observation=None):
+def run_interactive_script(run_script, tmp_path, modes, *, extra=(), readiness=None, observation=None,
+                           interrupt=False, total_deadline_ms=None):
     # Preserve the actual interactive gate and stub only unrelated offline preflight.
     import pty
 
     scripts = tmp_path / 'scripts'
     scripts.mkdir()
-    shutil.copyfile(ROOT / 'scripts/live-cli-check.ps1', scripts / 'live-cli-check.ps1')
+    script = (ROOT / 'scripts/live-cli-check.ps1').read_text(encoding='utf-8')
+    if total_deadline_ms is not None:
+        # Shorten only the operational clock for an unattended prompt test.
+        script = script.replace('{ 900000 }', f'{{ {total_deadline_ms} }}', 1)
+    (scripts / 'live-cli-check.ps1').write_text(script, encoding='utf-8')
     (scripts / 'preflight-cli.ps1').write_text('exit 0\n', encoding='utf-8')
     (tmp_path / '.venv').symlink_to(ROOT / '.venv', target_is_directory=True)
     master, slave = pty.openpty()
@@ -599,6 +605,9 @@ def run_interactive_script(run_script, tmp_path, modes, *, extra=(), readiness=N
                     if readiness is not None and log.count('press Enter to start the bounded') > ready_prompts:
                         os.write(master, readiness + b'\n')
                         ready_prompts += 1
+                    if interrupt and 'Observation started for MANUAL.' in log:
+                        process.send_signal(signal.SIGINT)
+                        interrupt = False
                     if observation is not None and log.count('Did you observe the expected') > observed_prompts:
                         os.write(master, observation + b'\n')
                         observed_prompts += 1
@@ -637,6 +646,8 @@ def test_trigger_validation_script_plan_preflight_and_noninteractive_refusal(run
     assert not any(name.startswith('transient-') or name.startswith('cc-') for name in cases)
     refused = run_script(['-Modes', 'trigger'])
     assert refused.returncode == 2 and 'requires an interactive console' in refused.stdout
+    mixed = run_script(['-Modes', 'transient-cc,trigger', '-PlanOnly'])
+    assert mixed.returncode == 2 and 'preserve the original Trigger Source' in mixed.stdout
     preflight = run_script(['-TriggerOnly'], preflight=True)
     assert preflight.returncode == 0, preflight.stdout + preflight.stderr
 
@@ -659,13 +670,15 @@ def fake_trigger_main(argv=None):
     }
     with open(TRIGGER_LOG, 'a', encoding='utf-8') as log:
         log.write(json.dumps([command, state.copy(), args[1:]]) + '\n')
-    error = None
+    error = details = None
     if command == 'trigger-configure':
         source = args[args.index('--source') + 1]
         if state['input_state'] != 'OFF':
             error = 'input_not_off'
         elif source == 'EXTERNAL' and '--interval-s' in args and SCENARIO == 'restore_failed':
+            state['interval_s'] = args[args.index('--interval-s') + 1]
             error = 'readback_mismatch'
+            details = {'trigger_readbacks': {'source': 'MISMATCH', 'interval_s': 'CONFIRMED'}}
         else:
             state['source'] = source
             if '--interval-s' in args:
@@ -680,7 +693,7 @@ def fake_trigger_main(argv=None):
     result = {**state, 'visa': {'library': 'FAKE', 'manufacturer': 'FAKE'},
               'voltage_v': 5, 'current_a': 0, 'power_w': 0}
     print(json.dumps({'ok': error is None, 'result': result if error is None else None,
-                      'error': {'code': error} if error else None}))
+                      'error': {'code': error, 'details': details} if error else None}))
     return 0 if error is None else 3
 
 cli.main = fake_trigger_main
@@ -689,7 +702,8 @@ cli.main = fake_trigger_main
 
 @pytest.mark.skipif(os.name == 'nt', reason='Requires a POSIX pseudo-terminal for fake operator input.')
 @pytest.mark.parametrize('scenario', ['observed', 'not_observed', 'invalid_answer', 'cancelled',
-                                     'on_timeout', 'off_unconfirmed', 'restore_failed'])
+                                     'on_timeout', 'off_unconfirmed', 'restore_failed', 'interrupted',
+                                     'ready_timeout', 'answer_timeout'])
 def test_trigger_validation_interactive_cleanup_with_fake_cli(run_script, tmp_path, scenario):
     events = tmp_path / 'trigger-commands.jsonl'
     state = tmp_path / 'trigger-state.json'
@@ -704,15 +718,20 @@ def test_trigger_validation_interactive_cleanup_with_fake_cli(run_script, tmp_pa
                '-TriggerIntervalSeconds', '0.25', '-TriggerListWidthA', '0.1', '-TriggerListWidthB', '0.1',
                '-TriggerListRepeat', '1', '-LevelA', '0.1', '-LevelB', '0.2', '-RiseSlew', '0.1',
                '-FallSlew', '0.1', '-PulseWidth', '0.1', '-TriggerExternalSetup', 'PRIVATE EXTERNAL SETUP'),
-        readiness=b'cancel' if scenario == 'cancelled' else b'',
-        observation={'not_observed': b'No', 'invalid_answer': b'unknown'}.get(scenario, b'Yes'),
+        readiness={'cancelled': b'cancel', 'ready_timeout': None}.get(scenario, b''),
+        observation={'not_observed': b'No', 'invalid_answer': b'unknown', 'answer_timeout': None}.get(scenario, b'Yes'),
+        interrupt=scenario == 'interrupted',
+        total_deadline_ms=15000 if scenario in ('ready_timeout', 'answer_timeout') else None,
     )
     assert code == (0 if scenario == 'observed' else 3), console
     calls = [json.loads(line) for line in events.read_text().splitlines()]
     commands = [row[0] for row in calls]
     assert commands[:4] == ['identify', 'input-state', 'measure', 'trigger-status']
-    expected_on = 5 if scenario in ('observed', 'restore_failed') else 0 if scenario == 'cancelled' else 1
-    assert commands.count('input-on') == commands.count('input-off') == expected_on
+    expected_on = 5 if scenario in ('observed', 'restore_failed') else 0 if scenario in (
+        'cancelled', 'ready_timeout',
+    ) else 1
+    assert commands.count('input-on') == expected_on
+    assert commands.count('input-off') == (0 if scenario == 'on_timeout' else expected_on)
     for command, before, _ in calls:
         if command == 'trigger-configure':
             assert before['input_state'] == 'OFF'
@@ -721,19 +740,32 @@ def test_trigger_validation_interactive_cleanup_with_fake_cli(run_script, tmp_pa
     report_path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', console)[-1])
     text = report_path.read_text(encoding='utf-8-sig')
     report = json.loads(text)
+    assert report['overall_status'] == ('PASS' if scenario == 'observed' else 'FAIL')
     assert RESOURCE not in text and 'PRIVATE EXTERNAL SETUP' not in text
     results = {entry['name']: entry for entry in report['cases']}
     assert results['trigger-snapshot']['trigger_interval_s'] == '0.375'
     restored = scenario not in ('on_timeout', 'off_unconfirmed', 'restore_failed')
     assert report['trigger_restore_status'] == ('PASS' if restored else 'FAIL')
-    assert report['trigger_input_off_unconfirmed'] is (scenario == 'off_unconfirmed')
+    assert report['trigger_input_off_unconfirmed'] is (scenario in ('on_timeout', 'off_unconfirmed'))
     if restored:
         assert json.loads(state.read_text()) == {'source': 'EXTERNAL', 'interval_s': '0.375', 'input_state': 'OFF'}
         assert results['trigger-restore']['status'] == 'PASS'
+        assert results['trigger-restore']['trigger_source_restore'] == 'CONFIRMED'
+        assert results['trigger-restore']['trigger_interval_restore'] == 'CONFIRMED'
     elif scenario in ('on_timeout', 'off_unconfirmed'):
-        assert commands[-1] == 'input-off'
+        assert commands[-1] == ('input-on' if scenario == 'on_timeout' else 'input-off')
+        assert 'Use the independent manual OFF procedure immediately.' in console
         assert results['trigger-restore']['status'] == 'NOT RUN'
         assert 'Did you observe' not in console
+    elif scenario == 'restore_failed':
+        assert results['trigger-restore']['trigger_source_restore'] == 'MISMATCH'
+        assert results['trigger-restore']['trigger_interval_restore'] == 'CONFIRMED'
+    if scenario == 'interrupted':
+        assert results['trigger-manual-observed']['status'] == 'FAIL'
+        assert results['trigger-manual-off']['status'] == 'PASS'
+        assert 'Did you observe' not in console
+    if scenario in ('ready_timeout', 'answer_timeout'):
+        assert results['trigger-manual-observed']['error_code'] == 'deadline_expired'
     if scenario == 'not_observed':
         assert results['trigger-manual-observed']['operator_observed'] == 'No'
     if scenario == 'observed':

@@ -166,9 +166,11 @@ function Save-Report {
         if ($entry.Contains('condition')) { $case.condition = $entry.condition }
         if ($entry.Contains('origin_function')) { $case.origin_function = $entry.origin_function }
         foreach ($field in @('trace_source','trace_points','trace_interval_s','trace_sample_count',
-                             'trace_csv_complete','operator_observed','trigger_source','trigger_interval_s')) {
+                             'trace_csv_complete','operator_observed','trigger_source','trigger_interval_s',
+                             'trigger_source_restore','trigger_interval_restore')) {
             if ($entry.Contains($field)) { $case[$field] = $entry[$field] }
         }
+        if ($entry.Contains('confirmed_input_state')) { $case.input_state = $entry.confirmed_input_state }
         if ($entry.status -eq 'PASS') {
             if ($entry.command -in @('input-state','input-on','input-off','input-timer-status',
                                      'trigger-configure','trigger-status')) {
@@ -254,6 +256,9 @@ function Save-Report {
     )
     if ($public.slow_rise_cleanup_unconfirmed) {
         $lines += 'Current Slow Rise OFF was not confirmed. Independent operator action is required.'
+    }
+    if ($public.trigger_input_off_unconfirmed) {
+        $lines += 'Trigger Input OFF was not confirmed. Use the independent manual OFF procedure immediately.'
     }
     foreach ($case in $cases) { $lines += "$($case.name): $($case.status)" }
     $lines += "Cases: $($counts.passed) PASS, $($counts.failed) FAIL, $($counts.skipped) SKIP, $($counts.not_run) NOT RUN"
@@ -392,6 +397,14 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
             $code = [string]$result.error.code
             $details = $result.error.details
             $entry['error_code'] = $(if ($code -cmatch '^[a-z_]+$') { $code } else { 'execution_failed' })
+            if ($CaseName -ceq 'trigger-restore') {
+                if ($details.trigger_readbacks.source -cin @('CONFIRMED','MISMATCH','UNCONFIRMED')) {
+                    $entry['trigger_source_restore'] = $details.trigger_readbacks.source
+                }
+                if ($details.trigger_readbacks.interval_s -cin @('CONFIRMED','MISMATCH','UNCONFIRMED')) {
+                    $entry['trigger_interval_restore'] = $details.trigger_readbacks.interval_s
+                }
+            }
             if ($CaseName.StartsWith('trigger-') -and $result.ok -eq $false -and
                 $null -eq $details.cleanup_errors -and $code -in @('readback_mismatch','unsafe_mode',
                     'input_not_off','input_not_on','input_timer_enabled','unsafe_trigger_source')) {
@@ -616,9 +629,38 @@ function Assert-TriggerOff($Response, [string]$Name) {
     Assert-InputOff $Response $Name
 }
 
+function Read-TriggerAnswer([string]$Prompt, [string]$CaseName) {
+    Write-Host $Prompt
+    $answer = [Text.StringBuilder]::new()
+    while ($script:watch.ElapsedMilliseconds -lt $script:totalDeadlineMs) {
+        if (-not [Console]::KeyAvailable) {
+            Start-Sleep -Milliseconds 50
+            continue
+        }
+        $key = [Console]::ReadKey($true)
+        if ($script:watch.ElapsedMilliseconds -ge $script:totalDeadlineMs) { break }
+        if ($key.Key -eq [ConsoleKey]::Enter) {
+            Write-Host ''
+            return $answer.ToString()
+        }
+        if ($key.Key -eq [ConsoleKey]::Backspace) {
+            if ($answer.Length -gt 0) {
+                $answer.Length--
+                Write-Host -NoNewline "`b `b"
+            }
+        } else {
+            [void]$answer.Append($key.KeyChar)
+            if (-not [char]::IsControl($key.KeyChar)) { Write-Host -NoNewline $key.KeyChar }
+        }
+    }
+    Fail-Case $CaseName 'deadline_expired' 'The total CLI validation deadline expired while waiting for the operator.'
+}
+
 function Invoke-TriggerTrial($Trial) {
     $prefix = $Trial.prefix
     $armed = $false
+    $awaitingObservation = $false
+    $entry = $script:report.results | Where-Object { $_.name -ceq "$prefix-observed" }
     try {
         $configured = Invoke-TriggerStep "$prefix-configure"
         Assert-TriggerOff $configured "$prefix-configure"
@@ -637,7 +679,7 @@ function Invoke-TriggerTrial($Trial) {
         if ($Trial.isList) {
             Write-Host "Expect LIST CC levels $LevelA A then $LevelB A for $TriggerListWidthA s / $TriggerListWidthB s, repeated $TriggerListRepeat time(s)."
         } else {
-            Write-Host "Expect a Transient CC pulse from $LevelA A to $LevelB A for $PulseWidth s."
+            Write-Host "Expect baseline B ($LevelB A), a pulse at A ($LevelA A) for $PulseWidth s, then a return to B."
         }
         switch ($Trial.source) {
             'MANUAL' { Write-Host 'When the observation starts, press Local, then Shift + . (Trigger) on the IT8812C.' }
@@ -648,7 +690,9 @@ function Invoke-TriggerTrial($Trial) {
             'TIMER' { Write-Host "Watch for at least two Timer pulses at $($Trial.interval) s intervals. No operator pulse is required." }
             default { Write-Host 'The script will send one software trigger after Input ON is confirmed.' }
         }
-        $ack = Read-Host 'With Input OFF and capture ready, press Enter to start the bounded observation (Ctrl+C to cancel)'
+        $awaitingObservation = $true
+        $entry['operator_observed'] = 'Unconfirmed'
+        $ack = Read-TriggerAnswer 'With Input OFF and capture ready, press Enter to start the bounded observation (Ctrl+C to cancel)' "$prefix-observed"
         if ($null -eq $ack -or $ack -cne '') {
             Fail-Case "$prefix-observed" 'operator_cancelled' 'Operator did not confirm readiness.'
         }
@@ -685,12 +729,20 @@ function Invoke-TriggerTrial($Trial) {
             if ($remaining -gt 0) { Start-Sleep -Milliseconds $remaining }
         } finally {
             try {
-                if ($script:triggerProcessStillRunning) {
-                    throw 'The prior CLI process could not be stopped. Do not start a competing VISA session.'
+                if (-not $script:triggerTrusted -or $script:triggerProcessStillRunning) {
+                    Write-Host 'Trigger communication is untrusted. No new VISA session will be started.'
+                } else {
+                    $offBudget = [Math]::Min($offReserveMs, $hardStop - $script:watch.ElapsedMilliseconds - $terminationMs)
+                    # If already late, still attempt emergency OFF once with the reserved timeout.
+                    if ($offBudget -le 0) { $offBudget = $offReserveMs }
+                    $off = Invoke-TriggerStep "$prefix-off" -DeadlineMs $offBudget -TerminationMs $terminationMs -Cleanup
+                    Assert-TriggerOff $off "$prefix-off"
+                    if ($script:watch.ElapsedMilliseconds -ge $hardStop) {
+                        $offEntry = $script:report.results | Where-Object { $_.name -ceq "$prefix-off" }
+                        $offEntry['confirmed_input_state'] = 'OFF'
+                        Fail-Case "$prefix-off" 'deadline_expired' 'Input OFF was confirmed after the Trigger trial deadline.'
+                    }
                 }
-                $offBudget = [Math]::Max(1, $hardStop - $script:watch.ElapsedMilliseconds)
-                $off = Invoke-TriggerStep "$prefix-off" -DeadlineMs $offBudget -TerminationMs $terminationMs -Cleanup
-                Assert-TriggerOff $off "$prefix-off"
             } finally {
                 $script:triggerPowered = $false
                 $script:report.trigger_input_off_unconfirmed = -not $script:triggerOffConfirmed
@@ -702,8 +754,7 @@ function Invoke-TriggerTrial($Trial) {
                 Save-Report
             }
         }
-        $entry = $script:report.results | Where-Object { $_.name -ceq "$prefix-observed" }
-        $answer = Read-Host "Input OFF confirmed. Did you observe the expected $($Trial.source) result? (Yes/No)"
+        $answer = Read-TriggerAnswer "Input OFF confirmed. Did you observe the expected $($Trial.source) result? (Yes/No)" "$prefix-observed"
         $entry['operator_observed'] = if ($answer -ieq 'Yes') { 'Yes' } elseif ($answer -ieq 'No') { 'No' } else { 'Unconfirmed' }
         if ($answer -ine 'Yes') {
             Fail-Case "$prefix-observed" 'observation_unconfirmed' 'Operator did not confirm the expected physical trigger result.'
@@ -713,6 +764,10 @@ function Invoke-TriggerTrial($Trial) {
         }
         $entry.status = 'PASS'
     } finally {
+        if ($awaitingObservation -and $entry.status -eq 'NOT RUN') {
+            $entry.status = 'FAIL'
+            $entry['error_code'] = 'observation_incomplete'
+        }
         if ($armed -and $script:triggerTrusted -and $script:triggerOffConfirmed) {
             Assert-TriggerOff (Invoke-TriggerStep "$prefix-release" -Cleanup) "$prefix-release"
         }
@@ -732,27 +787,34 @@ function Invoke-TriggerValidation {
         foreach ($trial in $script:triggerTrials) { Invoke-TriggerTrial $trial }
     } finally {
         $script:report.trigger_restore_status = 'FAIL'
+        $entry = $script:report.results | Where-Object { $_.name -ceq 'trigger-restore' }
+        $entry['trigger_source_restore'] = 'UNCONFIRMED'
+        $entry['trigger_interval_restore'] = 'UNCONFIRMED'
         if ($script:triggerTrusted -and $script:triggerOffConfirmed) {
             $restore = $script:triggerPlans | Where-Object { $_.name -ceq 'trigger-restore' }
             $restore.args = $triggerScope + @('--source',$source,'--interval-s',$interval)
-            $entry = $script:report.results | Where-Object { $_.name -ceq 'trigger-restore' }
             $entry.arguments = $restore.args
             try {
                 $restored = Invoke-TriggerStep 'trigger-restore' -Cleanup
+                $entry['trigger_source_restore'] = if ($restored.result.source -ceq $source) { 'CONFIRMED' } else { 'MISMATCH' }
+                $entry['trigger_interval_restore'] = if ($null -eq $restored.result.interval_s) { 'UNCONFIRMED' }
+                    elseif ([decimal]$restored.result.interval_s -eq [decimal]$interval) { 'CONFIRMED' } else { 'MISMATCH' }
                 Assert-TriggerOff $restored 'trigger-restore'
-                if ($restored.result.source -cne $source -or
-                    [decimal]$restored.result.interval_s -ne [decimal]$interval) {
+                if ($entry.trigger_source_restore -cne 'CONFIRMED' -or $entry.trigger_interval_restore -cne 'CONFIRMED') {
                     Fail-Case 'trigger-restore' 'readback_mismatch' 'Original Trigger Setup was not confirmed.'
                 }
                 $script:report.trigger_restore_status = 'PASS'
             } finally {
                 if ($script:report.trigger_restore_status -ne 'PASS') {
-                    Write-Host 'Original Trigger Source and Timer Interval were not both confirmed. Operator action is required.'
+                    Write-Host "Trigger restoration status: Source $($entry.trigger_source_restore), Timer Interval $($entry.trigger_interval_restore). Operator action is required."
                 }
             }
         } else {
-            throw 'Original Trigger Source and Timer Interval were not restored. Confirm physical OFF and restore them manually once communication is reliable.'
+            Write-Host 'Original Trigger Source and Timer Interval were not restored. Confirm physical OFF and restore them manually once communication is reliable.'
         }
+    }
+    if ($script:report.trigger_restore_status -ne 'PASS') {
+        throw 'Original Trigger Source and Timer Interval were not confirmed.'
     }
     if ($script:watch.ElapsedMilliseconds -ge $totalDeadlineMs) {
         throw 'The total CLI validation deadline expired during Trigger cleanup.'
@@ -839,6 +901,9 @@ function Assert-TraceResult([object]$Result, [hashtable]$Step) {
 try {
     if ($requestedModes.Count -eq 0 -or @($requestedModes | Where-Object { $_ -notin $supportedModes }).Count -gt 0) {
         throw "Modes must contain one or more of: $($supportedModes -join ', ')."
+    }
+    if ($triggerSelected -and @($selectedModes | Where-Object { $_.StartsWith('transient-') }).Count -gt 0) {
+        throw 'Run Trigger validation separately from legacy Transient modes to preserve the original Trigger Source.'
     }
     if (-not $Target -or -not $Resource) {
         Write-Host 'BLOCKED: explicit -Target and -Resource are required.'
@@ -1347,6 +1412,9 @@ try {
     }
     Write-Host "Validation did not complete: $($_.Exception.Message)"
 } finally {
+    # PowerShell pipeline interruption can bypass catch and the exit after finally.
+    $triggerInterrupted = $triggerSelected -and $phase -in @('identify','cases') -and $report.status -eq 'NOT RUN'
+    if ($triggerInterrupted) { $report.status = 'FAIL' }
     if ($inputOnAttempted) {
         $report.results += [ordered]@{
             name = 'cleanup-input-off'; command = 'input-off'; status = 'NOT RUN'
@@ -1446,6 +1514,15 @@ try {
         if ($report.status -ne 'PASS' -and $report.status -ne 'PLAN ONLY') { Show-Summary }
         Write-Host "Report: $reportDirectory/shareable/report.json"
         if ($DebugArtifacts) { Write-Host "Private debug logs: $reportDirectory/private (review before sharing)" }
+    }
+    if ($triggerInterrupted) {
+        # A stopped -File pipeline can discard a script-level exit. Exit only
+        # the dedicated file host, and only after cleanup and report writes.
+        if ([string]::IsNullOrEmpty($MyInvocation.Line) -and $MyInvocation.InvocationName -eq $PSCommandPath) {
+            [Environment]::Exit(3)
+        }
+        $global:LASTEXITCODE = 3
+        exit 3
     }
 }
 if ($report.status -eq 'PASS' -or $report.status -eq 'PLAN ONLY') { exit 0 }

@@ -1100,7 +1100,9 @@ Product LIVE support.
 Select `live-cli-check.ps1 -Modes trigger` with the usual approved model,
 explicit USB Resource, source/DUT limits and independent manual OFF procedure.
 Add `-PlanOnly` to check the command plan without VISA access. For a physical
-run, supply these approved values explicitly.
+run, supply these approved values explicitly. Run any legacy
+`transient-cc/cv/cr/cw` validation separately, since those modes set HOLD
+before Trigger validation can save the original settings.
 
 | Parameters | Purpose |
 | --- | --- |
@@ -1111,7 +1113,8 @@ run, supply these approved values explicitly.
 | `-TriggerExternalSetup` | Reviewed pulse equipment, signal limits and wiring. The console displays this description for confirmation. |
 
 Use a current observation method that can resolve the chosen levels and pulse
-or dwell times. MANUAL, HOLD and TIMER use Transient CC Pulse. BUS and EXTERNAL
+or dwell times. MANUAL, HOLD and TIMER use Transient CC Pulse (baseline B,
+pulse at A for the configured width, then back to B). BUS and EXTERNAL
 use a two-step LIST CC, with a zero fixed-current baseline before LIST
 selection. The test replaces the active CC Transient and LIST configurations.
 Use the IT8812C Local key followed by Shift plus the decimal/Trigger key for
@@ -1125,11 +1128,15 @@ The script saves the original Trigger Source and interval while Input is OFF.
 Press Enter before each trial to confirm the setup and then perform any
 requested physical trigger during the bounded observation. The script
 explicitly attempts and verifies Input OFF before requesting a Yes/No answer.
-Yes confirms the expected observable effect. Insufficient observation,
-cancellation and unsuccessful restoration fail the validation. The script
-restores and verifies both original Trigger settings only after confirmed OFF
-and trusted communication. Use the independent manual procedure if OFF or
-restoration is unconfirmed. Treat TIMER observation as a functional test.
+The readiness and observation prompts count toward the 900 s limit. A missed
+trial or run deadline fails validation even if bounded emergency cleanup is
+still possible. Yes confirms the expected observable effect. Insufficient
+observation, cancellation and unsuccessful restoration fail validation.
+The script restores and reports readback for each original Trigger setting
+after confirmed OFF and with trusted communication. If communication becomes
+untrusted, use the independent manual OFF procedure immediately. The script
+skips further VISA commands in that situation. Treat TIMER observation as a
+functional test.
 
 The standalone contributor scope `--hardware-validation trigger` is limited to
 IT8812C USB/System VISA. In that scope, Enable, Input ON and software Trigger
