@@ -157,6 +157,24 @@ def test_validation_cv_requires_confirmed_cr_led_off_before_mode_write(monkeypat
     assert disabled < confirmed < fake.calls.index('FUNC:MODE FIX')
 
 
+def test_transient_cr_enable_reports_remote_when_led_off_is_not_confirmed(monkeypatch):
+    fake = ValidationFake()
+    session(fake, monkeypatch)
+    settings = transient(function='CR')
+    setup('transient-cr', settings)
+    fake.values['RES:LED:STAT'] = '1'
+    fake.ignore = 'RES:LED:STAT 0'
+    fake.calls.clear()
+
+    with pytest.raises(LoadError) as error:
+        run('transient-enable', 'transient-cr', validation_settings=settings)
+    assert error.value.code == 'readback_mismatch'
+    assert error.value.details['completed_steps'] == ['SYST:REM']
+    assert error.value.details['led_enabled'] is True
+    assert [call for call in fake.calls if '?' not in call] == ['SYST:REM', 'RES:LED:STAT 0']
+    assert not fake.transient and not fake.input
+
+
 @pytest.mark.parametrize('after_remote', [False, True])
 def test_slow_rise_cc_validation_refuses_cr_without_led_access(monkeypatch, after_remote):
     fake = ValidationFake()
@@ -333,6 +351,27 @@ def test_unrecognized_physical_range_blocks_on(monkeypatch, scope, query, reply)
         run('input-on', scope, confirmed=True, validation_settings=settings)
     assert error.value.code == 'invalid_range_readback'
     assert all(call.endswith('?') for call in fake.calls)
+
+
+@pytest.mark.parametrize('led_readback,code', [('1', 'unsafe_mode'), ('UNKNOWN', 'invalid_response')])
+@pytest.mark.parametrize('after_remote', [False, True])
+def test_plain_cr_input_on_requires_confirmed_led_off(monkeypatch, led_readback, code, after_remote):
+    fake = ValidationFake()
+    session(fake, monkeypatch)
+    settings = {'resistance': '50', 'range': 'high'}
+    setup('cr', settings)
+    if after_remote:
+        fake.after_remote = lambda device: device.values.update({'RES:LED:STAT': led_readback})
+    else:
+        run('set-cr-led', 'cr-led', resistance='50', range_name='high', vdrop='1')
+        fake.values['RES:LED:STAT'] = led_readback
+    fake.calls.clear()
+
+    with pytest.raises(LoadError) as error:
+        run('input-on', 'cr', confirmed=True, validation_settings=settings)
+    assert error.value.code == code
+    assert [call for call in fake.calls if '?' not in call] == (['SYST:REM'] if after_remote else [])
+    assert not fake.input
 
 
 @pytest.mark.parametrize('function', ['CC', 'CV', 'CR', 'CW'])

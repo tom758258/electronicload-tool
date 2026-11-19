@@ -317,6 +317,8 @@ with the CR-LED interlock enabled. A future Product LIVE approval for this
 transition requires model-specific physical evidence and a support-policy
 update to allow that same Core path. A switch performed outside the tool
 may leave LED state that the current Product LIVE guard cannot establish.
+In a combined CR and TRACE validation run, the powered TRACE setup uses
+Product LIVE `set-cc` and inherits this refusal if the instrument is still in CR.
 
 Product LIVE rechecks Input OFF before **each** of the four CC setup writes. After all four
 setting readbacks it verifies Input OFF once more. Configuration never turns
@@ -384,6 +386,8 @@ decimal precision preserved. The contributor validation scope reads
 `fixed_cr` identifies the selected Fixed CR mode independently of the LED
 flag. Leaving CR-LED in a supported mode switch requires confirmed LED OFF
 before the next mode write. A failed write or readback stops setup.
+The plain CR contributor trial requires confirmed LED OFF both before and
+after entering remote for Input ON.
 
 Current Slow Rise Enable requires Fixed CC and Input OFF. Disable requires
 Input OFF in any mode. Status is read-only in any mode and returns `enabled`
@@ -403,6 +407,11 @@ Input OFF and check configuration, readback, and explicit state transitions.
 Slow Rise CC setup requires a starting function other than CR. Its trial
 also verifies that Fixed CV setup is refused before any writes while
 Slow Rise is enabled.
+
+Product LIVE Input ON cannot confirm the Slow Rise state. Before resuming
+ordinary powered CLI or Worker operation after a Slow Rise trial, explicitly
+disable Slow Rise with Input OFF and confirm the disabled state. This also
+applies after an interrupted trial.
 
 ```powershell
 .\scripts\preflight-cli.ps1 -CrLedSlowRiseOnly

@@ -118,6 +118,10 @@ Slow Rise. Dry-run validates the request without touching simulator state.
 Worker Stop remains I/O-free. Product LIVE Fixed CC refuses every reported
 resistance function, including ordinary Fixed CR with LED OFF. Verifying
 the LED state requires a separately authorized scope.
+The Worker cannot confirm the instrument's Slow Rise state on LIVE Input ON.
+Before returning an instrument from Slow Rise contributor validation to normal
+Worker operation, explicitly disable Slow Rise with Input OFF and confirm the
+disabled state through the contributor CLI.
 [CLI operation and validation](../cli/README.md#offline-cr-led-and-current-slow-rise)
 
 ## Offline Measurement Extensions

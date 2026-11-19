@@ -173,6 +173,8 @@ def _snapshot(session, scope):
         settings = {"range": "low" if raw_range == 18 else "high",
                     "voltage": _number(session, "VOLT?")}
     elif scope == "cr":
+        if c._flag(session, c.LED_QUERY) != "OFF":
+            raise LoadError("unsafe_mode", "Plain CR validation requires confirmed LED OFF.")
         raw_range = _number(session, "RES:RANG?")
         if raw_range not in (Decimal(10), Decimal(7500)):
             raise LoadError("invalid_range_readback", "Unrecognized physical CR range.", 3,
@@ -320,16 +322,27 @@ def _perform(session, command, scope, expected, sequence, stop):
         _stopping(stop)
         return result
 
-    check()
-    if command == "transient-enable":
-        c._check_mode_change(session)
-        c._mutation_off(session, stop)
-    c._write(session, "SYST:REM")
-    snapshot = check()
-    if command == "transient-enable":
-        c._leave_cr_led(session, c._check_mode_change(session), stop)
-        c._mutation_off(session, stop)
-    _stopping(stop)
+    enabling_transient = command == "transient-enable"
+    completed = []
+    try:
+        check()
+        if enabling_transient:
+            c._check_mode_change(session)
+            c._mutation_off(session, stop)
+        c._write(session, "SYST:REM")
+        completed.append("SYST:REM")
+        snapshot = check()
+        if enabling_transient:
+            led_off = c._check_mode_change(session)
+            c._leave_cr_led(session, led_off, stop)
+            if led_off:
+                completed.append("led_off")
+            c._mutation_off(session, stop)
+        _stopping(stop)
+    except LoadError as exc:
+        if enabling_transient:
+            exc.details["completed_steps"] = completed
+        raise
     if command == "input-on":
         try:
             c._write(session, "INP ON")
@@ -343,12 +356,11 @@ def _perform(session, command, scope, expected, sequence, stop):
         c._write(session, "TRIG:IMM")
         return {**snapshot, "trigger_dispatched_at_utc": datetime.now(timezone.utc).isoformat(),
                 "waveform_completion_known": False}
-    enabled = command == "transient-enable"
-    c._write(session, "TRAN ON" if enabled else "TRAN OFF")
-    if (c._flag(session, "TRAN?") == "ON") != enabled:
+    c._write(session, "TRAN ON" if enabling_transient else "TRAN OFF")
+    if (c._flag(session, "TRAN?") == "ON") != enabling_transient:
         raise LoadError("readback_mismatch", "Transient enable readback did not match.", 3)
     c._input_off(session)
-    return {"input_state": "OFF", "enabled": enabled,
+    return {"input_state": "OFF", "enabled": enabling_transient,
             **({"configuration": snapshot["configuration"]} if snapshot else {})}
 
 
