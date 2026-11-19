@@ -98,6 +98,7 @@ $triggerPlans = @()
 $triggerTrusted = $true
 $triggerOffConfirmed = $true
 $triggerPowered = $false
+$triggerProcessStillRunning = $false
 $triggerArtifacts = @()
 $commandIndex = 0
 $report = [ordered]@{
@@ -324,6 +325,7 @@ function Save-CommandArtifacts($Artifact) {
 function Invoke-LiveCommand([string]$Command, [string]$CaseName,
                             [string[]]$ExtraArgs = @(),
                             [int]$DeadlineMs = 30000,
+                            [int]$TerminationMs = 5000,
                             [string]$ExpectedError,
                             [switch]$AllowCrHandoff,
                             [switch]$Cleanup) {
@@ -349,6 +351,7 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
     $output = ''
     $diagnostic = ''
     $exitStatus = 'NOT STARTED'
+    $terminationAttempted = $false
     if ($script:slowRiseEnableAttempted) { $script:slowRiseCommunicationTrusted = $false }
     try {
         [void]$process.Start()
@@ -359,9 +362,10 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
         $stderr = $process.StandardError.ReadToEndAsync()
         if (-not $process.WaitForExit([int]$remaining)) {
             if ($traceCase) { $script:traceCommunicationUntrusted = $true }
+            $terminationAttempted = $true
             $process.Kill()
             $exitStatus = 'TIMEOUT; session/input state unconfirmed'
-            if ($process.WaitForExit(5000)) {
+            if ($process.WaitForExit($TerminationMs)) {
                 $output = $stdout.GetAwaiter().GetResult()
                 $diagnostic = $stderr.GetAwaiter().GetResult()
             }
@@ -455,9 +459,12 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
         }
         return $result
     } finally {
-        if ($started -and -not $process.HasExited) {
+        if ($started -and -not $terminationAttempted -and -not $process.HasExited) {
             $process.Kill()
-            [void]$process.WaitForExit(5000)
+            [void]$process.WaitForExit($TerminationMs)
+        }
+        if ($script:triggerPowered -and $started -and -not $process.HasExited) {
+            $script:triggerProcessStillRunning = $true
         }
         $process.Dispose()
         if ($DebugArtifacts) {
@@ -515,8 +522,8 @@ function New-TriggerPlan {
         throw 'Trigger LIVE requires -TriggerExternalSetup with the reviewed pulse source, electrical limits and wiring.'
     }
     if ($TriggerObservationSeconds -le 0 -or $TriggerMaxOnSeconds * 1000 -gt $totalDeadlineMs -or
-        $TriggerMaxOnSeconds * 1000 -le $TriggerObservationSeconds * 1000 + $perCommandDeadlineMs + 5000) {
-        throw 'Maximum Trigger ON time must cover observation, the existing 30 s OFF deadline and 5 s process termination allowance, within the total deadline.'
+        $TriggerMaxOnSeconds -le $TriggerObservationSeconds) {
+        throw 'Maximum Trigger ON time must exceed the observation time and fit within the total deadline.'
     }
     foreach ($token in @($LevelA, $LevelB, $RiseSlew, $FallSlew, $PulseWidth,
                          $TriggerIntervalSeconds, $TriggerListWidthA, $TriggerListWidthB)) {
@@ -582,12 +589,14 @@ function New-TriggerPlan {
         condition='Plan uses example settings. LIVE requires original Source and Timer readback, trusted communication and confirmed Input OFF.'}
 }
 
-function Invoke-TriggerStep([string]$Name, [int]$DeadlineMs = 30000, [switch]$Cleanup) {
+function Invoke-TriggerStep([string]$Name, [int]$DeadlineMs = 30000, [int]$TerminationMs = 5000, [switch]$Cleanup) {
     $step = $script:triggerPlans | Where-Object { $_.name -ceq $Name }
     $entry = $script:report.results | Where-Object { $_.name -ceq $Name }
     $exchangeConfirmed = $false
     try {
-        $response = Invoke-LiveCommand -Command $step.command -CaseName $Name -ExtraArgs $step.args -DeadlineMs $DeadlineMs -Cleanup:$Cleanup
+        $request = @{Command=$step.command; CaseName=$Name; ExtraArgs=$step.args;
+                     DeadlineMs=$DeadlineMs; TerminationMs=$TerminationMs; Cleanup=$Cleanup}
+        $response = Invoke-LiveCommand @request
         Assert-Runtime $response $Name
         $exchangeConfirmed = $true
         if ($step.command -in @('trigger-configure','trigger-status')) {
@@ -645,13 +654,18 @@ function Invoke-TriggerTrial($Trial) {
         }
         $hardStop = $script:watch.ElapsedMilliseconds + $TriggerMaxOnSeconds * 1000
         if ($hardStop -gt $totalDeadlineMs) { throw 'Insufficient total time for a bounded Trigger trial.' }
-        $startOffBy = $hardStop - $perCommandDeadlineMs - 5000
+        # Reserve part of the operator's extra time for OFF and for ending
+        # a timed-out command before another VISA process can start.
+        $marginMs = ($TriggerMaxOnSeconds - $TriggerObservationSeconds) * 1000
+        $offReserveMs = [Math]::Min($perCommandDeadlineMs, [Math]::Floor($marginMs / 2))
+        $terminationMs = [Math]::Min(5000, [Math]::Floor($offReserveMs / 2))
+        $startOffBy = $hardStop - $offReserveMs - $terminationMs
         $onDeadline = $startOffBy - $script:watch.ElapsedMilliseconds - $TriggerObservationSeconds * 1000
         if ($onDeadline -le 0) { throw 'Insufficient time for Trigger Input ON and observation.' }
         $script:triggerOffConfirmed = $false
         $script:triggerPowered = $true
         try {
-            $on = Invoke-TriggerStep "$prefix-on" -DeadlineMs $onDeadline
+            $on = Invoke-TriggerStep "$prefix-on" -DeadlineMs $onDeadline -TerminationMs $terminationMs
             if ($on.result.input_state -cne 'ON') {
                 Fail-Case "$prefix-on" 'input_on_not_confirmed' 'Trigger Input ON was not confirmed.'
             }
@@ -665,14 +679,17 @@ function Invoke-TriggerTrial($Trial) {
                 } else { [decimal]$PulseWidth }
                 $dispatchBudget -= [Math]::Ceiling($eventDuration * 1000)
                 if ($dispatchBudget -le 0) { throw 'Software trigger observation deadline expired.' }
-                $null = Invoke-TriggerStep "$prefix-dispatch" -DeadlineMs $dispatchBudget
+                $null = Invoke-TriggerStep "$prefix-dispatch" -DeadlineMs $dispatchBudget -TerminationMs $terminationMs
             }
             $remaining = $observeUntil - $script:watch.ElapsedMilliseconds
             if ($remaining -gt 0) { Start-Sleep -Milliseconds $remaining }
         } finally {
             try {
+                if ($script:triggerProcessStillRunning) {
+                    throw 'The prior CLI process could not be stopped. Do not start a competing VISA session.'
+                }
                 $offBudget = [Math]::Max(1, $hardStop - $script:watch.ElapsedMilliseconds)
-                $off = Invoke-TriggerStep "$prefix-off" -DeadlineMs $offBudget -Cleanup
+                $off = Invoke-TriggerStep "$prefix-off" -DeadlineMs $offBudget -TerminationMs $terminationMs -Cleanup
                 Assert-TriggerOff $off "$prefix-off"
             } finally {
                 $script:triggerPowered = $false

@@ -1104,7 +1104,7 @@ run, supply these approved values explicitly.
 
 | Parameters | Purpose |
 | --- | --- |
-| `-TriggerObservationSeconds`, `-TriggerMaxOnSeconds` | Whole seconds of observation and the per-trial deadline from before Input ON through OFF confirmation. The larger budget also covers ON, up to 30 s for OFF and 5 s for process termination, within the 900 s total deadline. |
+| `-TriggerObservationSeconds`, `-TriggerMaxOnSeconds` | Whole seconds of observation and the larger per-trial deadline from before Input ON through OFF confirmation, within the 900 s total deadline. Allow time for VISA setup, command readbacks and cleanup. The script reserves part of the difference for OFF and any process termination. |
 | `-LevelA`, `-LevelB`, `-RiseSlew`, `-FallSlew`, `-PulseWidth` | Distinct bounded Low-range CC levels, slew rates in A/μs and the Transient pulse width in seconds. Both current levels must fit the declared source limit. |
 | `-TriggerIntervalSeconds` | TIMER interval in seconds. The observation must accommodate two periods plus the pulse width. |
 | `-TriggerListWidthA`, `-TriggerListWidthB`, `-TriggerListRepeat` | LIST CC dwell times in seconds and a finite repeat count. The LIST must fit the observation window. |

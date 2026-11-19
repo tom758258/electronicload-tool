@@ -700,7 +700,7 @@ def test_trigger_validation_interactive_cleanup_with_fake_cli(run_script, tmp_pa
         output.write(FAKE_TRIGGER_CLI)
     code, console = run_interactive_script(
         run_script, tmp_path, 'trigger',
-        extra=('-TriggerObservationSeconds', '1', '-TriggerMaxOnSeconds', '39',
+        extra=('-TriggerObservationSeconds', '1', '-TriggerMaxOnSeconds', '9',
                '-TriggerIntervalSeconds', '0.25', '-TriggerListWidthA', '0.1', '-TriggerListWidthB', '0.1',
                '-TriggerListRepeat', '1', '-LevelA', '0.1', '-LevelB', '0.2', '-RiseSlew', '0.1',
                '-FallSlew', '0.1', '-PulseWidth', '0.1', '-TriggerExternalSetup', 'PRIVATE EXTERNAL SETUP'),
