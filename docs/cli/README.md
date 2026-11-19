@@ -599,8 +599,8 @@ override. Input Timer does not expand Product LIVE support.
 
 Use the existing script's `-InputTimerOnly` shortcut (without `-Modes`), or
 select `-Modes input-timer`. Input Timer is included in the default all-mode
-run. Preview with a fictional USB resource for offline checks; supply an approved resource only for a separately
-authorized physical run:
+run. Preview with a fictional USB resource for offline checks; supply an
+approved resource only for a separately authorized physical run:
 
 ```powershell
 .\scripts\preflight-cli.ps1 -InputTimerOnly
