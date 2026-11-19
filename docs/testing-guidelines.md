@@ -25,15 +25,15 @@ Linux Python 3.10–3.13 and Windows Python 3.10, 3.12 and 3.13. It excludes
 `tests/test_live_validation_script.py`, which exercises real PowerShell
 processes and is not part of routine Python-version compatibility testing.
 
-Changes to the validation scripts, their direct CLI/Core safety boundaries or
-their script tests run `tests/test_live_validation_script.py` once on Linux
-Python 3.13 (including POSIX fake-operator safety cases) and once on Windows
-Python 3.13 (Windows PowerShell contracts). Windows preflight is checked
-separately on the same affected boundary. Unrelated changes skip these costly
-script tests; packaging changes keep the existing wheel/sdist installation smoke.
-A skipped CI job does not mean real hardware was validated or that its tests
-were removed. For a targeted local check, run the changed test file with pytest
-from the repository root. No CI job is authorized to access physical VISA.
+Changes to validation scripts, their direct CLI/Core boundaries or their
+script tests run the PowerShell PlanOnly, refusal and report contracts once on
+Windows Python 3.13. Windows offline preflight runs separately on the same
+affected boundary. Python Core/CLI/Worker tests own command, sequencing and
+failure behavior; CI does not duplicate these as Linux pseudo-terminal operator
+simulations. Unrelated changes skip the PowerShell checks; packaging changes
+retain the wheel/sdist installation smoke. Skipping a CI job does not imply
+real-instrument validation. Run focused tests from the repository root.
+No CI job is authorized to access physical VISA.
 
 ## Local checks
 
@@ -342,8 +342,9 @@ changed contributor boundaries:
 Use a recording Fake VISA for the explicit-scope Core dispatcher, actual native
 Configure/Start sequencing, original Product LIVE refusal, untrusted Session
 rejection, exact identity and USB/System connection requirements. For the
-PowerShell Script, use PlanOnly, noninteractive gate refusal, and the existing
-pseudo-terminal/fake-CLI style of focused ON/OFF and Fail Closed verification.
+PowerShell Script, check PlanOnly, noninteractive refusal and report contracts.
+Check Input OFF and failure handling primarily at the owning Core/CLI Fake VISA
+layer rather than simulating operator keystrokes in a pseudo-terminal.
 Use only fictional Resources in automated tests. Fake clock checks may replace
 real long waits. PowerShell unavailable is SKIP, never PASS. Ruff checks only
 modified Python files, and `git diff --check` checks the patch.
@@ -383,16 +384,16 @@ PlanOnly and noninteractive refusal. Default PlanOnly includes every supported
 validation mode and captures Trigger Source/Timer before legacy Transient writes;
 `-Modes trigger` remains selectable. Cover the compatible `-Modes input-timer`
 and `-InputTimerOnly` entries, standard Trigger presets and focused default
-PlanOnly selection without physical VISA. In a mixed legacy Transient/Trigger
-run, exercise failure before Trigger trials: verify original settings are
-restored only after trusted Input OFF, otherwise require manual action without
-blind VISA writes.
+PlanOnly selection without physical VISA. For mixed legacy Transient/Trigger
+plans, confirm snapshot-before-write order. Test trusted Input OFF and
+restore behavior at the owning Core/CLI boundary; uncertain communication
+requires manual action rather than blind VISA writes.
 
 Use recording Fake VISA for Input OFF guards, exact Source and Timer readback,
-HOLD/BUS dispatch, finite LIST and communication failures. Test script cleanup
-and operator confirmation with a fake CLI. Physical Trigger validation
-requires separate approval, the operator-supplied resource and settings, and
-manual observation of each source. Follow the
+HOLD/BUS dispatch, finite LIST and communication failures. Script tests cover
+PlanOnly and noninteractive refusal without simulating operator keystrokes.
+Physical Trigger validation requires separate approval, the operator-supplied
+resource and settings, and manual observation of each source. Follow the
 [contributor Trigger procedure](cli/README.md#contributor-trigger-validation).
 
 ## Packaging checks
