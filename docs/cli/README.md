@@ -285,7 +285,7 @@ the bounded source/DUT, manual OFF contingency and interactive confirmation:
 # For a separately authorized interactive physical run, remove -PlanOnly.
 ```
 
-`-Modes trace` does not alter the existing default eight-mode script selection.
+`-Modes trace` selects only TRACE; omitting `-Modes` selects all supported validation modes, including TRACE.
 TRACE-only runs use `preflight-cli.ps1 -TraceOnly` for focused, no-hardware
 preflight. `-PlanOnly` produces cases marked NOT RUN, not physical PASS.
 The existing redacted `shareable/report.json` records TRACE case settings,
@@ -597,9 +597,9 @@ override. Input Timer does not expand Product LIVE support.
 
 ### Controlled Timer validation
 
-Use the existing script's separate `-InputTimerOnly` switch, without `-Modes`.
-It is excluded from the default eight-mode run. Preview with a fictional USB
-resource for offline checks; supply an approved resource only for a separately
+Use the existing script's `-InputTimerOnly` shortcut (without `-Modes`), or
+select `-Modes input-timer`. Input Timer is included in the default all-mode
+run. Preview with a fictional USB resource for offline checks; supply an approved resource only for a separately
 authorized physical run:
 
 ```powershell
