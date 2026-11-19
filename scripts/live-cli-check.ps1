@@ -167,7 +167,7 @@ function Save-Report {
         if ($entry.Contains('origin_function')) { $case.origin_function = $entry.origin_function }
         foreach ($field in @('trace_source','trace_points','trace_interval_s','trace_sample_count',
                              'trace_csv_complete','operator_observed','trigger_source','trigger_interval_s',
-                             'trigger_source_restore','trigger_interval_restore')) {
+                             'trigger_source_restore','trigger_interval_restore','list_selected')) {
             if ($entry.Contains($field)) { $case[$field] = $entry[$field] }
         }
         if ($entry.Contains('confirmed_input_state')) { $case.input_state = $entry.confirmed_input_state }
@@ -405,6 +405,10 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
                     $entry['trigger_interval_restore'] = $details.trigger_readbacks.interval_s
                 }
             }
+            if ($CaseName.StartsWith('trigger-') -and $Command -ceq 'set-list-cc' -and
+                $code -ceq 'readback_mismatch' -and $details.list_selected -is [bool] -and $details.list_selected) {
+                $entry['list_selected'] = $true
+            }
             if ($CaseName.StartsWith('trigger-') -and $result.ok -eq $false -and
                 $null -eq $details.cleanup_errors -and $code -in @('readback_mismatch','unsafe_mode',
                     'input_not_off','input_not_on','input_timer_enabled','unsafe_trigger_source')) {
@@ -608,7 +612,8 @@ function Invoke-TriggerStep([string]$Name, [int]$DeadlineMs = 30000, [int]$Termi
     $exchangeConfirmed = $false
     try {
         $request = @{Command=$step.command; CaseName=$Name; ExtraArgs=$step.args;
-                     DeadlineMs=$DeadlineMs; TerminationMs=$TerminationMs; Cleanup=$Cleanup}
+                     DeadlineMs=[Math]::Min($DeadlineMs, $script:perCommandDeadlineMs)
+                     TerminationMs=$TerminationMs; Cleanup=$Cleanup}
         $response = Invoke-LiveCommand @request
         Assert-Runtime $response $Name
         $exchangeConfirmed = $true
@@ -629,7 +634,12 @@ function Assert-TriggerOff($Response, [string]$Name) {
     Assert-InputOff $Response $Name
 }
 
-function Read-TriggerAnswer([string]$Prompt, [string]$CaseName) {
+function Read-TriggerAnswer([string]$Prompt, [string]$CaseName, [switch]$DiscardPendingKeys) {
+    if ($DiscardPendingKeys) {
+        while ($script:watch.ElapsedMilliseconds -lt $script:totalDeadlineMs -and [Console]::KeyAvailable) {
+            $null = [Console]::ReadKey($true)
+        }
+    }
     Write-Host $Prompt
     $answer = [Text.StringBuilder]::new()
     while ($script:watch.ElapsedMilliseconds -lt $script:totalDeadlineMs) {
@@ -661,6 +671,7 @@ function Invoke-TriggerTrial($Trial) {
     $armed = $false
     $awaitingObservation = $false
     $entry = $script:report.results | Where-Object { $_.name -ceq "$prefix-observed" }
+    $setupEntry = $script:report.results | Where-Object { $_.name -ceq "$prefix-setup" }
     try {
         $configured = Invoke-TriggerStep "$prefix-configure"
         Assert-TriggerOff $configured "$prefix-configure"
@@ -754,7 +765,8 @@ function Invoke-TriggerTrial($Trial) {
                 Save-Report
             }
         }
-        $answer = Read-TriggerAnswer "Input OFF confirmed. Did you observe the expected $($Trial.source) result? (Yes/No)" "$prefix-observed"
+        $answer = Read-TriggerAnswer "Input OFF confirmed. Did you observe the expected $($Trial.source) result? (Yes/No)" `
+            "$prefix-observed" -DiscardPendingKeys
         $entry['operator_observed'] = if ($answer -ieq 'Yes') { 'Yes' } elseif ($answer -ieq 'No') { 'No' } else { 'Unconfirmed' }
         if ($answer -ine 'Yes') {
             Fail-Case "$prefix-observed" 'observation_unconfirmed' 'Operator did not confirm the expected physical trigger result.'
@@ -768,8 +780,11 @@ function Invoke-TriggerTrial($Trial) {
             $entry.status = 'FAIL'
             $entry['error_code'] = 'observation_incomplete'
         }
-        if ($armed -and $script:triggerTrusted -and $script:triggerOffConfirmed) {
+        $releaseRequired = $armed -or $setupEntry.Contains('list_selected')
+        if ($releaseRequired -and $script:triggerTrusted -and $script:triggerOffConfirmed) {
             Assert-TriggerOff (Invoke-TriggerStep "$prefix-release" -Cleanup) "$prefix-release"
+        } elseif ($releaseRequired -and $Trial.isList) {
+            Write-Host 'LIST exit was not attempted. Confirm physical Input OFF and verify the load mode manually.'
         }
     }
 }

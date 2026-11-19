@@ -216,6 +216,52 @@ def test_native_trigger_rechecks_input_after_settings_readback(monkeypatch, func
     assert [command for command in fake.calls if "?" not in command] == ["SYST:REM"]
 
 
+@pytest.mark.parametrize("operation,previous_write,last_read,blocked_write", [
+    ("set-list-cc", None, "FUNC?", "SYST:REM"),
+    ("set-list-cc", "LIST:WID 2,0.002", "INP:SHOR:STAT?", "FUNC:MODE LIST"),
+    ("list-exit", "SYST:REM", "FUNC?", "FUNC:MODE FIX"),
+])
+def test_native_list_rechecks_off_before_mode_writes(
+    monkeypatch, operation, previous_write, last_read, blocked_write,
+):
+    fake = TriggerFake()
+    session(fake, monkeypatch)
+    settings = list_configuration()
+    arguments = {"list_configuration": settings} if operation == "set-list-cc" else {}
+    if operation == "list-exit":
+        physical("set-list-cc", list_configuration=settings)
+    fake.calls.clear()
+    original_query = fake.query
+
+    def query(command):
+        response = original_query(command)
+        if command == last_read and (previous_write is None or previous_write in fake.calls):
+            fake.input = True
+        return response
+
+    monkeypatch.setattr(fake, "query", query)
+    with pytest.raises(LoadError) as error:
+        physical(operation, **arguments)
+    assert error.value.code == "input_not_off"
+    assert blocked_write not in fake.calls
+
+
+def test_native_list_setup_reports_selected_mode_after_settings_mismatch(monkeypatch):
+    fake = TriggerFake()
+    session(fake, monkeypatch)
+
+    def mismatch_after_select(device, command):
+        if command == "FUNC:MODE LIST":
+            device.values["LIST:COUN"] = "2"
+
+    fake.after_write = mismatch_after_select
+    with pytest.raises(LoadError) as error:
+        physical("set-list-cc", list_configuration=list_configuration())
+    assert error.value.code == "readback_mismatch"
+    assert error.value.details["list_selected"] is True
+    assert not fake.input and fake.mode == "LIST"
+
+
 def test_trigger_cli_and_native_refusals_do_not_open_visa(monkeypatch, capsys):
     monkeypatch.setattr(control, "open_session", lambda *_: pytest.fail("VISA opened"))
     for command, args in [("trigger-status", []), ("trigger-configure", ["--source", "BUS"]),

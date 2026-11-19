@@ -463,7 +463,7 @@ def _list_snapshot(session, configuration):
     for query, value in checks.items():
         if _number(session, query) != value:
             raise LoadError("readback_mismatch", "Physical LIST differs from the authorized settings.", 3,
-                            query=query)
+                            query=query, list_selected=True)
     return {"function_mode": mode, "function": function,
             "configuration": {**configuration, "steps": [_serial(step) for step in configuration["steps"]]}}
 
@@ -490,13 +490,17 @@ def _validation_list(session, command, configuration, trigger, writes, stop):
     guard()
     if command == "set-list-cc":
         c._check_mode_change(session)
-    _stopping(stop)
+    if command == "list-trigger":
+        _require_trigger_input_on(session, stop, "LIST")
+    else:
+        c._mutation_off(session, stop)
     c._write(session, "SYST:REM")
     result = guard()
     if command == "set-list-cc":
         c._leave_cr_led(session, c._check_mode_change(session), stop)
         for write in writes:
             _setup_guard(session, stop)
+            c._mutation_off(session, stop)
             c._write(session, write)
         result = _list_snapshot(session, configuration)
     elif command == "input-on":
@@ -516,7 +520,7 @@ def _validation_list(session, command, configuration, trigger, writes, stop):
                 "trigger_dispatched_at_utc": datetime.now(timezone.utc).isoformat(),
                 "waveform_completion_known": False}
     else:
-        _stopping(stop)
+        c._mutation_off(session, stop)
         c._write(session, "FUNC:MODE FIX")
         if c._query(session, "FUNC:MODE?").upper() not in {"FIX", "FIXED"}:
             raise LoadError("readback_mismatch", "Fixed mode was not confirmed after LIST exit.", 3)
