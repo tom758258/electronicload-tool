@@ -70,6 +70,45 @@ def request(command,arguments=None):
             'context':{'mode':'simulate','planning_model_id':'itech-it8812c'}}
 
 
+def test_trigger_worker_persists_exact_setup_without_extending_live(worker, monkeypatch, capsys):
+    from electronicload_tool_cli.cli import main
+    from electronicload_tool_cli.worker import Runtime
+    from electronicload_tool_core import control
+
+    _, out, ready = worker
+    url = ready['command_url']
+    baseline = http(ready['status_url'])[1].keys()
+    for arguments in ({'source': 'TIMER'}, {'source': 'BUS', 'interval_s': 1},
+                      {'source': 'TIMER', 'interval_s': '1'}, {'source': 'HOLD', 'hardware_validation': 'trigger'}):
+        code, result = http(url, request('trigger-configure', arguments))
+        assert code == 400 and result['worker_job_id'] is None
+    for mode, resulting_source in [('dry_run', 'HOLD'), ('simulate', 'TIMER')]:
+        context = dict(request('trigger-configure')['context'], mode=mode)
+        assert main(['send-command', '--url', url, '--worker-command', 'trigger-configure',
+                     '--arguments-json', '{"source":"TIMER","interval_s":0.250000000000000001}',
+                     '--context-json', json.dumps(context), '--json']) == 0
+        accepted = json.loads(capsys.readouterr().out)
+        configured = wait_finished(out, accepted['worker_job_id'])['result']
+        assert configured['interval_s'] == '0.250000000000000001'
+        code, status = http(url, request('trigger-status'))
+        assert code == 202
+        result = wait_finished(out, status['worker_job_id'])
+        assert result['result']['source'] == resulting_source
+    assert http(ready['status_url'])[1].keys() == baseline
+    assert main(['manifest']) == 0
+    manifest = json.loads(capsys.readouterr().out)
+    assert manifest['schema_version'] == 2
+    assert all(manifest['commands'][name]['kind'] == 'async_job'
+               for name in ('trigger-status', 'trigger-configure'))
+
+    monkeypatch.setattr(control, 'open_session', lambda *_: pytest.fail('VISA opened'))
+    runtime = Runtime(mode='live', resource='USB0::0xFFFF::0x0001::SYNTHETIC::INSTR')
+    for command, arguments in [('trigger-status', {}), ('trigger-configure', {'source': 'BUS'})]:
+        runtime.run_job({'worker_job_id': command, 'job_id': None, 'command': command},
+                        arguments, {'mode': 'live'})
+        assert json.loads(capsys.readouterr().out.splitlines()[-1])['error']['code'] == 'unsupported_live_scope'
+
+
 def test_cr_led_and_slow_rise_worker_persist_settings_and_validate_decimal_input(worker, capsys):
     from electronicload_tool_cli.cli import main
 

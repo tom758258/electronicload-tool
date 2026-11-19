@@ -1,7 +1,7 @@
 <#
 Single, bounded IT8812C CLI hardware validation.
 Default: all eight modes, with common read-only safety prechecks.
--Modes selects cc, cv, cr, cw, transient-cc/cv/cr/cw, trace, cr-led and/or current-slow-rise.
+-Modes selects cc, cv, cr, cw, transient-cc/cv/cr/cw, trace, cr-led, current-slow-rise and/or trigger.
 -InputTimerOnly selects a separate bounded Fixed CC Timer trial; excluded from defaults.
 Requires approved source/DUT limits and interactive confirmation before hardware access.
 -PlanOnly validates every planned CLI request without VISA or hardware access.
@@ -35,6 +35,13 @@ param(
     [string]$PulseWidth = '0.001',
     [switch]$InputTimerOnly,
     [string]$TimerSeconds = '5',
+    [int]$TriggerObservationSeconds,
+    [int]$TriggerMaxOnSeconds,
+    [string]$TriggerIntervalSeconds,
+    [string]$TriggerListWidthA,
+    [string]$TriggerListWidthB,
+    [int]$TriggerListRepeat,
+    [string]$TriggerExternalSetup,
     [switch]$PlanOnly,
     [switch]$DebugArtifacts
 )
@@ -42,7 +49,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $featureModes = @('cr-led', 'current-slow-rise')
 $supportedModes = @('cc', 'cv', 'cr', 'cw', 'transient-cc', 'transient-cv', 'transient-cr', 'transient-cw',
-                    'trace') + $featureModes
+                    'trace') + $featureModes + @('trigger')
 if ($InputTimerOnly) {
     if ($PSBoundParameters.ContainsKey('Modes')) { throw 'InputTimerOnly cannot be combined with Modes.' }
     $supportedModes = @('input-timer')
@@ -54,6 +61,7 @@ $requestedModes = @($Modes | ForEach-Object { $_ -split ',' } |
 $selectedModes = @($supportedModes | Where-Object { $_ -in $requestedModes })
 $hasValidationModes = @($selectedModes | Where-Object { $_ -ne 'cc' }).Count -gt 0
 $traceSelected = 'trace' -in $selectedModes
+$triggerSelected = 'trigger' -in $selectedModes
 $featureSelected = @($selectedModes | Where-Object { $_ -in $featureModes }).Count -gt 0
 $featureOnly = $featureSelected -and @($selectedModes | Where-Object { $_ -notin $featureModes }).Count -eq 0
 $traceCommunicationUntrusted = $false
@@ -84,6 +92,13 @@ $timerOnStartMs = 0
 $slowRiseEnableAttempted = $false
 $slowRiseCommunicationTrusted = $false
 $slowRiseCleanup = @()
+$triggerScope = @('--hardware-validation', 'trigger')
+$triggerTrials = @()
+$triggerPlans = @()
+$triggerTrusted = $true
+$triggerOffConfirmed = $true
+$triggerPowered = $false
+$triggerArtifacts = @()
 $commandIndex = 0
 $report = [ordered]@{
     status = 'NOT RUN'
@@ -117,6 +132,10 @@ if ($traceSelected) {
 if ('current-slow-rise' -in $selectedModes) {
     $report['slow_rise_cleanup_unconfirmed'] = $false
 }
+if ($triggerSelected) {
+    $report['trigger_restore_status'] = 'NOT RUN'
+    $report['trigger_input_off_unconfirmed'] = $false
+}
 
 function Save-Report {
     if ($null -eq $script:reportDirectory) { return }
@@ -146,12 +165,12 @@ function Save-Report {
         if ($entry.Contains('condition')) { $case.condition = $entry.condition }
         if ($entry.Contains('origin_function')) { $case.origin_function = $entry.origin_function }
         foreach ($field in @('trace_source','trace_points','trace_interval_s','trace_sample_count',
-                             'trace_csv_complete')) {
+                             'trace_csv_complete','operator_observed','trigger_source','trigger_interval_s')) {
             if ($entry.Contains($field)) { $case[$field] = $entry[$field] }
         }
         if ($entry.status -eq 'PASS') {
-            if ($entry.command -eq 'input-state' -or $entry.command -eq 'input-on' -or
-                $entry.command -eq 'input-off' -or $entry.command -eq 'input-timer-status') {
+            if ($entry.command -in @('input-state','input-on','input-off','input-timer-status',
+                                     'trigger-configure','trigger-status')) {
                 $case.input_state = $entry.response.result.input_state
             }
             if ($entry.command -in @('set-cc', 'set-cv', 'set-cr', 'set-cr-led', 'cr-led-status')) {
@@ -214,6 +233,12 @@ function Save-Report {
     }
     if ($script:report.Contains('slow_rise_cleanup_unconfirmed')) {
         $public['slow_rise_cleanup_unconfirmed'] = $script:report.slow_rise_cleanup_unconfirmed
+    }
+    if ($script:triggerSelected) {
+        $public['trigger_restore_status'] = $script:report.trigger_restore_status
+        $public['trigger_input_off_unconfirmed'] = $script:report.trigger_input_off_unconfirmed
+        $public['trigger_observation_seconds'] = $script:TriggerObservationSeconds
+        $public['trigger_max_on_seconds'] = $script:TriggerMaxOnSeconds
     }
     [IO.File]::WriteAllText((Join-Path $shareable 'report.json'),
         ($public | ConvertTo-Json -Depth 12), [Text.UTF8Encoding]::new($false))
@@ -285,13 +310,24 @@ function Invoke-PlanCommand([string]$Command, [string[]]$ExtraArgs) {
     }
 }
 
+function Save-CommandArtifacts($Artifact) {
+    $privateDir = Join-Path $script:reportDirectory 'private'
+    [void][IO.Directory]::CreateDirectory($privateDir)
+    [IO.File]::WriteAllText((Join-Path $privateDir "$($Artifact.prefix).json"),
+        $Artifact.output, [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $privateDir "$($Artifact.prefix).stderr.txt"),
+        $Artifact.diagnostic, [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $privateDir "$($Artifact.prefix).exit.txt"),
+        $Artifact.exitStatus, [Text.UTF8Encoding]::new($false))
+}
+
 function Invoke-LiveCommand([string]$Command, [string]$CaseName,
                             [string[]]$ExtraArgs = @(),
                             [int]$DeadlineMs = 30000,
                             [string]$ExpectedError,
                             [switch]$AllowCrHandoff,
                             [switch]$Cleanup) {
-    $remaining = if ($Cleanup) { $script:perCommandDeadlineMs } else {
+    $remaining = if ($Cleanup) { [Math]::Min($DeadlineMs, $script:perCommandDeadlineMs) } else {
         [Math]::Min($DeadlineMs,
             $script:totalDeadlineMs - $script:watch.ElapsedMilliseconds)
     }
@@ -324,10 +360,11 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
         if (-not $process.WaitForExit([int]$remaining)) {
             if ($traceCase) { $script:traceCommunicationUntrusted = $true }
             $process.Kill()
-            [void]$process.WaitForExit(5000)
             $exitStatus = 'TIMEOUT; session/input state unconfirmed'
-            $output = $stdout.GetAwaiter().GetResult()
-            $diagnostic = $stderr.GetAwaiter().GetResult()
+            if ($process.WaitForExit(5000)) {
+                $output = $stdout.GetAwaiter().GetResult()
+                $diagnostic = $stderr.GetAwaiter().GetResult()
+            }
             $entry['error_code'] = 'deadline_expired'
             throw "$CaseName exceeded its deadline; physical Input state is unconfirmed."
         }
@@ -351,6 +388,15 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
             $code = [string]$result.error.code
             $details = $result.error.details
             $entry['error_code'] = $(if ($code -cmatch '^[a-z_]+$') { $code } else { 'execution_failed' })
+            if ($CaseName.StartsWith('trigger-') -and $result.ok -eq $false -and
+                $null -eq $details.cleanup_errors -and $code -in @('readback_mismatch','unsafe_mode',
+                    'input_not_off','input_not_on','input_timer_enabled','unsafe_trigger_source')) {
+                $entry['trigger_exchange_confirmed'] = $true
+                if ($code -eq 'input_not_off') {
+                    $script:triggerOffConfirmed = $false
+                    $script:report.trigger_input_off_unconfirmed = $true
+                }
+            }
             if ($script:slowRiseEnableAttempted -and $result.ok -eq $false -and
                 $null -eq $details.cleanup_errors -and
                 (($process.ExitCode -eq 2 -and $code -ceq 'current_slow_rise_enabled') -or
@@ -415,17 +461,12 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
         }
         $process.Dispose()
         if ($DebugArtifacts) {
-            $privateDir = Join-Path $script:reportDirectory 'private'
-            [void][IO.Directory]::CreateDirectory($privateDir)
-            $prefix = '{0:D2}-{1}' -f $sequence, $CaseName
-            [IO.File]::WriteAllText((Join-Path $privateDir "$prefix.json"),
-                $output, [Text.UTF8Encoding]::new($false))
-            [IO.File]::WriteAllText((Join-Path $privateDir "$prefix.stderr.txt"),
-                $diagnostic, [Text.UTF8Encoding]::new($false))
-            [IO.File]::WriteAllText((Join-Path $privateDir "$prefix.exit.txt"),
-                $exitStatus, [Text.UTF8Encoding]::new($false))
+            $artifact = @{prefix=('{0:D2}-{1}' -f $sequence, $CaseName); output=$output;
+                          diagnostic=$diagnostic; exitStatus=$exitStatus}
+            if ($script:triggerPowered) { $script:triggerArtifacts += $artifact }
+            else { Save-CommandArtifacts $artifact }
         }
-        Save-Report
+        if (-not $script:triggerPowered) { Save-Report }
     }
 }
 
@@ -453,6 +494,251 @@ function Assert-InputOff([object]$Result, [string]$CaseName) {
             $script:report.trace_safe_shutdown_unconfirmed = $true
         }
         Fail-Case $CaseName 'input_not_off' 'Physical Input OFF was not confirmed; further writes are blocked.'
+    }
+}
+
+function New-TriggerPlan {
+    # Only dry-run and noninteractive refusal may use example timings.
+    $examples = @{
+        TriggerObservationSeconds=5; TriggerMaxOnSeconds=60; TriggerIntervalSeconds='1'
+        TriggerListWidthA='0.5'; TriggerListWidthB='0.5'; TriggerListRepeat=1
+        LevelA='0.1'; LevelB='0.2'; RiseSlew='0.1'; FallSlew='0.1'; PulseWidth='0.1'
+    }
+    $offline = $PlanOnly -or [Console]::IsInputRedirected -or -not [Environment]::UserInteractive
+    foreach ($name in $examples.Keys) {
+        if (-not $script:PSBoundParameters.ContainsKey($name)) {
+            if (-not $offline) { throw "Trigger LIVE requires an explicit -$name." }
+            Set-Variable -Name $name -Value $examples[$name] -Scope Script
+        }
+    }
+    if (-not $offline -and [string]::IsNullOrWhiteSpace($TriggerExternalSetup)) {
+        throw 'Trigger LIVE requires -TriggerExternalSetup with the reviewed pulse source, electrical limits and wiring.'
+    }
+    if ($TriggerObservationSeconds -le 0 -or $TriggerMaxOnSeconds * 1000 -gt $totalDeadlineMs -or
+        $TriggerMaxOnSeconds * 1000 -le $TriggerObservationSeconds * 1000 + $perCommandDeadlineMs + 5000) {
+        throw 'Maximum Trigger ON time must cover observation, the existing 30 s OFF deadline and 5 s process termination allowance, within the total deadline.'
+    }
+    foreach ($token in @($LevelA, $LevelB, $RiseSlew, $FallSlew, $PulseWidth,
+                         $TriggerIntervalSeconds, $TriggerListWidthA, $TriggerListWidthB)) {
+        if ($token -cnotmatch '^(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$') {
+            throw 'Trigger levels, slews and times must be nonnegative JSON numbers.'
+        }
+    }
+    if ([decimal]$LevelA -eq [decimal]$LevelB -or [decimal]$LevelA -gt [decimal]$SourceCurrentLimitA -or
+        [decimal]$LevelB -gt [decimal]$SourceCurrentLimitA) {
+        throw 'Trigger trials require distinct current levels within the declared source limit.'
+    }
+    if ($TriggerListRepeat -lt 1 -or $TriggerListRepeat -ge 65536 -or
+        ([decimal]$TriggerListWidthA + [decimal]$TriggerListWidthB) * $TriggerListRepeat -gt $TriggerObservationSeconds) {
+        throw 'The finite LIST must fit in the observation window.'
+    }
+    if ([decimal]$PulseWidth -ge [decimal]$TriggerIntervalSeconds -or
+        2 * [decimal]$TriggerIntervalSeconds + [decimal]$PulseWidth -gt $TriggerObservationSeconds) {
+        throw 'Allow time for at least two Timer periods and a distinct pulse shorter than the interval.'
+    }
+    $setTransient = @('--range','low','--transient-mode','pulse','--level-a',$LevelA,'--level-b',$LevelB,
+        '--rise-slew',$RiseSlew,'--fall-slew',$FallSlew,'--pulse-width',$PulseWidth)
+    $transientJson = '{"range":"low","transient_mode":"pulse","level_a":' + $LevelA +
+        ',"level_b":' + $LevelB + ',"rise_slew":' + $RiseSlew + ',"fall_slew":' + $FallSlew +
+        ',"pulse_width":' + $PulseWidth + '}'
+    $listJson = '{"range":"low","repeat_count":' + $TriggerListRepeat + ',"steps":[' +
+        '{"current_a":' + $LevelA + ',"slew_a_per_us":' + $RiseSlew + ',"width_s":' + $TriggerListWidthA + '},' +
+        '{"current_a":' + $LevelB + ',"slew_a_per_us":' + $FallSlew + ',"width_s":' + $TriggerListWidthB + '}]}'
+    $script:triggerPlans = @(@{name='trigger-snapshot';command='trigger-status';args=$triggerScope})
+    foreach ($source in @('MANUAL','HOLD','TIMER','BUS','EXTERNAL')) {
+        $prefix = 'trigger-' + $source.ToLowerInvariant()
+        $isList = $source -in @('BUS','EXTERNAL')
+        $function = if ($isList) { 'LIST' } else { 'CC' }
+        $configJson = if ($isList) { $listJson } else { $transientJson }
+        $sourceArgs = @('--source',$source)
+        $triggerJson = '{"source":"' + $source + '"'
+        if ($source -eq 'TIMER') {
+            $sourceArgs += @('--interval-s',$TriggerIntervalSeconds)
+            $triggerJson += ',"interval_s":' + $TriggerIntervalSeconds
+        }
+        $expected = @('--validation-settings-json', ('{"function":"' + $function +
+            '","configuration":' + $configJson + ',"trigger":' + $triggerJson + '}}'))
+        $script:triggerTrials += @{prefix=$prefix;source=$source;isList=$isList;interval=$TriggerIntervalSeconds}
+        $script:triggerPlans += @{name="$prefix-configure";command='trigger-configure';args=($triggerScope + $sourceArgs)}
+        if ($isList) {
+            $script:triggerPlans += @{name="$prefix-setup";command='set-list-cc';
+                args=($triggerScope + @('--arguments-json',$listJson))}
+        } else {
+            $script:triggerPlans += @{name="$prefix-setup";command='set-transient-cc';args=($triggerScope + $setTransient)}
+            $script:triggerPlans += @{name="$prefix-enable";command='transient-enable';args=($triggerScope + $expected)}
+        }
+        $script:triggerPlans += @{name="$prefix-on";command='input-on';args=($triggerScope + $expected + @('--confirm'))}
+        if ($source -in @('HOLD','BUS')) {
+            $cmd = if ($isList) { 'list-trigger' } else { 'transient-trigger' }
+            $script:triggerPlans += @{name="$prefix-dispatch";command=$cmd;args=($triggerScope + $expected)}
+        }
+        $script:triggerPlans += @{name="$prefix-off";command='input-off';args=$triggerScope}
+        $script:triggerPlans += @{name="$prefix-observed";command='operator-observation';args=@()}
+        $release = if ($isList) { 'list-exit' } else { 'transient-disable' }
+        $script:triggerPlans += @{name="$prefix-release";command=$release;args=$triggerScope}
+    }
+    $script:triggerPlans += @{name='trigger-restore';command='trigger-configure';
+        args=($triggerScope + @('--source','MANUAL','--interval-s','0.01'));
+        condition='Plan uses example settings. LIVE requires original Source and Timer readback, trusted communication and confirmed Input OFF.'}
+}
+
+function Invoke-TriggerStep([string]$Name, [int]$DeadlineMs = 30000, [switch]$Cleanup) {
+    $step = $script:triggerPlans | Where-Object { $_.name -ceq $Name }
+    $entry = $script:report.results | Where-Object { $_.name -ceq $Name }
+    $exchangeConfirmed = $false
+    try {
+        $response = Invoke-LiveCommand -Command $step.command -CaseName $Name -ExtraArgs $step.args -DeadlineMs $DeadlineMs -Cleanup:$Cleanup
+        Assert-Runtime $response $Name
+        $exchangeConfirmed = $true
+        if ($step.command -in @('trigger-configure','trigger-status')) {
+            $entry['trigger_source'] = $response.result.source
+            $entry['trigger_interval_s'] = $response.result.interval_s
+        }
+        return $response
+    } finally {
+        $script:triggerTrusted = $script:triggerTrusted -and
+            ($exchangeConfirmed -or $entry.Contains('trigger_exchange_confirmed'))
+    }
+}
+
+function Assert-TriggerOff($Response, [string]$Name) {
+    $script:triggerOffConfirmed = $Response.result.input_state -ceq 'OFF'
+    $script:report.trigger_input_off_unconfirmed = -not $script:triggerOffConfirmed
+    Assert-InputOff $Response $Name
+}
+
+function Invoke-TriggerTrial($Trial) {
+    $prefix = $Trial.prefix
+    $armed = $false
+    try {
+        $configured = Invoke-TriggerStep "$prefix-configure"
+        Assert-TriggerOff $configured "$prefix-configure"
+        if ($configured.result.source -cne $Trial.source -or ($Trial.source -eq 'TIMER' -and
+            [decimal]$configured.result.interval_s -ne [decimal]$Trial.interval)) {
+            Fail-Case "$prefix-configure" 'readback_mismatch' 'Trigger Source or Timer did not match.'
+        }
+        $setup = Invoke-TriggerStep "$prefix-setup"
+        $armed = $Trial.isList
+        Assert-TriggerOff $setup "$prefix-setup"
+        if (-not $Trial.isList) {
+            $armed = $true
+            Assert-TriggerOff (Invoke-TriggerStep "$prefix-enable") "$prefix-enable"
+        }
+        Write-Host "Trigger $($Trial.source), CLI readback confirmed. Observe the load current with the approved meter or capture instrument."
+        if ($Trial.isList) {
+            Write-Host "Expect LIST CC levels $LevelA A then $LevelB A for $TriggerListWidthA s / $TriggerListWidthB s, repeated $TriggerListRepeat time(s)."
+        } else {
+            Write-Host "Expect a Transient CC pulse from $LevelA A to $LevelB A for $PulseWidth s."
+        }
+        switch ($Trial.source) {
+            'MANUAL' { Write-Host 'When the observation starts, press Local, then Shift + . (Trigger) on the IT8812C.' }
+            'EXTERNAL' {
+                Write-Host 'Keep the source inactive until the observation starts. Apply one TTL low pulse (>10 us) to rear TRIG and its shared negative terminal.'
+                Write-Host "Confirm the reviewed equipment and wiring: $TriggerExternalSetup"
+            }
+            'TIMER' { Write-Host "Watch for at least two Timer pulses at $($Trial.interval) s intervals. No operator pulse is required." }
+            default { Write-Host 'The script will send one software trigger after Input ON is confirmed.' }
+        }
+        $ack = Read-Host 'With Input OFF and capture ready, press Enter to start the bounded observation (Ctrl+C to cancel)'
+        if ($null -eq $ack -or $ack -cne '') {
+            Fail-Case "$prefix-observed" 'operator_cancelled' 'Operator did not confirm readiness.'
+        }
+        $hardStop = $script:watch.ElapsedMilliseconds + $TriggerMaxOnSeconds * 1000
+        if ($hardStop -gt $totalDeadlineMs) { throw 'Insufficient total time for a bounded Trigger trial.' }
+        $startOffBy = $hardStop - $perCommandDeadlineMs - 5000
+        $onDeadline = $startOffBy - $script:watch.ElapsedMilliseconds - $TriggerObservationSeconds * 1000
+        if ($onDeadline -le 0) { throw 'Insufficient time for Trigger Input ON and observation.' }
+        $script:triggerOffConfirmed = $false
+        $script:triggerPowered = $true
+        try {
+            $on = Invoke-TriggerStep "$prefix-on" -DeadlineMs $onDeadline
+            if ($on.result.input_state -cne 'ON') {
+                Fail-Case "$prefix-on" 'input_on_not_confirmed' 'Trigger Input ON was not confirmed.'
+            }
+            $observeUntil = $script:watch.ElapsedMilliseconds + $TriggerObservationSeconds * 1000
+            if ($observeUntil -gt $startOffBy) { throw 'Insufficient time remains to observe before Input OFF.' }
+            Write-Host "Observation started for $($Trial.source)."
+            if ($Trial.source -in @('HOLD','BUS')) {
+                $dispatchBudget = $observeUntil - $script:watch.ElapsedMilliseconds
+                $eventDuration = if ($Trial.isList) {
+                    ([decimal]$TriggerListWidthA + [decimal]$TriggerListWidthB) * $TriggerListRepeat
+                } else { [decimal]$PulseWidth }
+                $dispatchBudget -= [Math]::Ceiling($eventDuration * 1000)
+                if ($dispatchBudget -le 0) { throw 'Software trigger observation deadline expired.' }
+                $null = Invoke-TriggerStep "$prefix-dispatch" -DeadlineMs $dispatchBudget
+            }
+            $remaining = $observeUntil - $script:watch.ElapsedMilliseconds
+            if ($remaining -gt 0) { Start-Sleep -Milliseconds $remaining }
+        } finally {
+            try {
+                $offBudget = [Math]::Max(1, $hardStop - $script:watch.ElapsedMilliseconds)
+                $off = Invoke-TriggerStep "$prefix-off" -DeadlineMs $offBudget -Cleanup
+                Assert-TriggerOff $off "$prefix-off"
+            } finally {
+                $script:triggerPowered = $false
+                $script:report.trigger_input_off_unconfirmed = -not $script:triggerOffConfirmed
+                if (-not $script:triggerOffConfirmed) {
+                    Write-Host 'Trigger Input OFF was not confirmed. Use the independent manual OFF procedure immediately.'
+                }
+                foreach ($artifact in $script:triggerArtifacts) { Save-CommandArtifacts $artifact }
+                $script:triggerArtifacts = @()
+                Save-Report
+            }
+        }
+        $entry = $script:report.results | Where-Object { $_.name -ceq "$prefix-observed" }
+        $answer = Read-Host "Input OFF confirmed. Did you observe the expected $($Trial.source) result? (Yes/No)"
+        $entry['operator_observed'] = if ($answer -ieq 'Yes') { 'Yes' } elseif ($answer -ieq 'No') { 'No' } else { 'Unconfirmed' }
+        if ($answer -ine 'Yes') {
+            Fail-Case "$prefix-observed" 'observation_unconfirmed' 'Operator did not confirm the expected physical trigger result.'
+        }
+        if ($script:watch.ElapsedMilliseconds -ge $totalDeadlineMs) {
+            Fail-Case "$prefix-observed" 'deadline_expired' 'The total CLI validation deadline expired.'
+        }
+        $entry.status = 'PASS'
+    } finally {
+        if ($armed -and $script:triggerTrusted -and $script:triggerOffConfirmed) {
+            Assert-TriggerOff (Invoke-TriggerStep "$prefix-release" -Cleanup) "$prefix-release"
+        }
+    }
+}
+
+function Invoke-TriggerValidation {
+    $snapshot = Invoke-TriggerStep 'trigger-snapshot'
+    Assert-TriggerOff $snapshot 'trigger-snapshot'
+    $source = $snapshot.result.source
+    $interval = $snapshot.result.interval_s
+    if ($source -cnotin @('MANUAL','BUS','HOLD','TIMER','EXTERNAL') -or
+        $interval -isnot [string] -or [string]::IsNullOrWhiteSpace($interval)) {
+        Fail-Case 'trigger-snapshot' 'invalid_response' 'Both original Trigger settings must be read before any change.'
+    }
+    try {
+        foreach ($trial in $script:triggerTrials) { Invoke-TriggerTrial $trial }
+    } finally {
+        $script:report.trigger_restore_status = 'FAIL'
+        if ($script:triggerTrusted -and $script:triggerOffConfirmed) {
+            $restore = $script:triggerPlans | Where-Object { $_.name -ceq 'trigger-restore' }
+            $restore.args = $triggerScope + @('--source',$source,'--interval-s',$interval)
+            $entry = $script:report.results | Where-Object { $_.name -ceq 'trigger-restore' }
+            $entry.arguments = $restore.args
+            try {
+                $restored = Invoke-TriggerStep 'trigger-restore' -Cleanup
+                Assert-TriggerOff $restored 'trigger-restore'
+                if ($restored.result.source -cne $source -or
+                    [decimal]$restored.result.interval_s -ne [decimal]$interval) {
+                    Fail-Case 'trigger-restore' 'readback_mismatch' 'Original Trigger Setup was not confirmed.'
+                }
+                $script:report.trigger_restore_status = 'PASS'
+            } finally {
+                if ($script:report.trigger_restore_status -ne 'PASS') {
+                    Write-Host 'Original Trigger Source and Timer Interval were not both confirmed. Operator action is required.'
+                }
+            }
+        } else {
+            throw 'Original Trigger Source and Timer Interval were not restored. Confirm physical OFF and restore them manually once communication is reliable.'
+        }
+    }
+    if ($script:watch.ElapsedMilliseconds -ge $totalDeadlineMs) {
+        throw 'The total CLI validation deadline expired during Trigger cleanup.'
     }
 }
 
@@ -784,10 +1070,11 @@ try {
               condition='Cleanup Disable confirmed with Input OFF'}
         )
     }
+    if ($triggerSelected) { New-TriggerPlan }
     foreach ($step in ($planned | Where-Object { $_.ContainsKey('cr_handoff_after') })) {
         $step.condition = "$($step.cr_handoff_after) refused a resistance origin before remote"
     }
-    $allSteps = $planned + $slowRiseCleanup
+    $allSteps = $planned + $slowRiseCleanup + $triggerPlans
     $report.results = @($allSteps | ForEach-Object {
         $entry = [ordered]@{name=$_.name;command=$_.command;arguments=$_.args;status='NOT RUN'}
         if ($_.ContainsKey('expected_error')) { $entry['expected_error'] = $_.expected_error }
@@ -795,6 +1082,7 @@ try {
         $entry
     })
     foreach ($step in $allSteps) {
+        if ($step.command -eq 'operator-observation') { continue }
         $extras = @($step.args)
         $plan = Invoke-PlanCommand $step.command $extras
         if ($step.command -in @('set-cc', 'set-cv', 'set-cr', 'set-cr-led',
@@ -830,6 +1118,10 @@ try {
     }
     if ($featureSelected) {
         Write-Host 'CR-LED and Current Slow Rise trials keep Input OFF and verify configuration readback.'
+    }
+    if ($triggerSelected) {
+        Write-Host 'Trigger: five source trials with manual observation, explicit OFF and restoration of original Source and Timer.'
+        Write-Host "Each Trigger observation is $TriggerObservationSeconds s. The Input ON/OFF budget is $TriggerMaxOnSeconds s per trial."
     }
     if ('current-slow-rise' -in $selectedModes) {
         Write-Host 'Slow Rise requires a non-resistance starting function and expects Fixed CV setup to be refused while enabled.'
@@ -869,6 +1161,8 @@ try {
         & (Join-Path $PSScriptRoot 'preflight-cli.ps1') -InputTimerOnly
     } elseif ($selectedModes.Count -eq 1 -and $traceSelected) {
         & (Join-Path $PSScriptRoot 'preflight-cli.ps1') -TraceOnly
+    } elseif ($selectedModes.Count -eq 1 -and $triggerSelected) {
+        & (Join-Path $PSScriptRoot 'preflight-cli.ps1') -TriggerOnly
     } elseif ($featureOnly) {
         & (Join-Path $PSScriptRoot 'preflight-cli.ps1') -CrLedSlowRiseOnly
     } else {
@@ -884,9 +1178,12 @@ try {
     Write-Host "- Confirm the external source is manually set to $SourceVoltageLimitV V with a $SourceCurrentLimitA A current limit."
     Write-Host '- Confirm physical load Input OFF, safe wiring/DUT and tolerance of every selected setting (use -Verbose or the report).'
     Write-Host '- Confirm no other application controls this instrument and an independent manual Input OFF procedure is available.'
+    if ($triggerSelected) {
+        Write-Host '- Confirm external On/Off and analog programming are disabled and external trigger wiring was reviewed while de-energized.'
+    }
     Write-Host '- Selected trials may deliberately turn Input ON; the script explicitly commands and verifies OFF, but cannot guarantee OFF after communication failures.'
     $ack = Read-Host 'After completing these checks, press Enter to run selected CLI cases (Ctrl+C to cancel)'
-    if ($ack -cne '') {
+    if ($ack -cne '' -or ($triggerSelected -and $null -eq $ack)) {
         $report.status = 'BLOCKED'
         Save-Report
         Show-Summary
@@ -1015,6 +1312,7 @@ try {
         $entry = $report.results | Where-Object { $_.name -eq $step.name } | Select-Object -First 1
         $entry.status = 'SKIP'
     }
+    if ($triggerSelected) { Invoke-TriggerValidation }
     $report.status = 'PASS'
     Save-Report
     Show-Summary

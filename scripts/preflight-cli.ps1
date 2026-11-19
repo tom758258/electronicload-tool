@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param([switch]$TransientOnly, [switch]$FixedAutoOnly, [switch]$FixedSlewVonShortOnly,
-      [switch]$InputTimerOnly, [switch]$TraceOnly, [switch]$CrLedSlowRiseOnly)
+      [switch]$InputTimerOnly, [switch]$TraceOnly, [switch]$CrLedSlowRiseOnly, [switch]$TriggerOnly)
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -20,12 +20,31 @@ function Invoke-PreflightCli {
 }
 
 try {
-    if (@($TransientOnly, $FixedAutoOnly, $FixedSlewVonShortOnly, $InputTimerOnly, $TraceOnly, $CrLedSlowRiseOnly |
+    if (@($TransientOnly, $FixedAutoOnly, $FixedSlewVonShortOnly, $InputTimerOnly, $TraceOnly, $CrLedSlowRiseOnly, $TriggerOnly |
             Where-Object { $_ }).Count -gt 1) {
         throw 'Select only one focused preflight switch.'
     }
     if (-not (Test-Path -LiteralPath $cli)) {
         throw 'Sync the repository .venv with uv before running preflight.'
+    }
+    if ($TriggerOnly) {
+        $manifest = Invoke-PreflightCli @('manifest')
+        foreach ($command in @('trigger-configure','trigger-status')) {
+            if ($manifest.commands.$command.kind -cne 'async_job') { throw 'Trigger Manifest command missing.' }
+            $argsForCommand = @(if ($command -eq 'trigger-configure') {
+                @('--source','TIMER','--interval-s','0.125')
+            })
+            $preview = Invoke-PreflightCli (@($command,'--dry-run') + $argsForCommand)
+            $simulated = Invoke-PreflightCli (@($command,'--simulate') + $argsForCommand)
+            if ($preview.result.hardware_access -ne $false -or $simulated.result.state_source -cne 'simulate') {
+                throw 'Trigger preview or simulation failed.'
+            }
+            $refused = Invoke-PreflightCli (@($command,'--validation-allow-pending-live-support',
+                '--resource','USB0::0xFFFF::0x0001::SYNTHETIC::INSTR') + $argsForCommand) 2
+            if ($refused.error.code -cne 'unsupported_live_scope') { throw 'Trigger LIVE refusal failed.' }
+        }
+        Write-Host 'PASS: Trigger Setup preflight'
+        exit 0
     }
     if ($CrLedSlowRiseOnly) {
         $cr = @('--resistance','50','--range','auto')

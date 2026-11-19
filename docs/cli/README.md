@@ -889,8 +889,34 @@ This interface uses the model-specific limit. The guide's `LIST:SLEW?`
 description and memory wording contain ambiguities; this implementation does
 not infer query results, NVRAM durability, or physical behavior after partial
 writes, repeated triggers, Input OFF or interrupted finite/infinite execution.
-The offline implementation sends **no LIST SCPI**. Physical LIST control and
-waveform/timing verification require separately authorized instrument work.
+Physical LIST support is limited to the separately authorized
+[Trigger validation procedure](#contributor-trigger-validation).
+
+## Trigger Setup
+
+Transient CC/CV/CR/CW and LIST CC use one Trigger Source and Timer interval.
+Configure the source with `trigger-configure --source MANUAL|BUS|HOLD|TIMER|EXTERNAL`.
+For TIMER, include `--interval-s` in seconds, from 0.01 through 999.99.
+Core preserves decimal input. Contributor configuration requires exact numeric
+readback before reporting success. Changing a non-TIMER source retains the
+stored interval. Use `trigger-status` to read both fields.
+
+In simulation, use the same Worker for setup and subsequent commands. A new
+simulation starts in HOLD with a 0.01 s stored interval so existing software
+trigger workflows can start immediately. The configuration requires confirmed
+Input OFF. Readback includes `source`, `interval_s` as a decimal string, and
+`state_source`. Dry-run validates and previews configuration without mutation.
+
+`transient-trigger` and `list-trigger` accept software triggering in HOLD and
+BUS, with the existing dynamic-mode, Input ON and Stop guards. The contributor
+path uses `TRIG:IMM` for HOLD and `*TRG` for BUS. MANUAL uses the front panel,
+EXTERNAL uses the rear Trigger Input, and TIMER uses the instrument oscillator.
+Software trigger requests for those three sources fail. A successful software
+trigger establishes command acceptance only. Input OFF remains explicit and
+Worker Stop preserves the stored Trigger Setup.
+
+Source syntax, native trigger routing and the Timer range come from printed
+pp.40–41 of the [IT8800 Programming Guide V2.1](https://assets.testequity.com/te1/Documents/pdf/itech/ITECH_IT8800-Programming-Guide-EN.pdf).
 
 ## Worker and Automation
 
@@ -916,7 +942,7 @@ does not authorize physical instrument operation.
 
 | Script | Purpose | Real hardware |
 | --- | --- | --- |
-| `scripts/preflight-cli.ps1` | Offline CLI, simulator, refusal and Manifest checks; focused switches: `-TransientOnly`, `-FixedAutoOnly`, `-FixedSlewVonShortOnly`, `-InputTimerOnly`, `-TraceOnly` | Never |
+| `scripts/preflight-cli.ps1` | Offline CLI, simulator, refusal and Manifest checks; focused switches: `-TransientOnly`, `-FixedAutoOnly`, `-FixedSlewVonShortOnly`, `-InputTimerOnly`, `-TraceOnly`, `-CrLedSlowRiseOnly`, `-TriggerOnly` | Never |
 | `scripts/live-cli-check.ps1 -PlanOnly` | Validate command plans; reported physical cases remain `NOT RUN` | Never |
 | `scripts/live-cli-check.ps1` | Separately approved interactive IT8812C validation, including deliberate Input ON/OFF | With operator approval |
 
@@ -939,6 +965,7 @@ produce no test cases or PASS counts.
 | `trace` | Five bounded TRACE captures, including powered CC and Full CSV | No |
 | `cr-led` | Fixed CR-LED at 50 Ω and 1 V Vdrop, plain CR and exit to CC, all with Input OFF | No |
 | `current-slow-rise` | Fixed CC enable, retention after explicit OFF and CC setup, disable and readback | No |
+| `trigger` | All five sources, using Transient CC Pulse and finite LIST CC, with manual acceptance and Trigger Setup restoration | No |
 
 `-InputTimerOnly` is a **separate** Fixed CC Input Timer trial; it is excluded
 from the defaults and **cannot** be combined with `-Modes`. All selections
@@ -1067,6 +1094,49 @@ plus Identify); slow hardware may exhaust 900 seconds. Select a smaller
 of power freshness, synchronization, waveform timing or accuracy. This
 contributor-only CLI validation **does not** enable Worker LIVE or expand
 Product LIVE support.
+
+### Contributor Trigger validation
+
+Select `live-cli-check.ps1 -Modes trigger` with the usual approved model,
+explicit USB Resource, source/DUT limits and independent manual OFF procedure.
+Add `-PlanOnly` to check the command plan without VISA access. For a physical
+run, supply these approved values explicitly.
+
+| Parameters | Purpose |
+| --- | --- |
+| `-TriggerObservationSeconds`, `-TriggerMaxOnSeconds` | Whole seconds of observation and the per-trial deadline from before Input ON through OFF confirmation. The larger budget also covers ON, up to 30 s for OFF and 5 s for process termination, within the 900 s total deadline. |
+| `-LevelA`, `-LevelB`, `-RiseSlew`, `-FallSlew`, `-PulseWidth` | Distinct bounded Low-range CC levels, slew rates in A/μs and the Transient pulse width in seconds. Both current levels must fit the declared source limit. |
+| `-TriggerIntervalSeconds` | TIMER interval in seconds. The observation must accommodate two periods plus the pulse width. |
+| `-TriggerListWidthA`, `-TriggerListWidthB`, `-TriggerListRepeat` | LIST CC dwell times in seconds and a finite repeat count. The LIST must fit the observation window. |
+| `-TriggerExternalSetup` | Reviewed pulse equipment, signal limits and wiring. The console displays this description for confirmation. |
+
+Use a current observation method that can resolve the chosen levels and pulse
+or dwell times. MANUAL, HOLD and TIMER use Transient CC Pulse. BUS and EXTERNAL
+use a two-step LIST CC, with a zero fixed-current baseline before LIST
+selection. The test replaces the active CC Transient and LIST configurations.
+Use the IT8812C Local key followed by Shift plus the decimal/Trigger key for
+MANUAL. For EXTERNAL, use the rear TRIG terminal and its common negative
+terminal with a TTL low pulse longer than 10 μs. Verify the actual source
+voltage levels, common reference and wiring against the instrument and signal
+equipment before use. Confirm external On/Off and analog programming are
+disabled. [IT8800 User’s Manual V2.7, §§3.1, 3.4, 3.19.2](https://mm.digikey.com/Volume0/opasdata/d220001/medias/docus/5562/IT8800%20User%20Manual.pdf)
+
+The script saves the original Trigger Source and interval while Input is OFF.
+Press Enter before each trial to confirm the setup and then perform any
+requested physical trigger during the bounded observation. The script
+explicitly attempts and verifies Input OFF before requesting a Yes/No answer.
+Yes confirms the expected observable effect. Insufficient observation,
+cancellation and unsuccessful restoration fail the validation. The script
+restores and verifies both original Trigger settings only after confirmed OFF
+and trusted communication. Use the independent manual procedure if OFF or
+restoration is unconfirmed. Treat TIMER observation as a functional test.
+
+The standalone contributor scope `--hardware-validation trigger` is limited to
+IT8812C USB/System VISA. In that scope, Enable, Input ON and software Trigger
+compare the expected function, full dynamic configuration and Trigger Setup
+with physical readback. Input ON also requires `--confirm`. When restoring a
+snapshot, contributor `trigger-configure` can supply both Source and interval
+for any source. The Product and Worker LIVE paths reject Trigger Setup.
 
 ### Reports
 

@@ -2,6 +2,7 @@
 
 from decimal import Decimal
 
+from .trigger import DEFAULT_INTERVAL
 from .visa import TIMEOUT_MS
 
 # Bit 15 of the Questionable Condition register indicates TRACE Buffer Full.
@@ -53,6 +54,9 @@ class ControlSimulator:
         self.transient_function = None
         self.transient_enabled = False
         self.last_trigger = None
+        # Existing simulated Transient/LIST workflows use software triggering by default.
+        self.trigger_source = "HOLD"
+        self.trigger_interval = DEFAULT_INTERVAL
         self.list_configuration = None
         self.list_slot = None
         self.list_slots = {}

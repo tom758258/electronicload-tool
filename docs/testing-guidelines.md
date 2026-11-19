@@ -354,6 +354,22 @@ CV setup is refused before any control write and that the report recognizes
 only the expected refusal. Run Ruff on modified Python files. Configured
 CI retains its normal checks.
 
+## Trigger Setup focused checks
+
+Exercise `test_trigger.py` and the related Worker and live validation script
+cases. Select affected Transient and LIST tests, the existing contributor
+Transient paths, and parser help/version. Run Ruff on modified Python files.
+Use `preflight-cli.ps1 -TriggerOnly` and an explicitly fictional Resource for
+PlanOnly and noninteractive refusal. The default eight-mode plan still
+excludes Trigger.
+
+Use recording Fake VISA for Input OFF guards, exact Source and Timer readback,
+HOLD/BUS dispatch, finite LIST and communication failures. Test script cleanup
+and operator confirmation with a fake CLI. Physical Trigger validation
+requires separate approval, the operator-supplied resource and settings, and
+manual observation of each source. Follow the
+[contributor Trigger procedure](cli/README.md#contributor-trigger-validation).
+
 ## Packaging checks
 
 For packaging, dependency, or entry-point changes:

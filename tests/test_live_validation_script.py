@@ -568,7 +568,7 @@ def test_trace_validation_script_plan_only_and_noninteractive_refusal(run_script
     assert 'requires an interactive console' in refused.stdout
 
 
-def run_interactive_script(run_script, tmp_path, modes):
+def run_interactive_script(run_script, tmp_path, modes, *, extra=(), readiness=None, observation=None):
     # Preserve the actual interactive gate and stub only unrelated offline preflight.
     import pty
 
@@ -584,17 +584,24 @@ def run_interactive_script(run_script, tmp_path, modes):
             process = subprocess.Popen(
                 [run_script.powershell, '-NoProfile', '-File', str(scripts / 'live-cli-check.ps1'),
                  '-Target', 'itech-it8812c', '-Resource', RESOURCE, '-Modes', modes,
-                 '-SourceCurrentLimitA', '0.5', '-SourceVoltageLimitV', '12'],
+                 '-SourceCurrentLimitA', '0.5', '-SourceVoltageLimitV', '12', *extra],
                 cwd=ROOT, env=run_script.env,
                 stdin=slave, stdout=output, stderr=subprocess.STDOUT)
             try:
                 deadline = time.monotonic() + 150
                 confirmed = False
+                ready_prompts = observed_prompts = 0
                 while process.poll() is None and time.monotonic() < deadline:
                     log = transcript.read_text(encoding='utf-8')
                     if not confirmed and 'press Enter to run' in log:
                         os.write(master, b'\n')
                         confirmed = True
+                    if readiness is not None and log.count('press Enter to start the bounded') > ready_prompts:
+                        os.write(master, readiness + b'\n')
+                        ready_prompts += 1
+                    if observation is not None and log.count('Did you observe the expected') > observed_prompts:
+                        os.write(master, observation + b'\n')
+                        observed_prompts += 1
                     time.sleep(.05)
                 assert process.poll() is not None, transcript.read_text(encoding='utf-8')
             finally:
@@ -606,6 +613,132 @@ def run_interactive_script(run_script, tmp_path, modes):
         os.close(slave)
     assert confirmed
     return process.returncode, transcript.read_text(encoding='utf-8')
+
+
+def test_trigger_validation_script_plan_preflight_and_noninteractive_refusal(run_script):
+    plan = run_script(['-Modes', 'trigger', '-PlanOnly'])
+    assert plan.returncode == 0, plan.stdout + plan.stderr
+    report_path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', plan.stdout)[-1])
+    text = report_path.read_text(encoding='utf-8-sig')
+    report = json.loads(text)
+    assert report['overall_status'] == 'PLAN ONLY' and report['hardware_touched'] is False
+    assert report['trigger_restore_status'] == 'NOT RUN'
+    assert RESOURCE not in text and not (report_path.parents[1] / 'private').exists()
+    cases = {entry['name']: entry for entry in report['cases']}
+    assert all(case['status'] == 'NOT RUN' for case in cases.values())
+    for source in ('manual', 'hold', 'timer', 'bus', 'external'):
+        assert cases[f'trigger-{source}-configure']['command'] == 'trigger-configure'
+        assert '--confirm' in cases[f'trigger-{source}-on']['arguments']
+        assert cases[f'trigger-{source}-off']['command'] == 'input-off'
+        assert cases[f'trigger-{source}-observed']['command'] == 'operator-observation'
+        assert (f'trigger-{source}-dispatch' in cases) == (source in ('hold', 'bus'))
+    assert cases['trigger-bus-setup']['command'] == 'set-list-cc'
+    assert cases['trigger-hold-setup']['command'] == 'set-transient-cc'
+    assert not any(name.startswith('transient-') or name.startswith('cc-') for name in cases)
+    refused = run_script(['-Modes', 'trigger'])
+    assert refused.returncode == 2 and 'requires an interactive console' in refused.stdout
+    preflight = run_script(['-TriggerOnly'], preflight=True)
+    assert preflight.returncode == 0, preflight.stdout + preflight.stderr
+
+
+FAKE_TRIGGER_CLI = r'''
+import json
+import sys
+import time
+from electronicload_tool_cli import cli
+
+original_main = cli.main
+def fake_trigger_main(argv=None):
+    args = list(sys.argv[1:] if argv is None else argv)
+    if '--dry-run' in args or '--simulate' in args or args[0] == 'manifest':
+        return original_main(args)
+    command = args[0]
+    state_path = Path(TRIGGER_STATE)
+    state = json.loads(state_path.read_text()) if state_path.exists() else {
+        'input_state': 'OFF', 'source': 'EXTERNAL', 'interval_s': '0.375'
+    }
+    with open(TRIGGER_LOG, 'a', encoding='utf-8') as log:
+        log.write(json.dumps([command, state.copy(), args[1:]]) + '\n')
+    error = None
+    if command == 'trigger-configure':
+        source = args[args.index('--source') + 1]
+        if state['input_state'] != 'OFF':
+            error = 'input_not_off'
+        elif source == 'EXTERNAL' and '--interval-s' in args and SCENARIO == 'restore_failed':
+            error = 'readback_mismatch'
+        else:
+            state['source'] = source
+            if '--interval-s' in args:
+                state['interval_s'] = args[args.index('--interval-s') + 1]
+    elif command == 'input-on':
+        state['input_state'] = 'ON'
+    elif command == 'input-off' and SCENARIO != 'off_unconfirmed':
+        state['input_state'] = 'OFF'
+    state_path.write_text(json.dumps(state))
+    if command == 'input-on' and SCENARIO == 'on_timeout':
+        time.sleep(30)
+    result = {**state, 'visa': {'library': 'FAKE', 'manufacturer': 'FAKE'},
+              'voltage_v': 5, 'current_a': 0, 'power_w': 0}
+    print(json.dumps({'ok': error is None, 'result': result if error is None else None,
+                      'error': {'code': error} if error else None}))
+    return 0 if error is None else 3
+
+cli.main = fake_trigger_main
+'''
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='Requires a POSIX pseudo-terminal for fake operator input.')
+@pytest.mark.parametrize('scenario', ['observed', 'not_observed', 'invalid_answer', 'cancelled',
+                                     'on_timeout', 'off_unconfirmed', 'restore_failed'])
+def test_trigger_validation_interactive_cleanup_with_fake_cli(run_script, tmp_path, scenario):
+    events = tmp_path / 'trigger-commands.jsonl'
+    state = tmp_path / 'trigger-state.json'
+    with (tmp_path / 'sitecustomize.py').open('a', encoding='utf-8') as output:
+        output.write(
+            f'\nTRIGGER_LOG = {str(events)!r}\nTRIGGER_STATE = {str(state)!r}\nSCENARIO = {scenario!r}\n'
+        )
+        output.write(FAKE_TRIGGER_CLI)
+    code, console = run_interactive_script(
+        run_script, tmp_path, 'trigger',
+        extra=('-TriggerObservationSeconds', '1', '-TriggerMaxOnSeconds', '39',
+               '-TriggerIntervalSeconds', '0.25', '-TriggerListWidthA', '0.1', '-TriggerListWidthB', '0.1',
+               '-TriggerListRepeat', '1', '-LevelA', '0.1', '-LevelB', '0.2', '-RiseSlew', '0.1',
+               '-FallSlew', '0.1', '-PulseWidth', '0.1', '-TriggerExternalSetup', 'PRIVATE EXTERNAL SETUP'),
+        readiness=b'cancel' if scenario == 'cancelled' else b'',
+        observation={'not_observed': b'No', 'invalid_answer': b'unknown'}.get(scenario, b'Yes'),
+    )
+    assert code == (0 if scenario == 'observed' else 3), console
+    calls = [json.loads(line) for line in events.read_text().splitlines()]
+    commands = [row[0] for row in calls]
+    assert commands[:4] == ['identify', 'input-state', 'measure', 'trigger-status']
+    expected_on = 5 if scenario in ('observed', 'restore_failed') else 0 if scenario == 'cancelled' else 1
+    assert commands.count('input-on') == commands.count('input-off') == expected_on
+    for command, before, _ in calls:
+        if command == 'trigger-configure':
+            assert before['input_state'] == 'OFF'
+    if scenario in ('observed', 'restore_failed'):
+        assert [row[1]['source'] for row in calls if row[0] in ('list-trigger', 'transient-trigger')] == ['HOLD', 'BUS']
+    report_path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', console)[-1])
+    text = report_path.read_text(encoding='utf-8-sig')
+    report = json.loads(text)
+    assert RESOURCE not in text and 'PRIVATE EXTERNAL SETUP' not in text
+    results = {entry['name']: entry for entry in report['cases']}
+    assert results['trigger-snapshot']['trigger_interval_s'] == '0.375'
+    restored = scenario not in ('on_timeout', 'off_unconfirmed', 'restore_failed')
+    assert report['trigger_restore_status'] == ('PASS' if restored else 'FAIL')
+    assert report['trigger_input_off_unconfirmed'] is (scenario == 'off_unconfirmed')
+    if restored:
+        assert json.loads(state.read_text()) == {'source': 'EXTERNAL', 'interval_s': '0.375', 'input_state': 'OFF'}
+        assert results['trigger-restore']['status'] == 'PASS'
+    elif scenario in ('on_timeout', 'off_unconfirmed'):
+        assert commands[-1] == 'input-off'
+        assert results['trigger-restore']['status'] == 'NOT RUN'
+        assert 'Did you observe' not in console
+    if scenario == 'not_observed':
+        assert results['trigger-manual-observed']['operator_observed'] == 'No'
+    if scenario == 'observed':
+        assert all(results[f'trigger-{name}-observed']['operator_observed'] == 'Yes'
+                   for name in ('manual', 'hold', 'timer', 'bus', 'external'))
 
 
 @pytest.mark.skipif(os.name == 'nt', reason='Requires a POSIX pseudo-terminal for fake operator input.')
