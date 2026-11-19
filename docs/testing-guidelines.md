@@ -60,7 +60,8 @@ affected CLI parser/help/version and read-only CLI contracts:
 
 Worker integration uses a real local simulated subprocess, HTTP and JSONL,
 but never physical hardware. The **single** `live-cli-check.ps1` defaults to
-all eight modes: CC, CV, CR, CW and Transient CC/CV/CR/CW. `-Modes` selects one or more
+all supported validation modes: CC/CV/CR/CW, Transient CC/CV/CR/CW,
+TRACE, CR-LED, Current Slow Rise, Trigger and Input Timer. `-Modes` selects one or more
 modes while retaining common read-only safety prechecks and each selected
 mode's explicit Input ON/OFF flow. Test its `-PlanOnly` operation and unattended
 LIVE refusal with a **fictional** USB Resource. In noninteractive LIVE runs, verify it refuses before opening any VISA
@@ -360,8 +361,11 @@ Exercise `test_trigger.py` and the related Worker and live validation script
 cases. Select affected Transient and LIST tests, the existing contributor
 Transient paths, and parser help/version. Run Ruff on modified Python files.
 Use `preflight-cli.ps1 -TriggerOnly` and an explicitly fictional Resource for
-PlanOnly and noninteractive refusal. The default eight-mode plan still
-excludes Trigger.
+PlanOnly and noninteractive refusal. Default PlanOnly includes every supported
+validation mode and captures Trigger Source/Timer before legacy Transient writes;
+`-Modes trigger` remains selectable. Cover the compatible `-Modes input-timer`
+and `-InputTimerOnly` entries, standard Trigger presets and focused default
+PlanOnly selection without physical VISA.
 
 Use recording Fake VISA for Input OFF guards, exact Source and Timer readback,
 HOLD/BUS dispatch, finite LIST and communication failures. Test script cleanup

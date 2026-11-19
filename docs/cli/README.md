@@ -949,8 +949,10 @@ does not authorize physical instrument operation.
 ### Available validation modes
 
 `-Modes` accepts one mode or a comma-separated list. If omitted, it executes
-the first **eight** rows, once each in the established order. Unselected modes
-produce no test cases or PASS counts.
+**every supported mode** once in the established order. Unselected modes
+produce no test cases or PASS counts. The normal default includes the
+formerly separate Input Timer trial; `-Modes trigger` remains available
+for focused verification.
 
 | `-Modes` value | Coverage | Default |
 | --- | --- | --- |
@@ -962,14 +964,18 @@ produce no test cases or PASS counts.
 | `transient-cv` | Continuous Auto, Pulse Low, Toggle High | Yes |
 | `transient-cr` | Continuous Auto, Pulse High, Toggle High | Yes |
 | `transient-cw` | Continuous, Pulse, Toggle; no Range | Yes |
-| `trace` | Five bounded TRACE captures, including powered CC and Full CSV | No |
-| `cr-led` | Fixed CR-LED at 50 Ω and 1 V Vdrop, plain CR and exit to CC, all with Input OFF | No |
-| `current-slow-rise` | Fixed CC enable, retention after explicit OFF and CC setup, disable and readback | No |
-| `trigger` | All five sources, using Transient CC Pulse and finite LIST CC, with manual acceptance and Trigger Setup restoration | No |
+| `trace` | Five bounded TRACE captures, including powered CC and Full CSV | Yes |
+| `cr-led` | Fixed CR-LED at 50 Ω and 1 V Vdrop, plain CR and exit to CC, all with Input OFF | Yes |
+| `current-slow-rise` | Fixed CC enable, retention after explicit OFF and CC setup, disable and readback | Yes |
+| `trigger` | All five sources, using Transient CC Pulse and finite LIST CC, with manual acceptance and Trigger Setup restoration | Yes |
+| `input-timer` | Bounded Fixed CC Input Timer, expiry and explicit disable | Yes |
 
-`-InputTimerOnly` is a **separate** Fixed CC Input Timer trial; it is excluded
-from the defaults and **cannot** be combined with `-Modes`. All selections
-keep Identify, physical Input OFF and V/I/P prechecks. Invalid or empty mode
+`-InputTimerOnly` remains a compatible shortcut for the single
+`-Modes input-timer` trial and **cannot** be combined with `-Modes`.
+When Trigger and legacy Transient are both selected, the original Trigger
+Source and Timer Interval are captured before any mutating mode command and
+restored after Trigger validation where safe. All selections keep Identify,
+physical Input OFF and V/I/P prechecks. Invalid or empty mode
 names are rejected.
 
 ### Script parameters
@@ -980,8 +986,8 @@ names are rejected.
 | `-Resource` | Required | Explicit USB INSTR VISA Resource, also for PlanOnly; never guessed |
 | `-Connection` | `usb` | USB only |
 | `-Backend` | `system` | System VISA (`@ivi`) only |
-| `-Modes` | First eight modes | Single or comma-separated selection from above |
-| `-InputTimerOnly` | Off | Separate Timer trial, incompatible with `-Modes` |
+| `-Modes` | All supported modes | Single or comma-separated selection from above |
+| `-InputTimerOnly` | Off | Backward-compatible Timer-only shortcut, incompatible with `-Modes` |
 | `-SourceVoltageLimitV` | **5 V** | Operator-declared external source voltage, override >0 to 18 V |
 | `-SourceCurrentLimitA` | **0.8 A** | Operator-declared external source current limit, override >0 to 2 A |
 | `-PlanOnly` | Off | No VISA or physical hardware access |
@@ -1007,7 +1013,12 @@ source limit is not a measured value or a guarantee of DUT safety.
 | `-RiseSlew` / `-FallSlew` | `0.1` / `0.1` | A/µs, Transient CC; Auto High trial uses 0.5 A/µs |
 | `-WidthA` / `-WidthB` | `0.001` / `0.002` | Seconds, Continuous |
 | `-PulseWidth` | `0.001` | Seconds, Pulse |
-| `-TimerSeconds` | `5` | Seconds, Timer-only (allowed integer 3–10) |
+| `-TimerSeconds` | `5` | Seconds, Input Timer mode (allowed integer 3–10) |
+| `-TriggerObservationSeconds` / `-TriggerMaxOnSeconds` | `5` / `60` | Seconds per Trigger trial; includes explicit OFF deadline |
+| `-TriggerIntervalSeconds` | `1` | Seconds, Trigger TIMER source |
+| `-TriggerListWidthA` / `-TriggerListWidthB` | `0.5` / `0.5` | Seconds, finite LIST dwell |
+| `-TriggerListRepeat` | `1` | Finite LIST repetitions |
+| `-TriggerExternalSetup` | Optional | Extra external trigger wiring notes; operator still confirms equipment and safety |
 
 These are **validation script defaults**, not changes to Core or Product LIVE
 permissions. At 5 V, 10 Ω nominally implies 0.5 A, and 2 W implies 0.4 A;
@@ -1025,7 +1036,7 @@ only uses the explicit `-Resource` argument.
 ```powershell
 $env:ELECTRONICLOAD_TOOL_RESOURCE = "USB0::...::INSTR"
 
-# Preview the default eight modes, without opening VISA.
+# Preview all supported modes, without opening VISA.
 .\scripts\live-cli-check.ps1 -Target itech-it8812c -Resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" -PlanOnly
 
 # Preview selected modes.
@@ -1099,10 +1110,15 @@ Product LIVE support.
 
 Select `live-cli-check.ps1 -Modes trigger` with the usual approved model,
 explicit USB Resource, source/DUT limits and independent manual OFF procedure.
-Add `-PlanOnly` to check the command plan without VISA access. For a physical
-run, supply these approved values explicitly. Run any legacy
-`transient-cc/cv/cr/cw` validation separately, since those modes set HOLD
-before Trigger validation can save the original settings.
+Add `-PlanOnly` to check the command plan without VISA access. Trigger uses
+built-in preset settings by default: 0.1/0.2 A levels, 0.1 A/µs slews,
+0.1 s pulse, 1 s TIMER interval, 0.5/0.5 s LIST dwell, one LIST repeat,
+5 s observation and a 60 s trial ON/OFF deadline. These are controlled
+validation presets, not proof that a particular supply or DUT is safe.
+The original Transient Pulse default remains 0.001 s; explicitly supplying
+`-PulseWidth` overrides both. A full-mode run saves original Trigger Source
+and Timer before any legacy Transient writes HOLD, then restores them after
+the Trigger trials when Input OFF is confirmed and communication trusted.
 
 | Parameters | Purpose |
 | --- | --- |
@@ -1110,7 +1126,7 @@ before Trigger validation can save the original settings.
 | `-LevelA`, `-LevelB`, `-RiseSlew`, `-FallSlew`, `-PulseWidth` | Distinct bounded Low-range CC levels, slew rates in A/μs and the Transient pulse width in seconds. Both current levels must fit the declared source limit. |
 | `-TriggerIntervalSeconds` | TIMER interval in seconds. The observation must accommodate two periods plus the pulse width. |
 | `-TriggerListWidthA`, `-TriggerListWidthB`, `-TriggerListRepeat` | LIST CC dwell times in seconds and a finite repeat count. The LIST must fit the observation window. |
-| `-TriggerExternalSetup` | Reviewed pulse equipment, signal limits and wiring. The console displays this description for confirmation. |
+| `-TriggerExternalSetup` | Optional explanatory note; the console still requires physical equipment and wiring confirmation. |
 
 Use a current observation method that can resolve the chosen levels and pulse
 or dwell times. MANUAL, HOLD and TIMER use Transient CC Pulse (baseline B,
@@ -1128,7 +1144,10 @@ The script saves the original Trigger Source and interval while Input is OFF.
 Press Enter before each trial to confirm the setup and then perform any
 requested physical trigger during the bounded observation. The script
 explicitly attempts and verifies Input OFF before requesting a Yes/No answer.
-The readiness and observation prompts count toward the 900 s limit. A missed
+The readiness and observation prompts count toward the existing 900 s
+limit, including default all-mode runs. If the complete selection cannot
+finish within that deadline, the run fails rather than silently skipping
+a mode or removing the bound. A missed
 trial or run deadline fails validation even if bounded emergency cleanup is
 still possible. Yes confirms the expected observable effect. Insufficient
 observation, cancellation and unsuccessful restoration fail validation.

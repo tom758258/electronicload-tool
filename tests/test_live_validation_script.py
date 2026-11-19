@@ -200,7 +200,6 @@ def test_fixed_auto_script_current_bounds_and_no_rounding(run_script, current):
 
 
 @pytest.mark.parametrize('selection,modes', [
-    (None, ('cc', 'cv', 'cr', 'cw', 'transient-cc', 'transient-cv', 'transient-cr', 'transient-cw')),
     ('cc', ('cc',)), ('cv', ('cv',)), ('cr', ('cr',)), ('cw', ('cw',)),
     ('transient-cc', ('transient-cc',)),
     ('transient-cv', ('transient-cv',)), ('transient-cr', ('transient-cr',)),
@@ -213,6 +212,27 @@ def test_fixed_auto_script_current_bounds_and_no_rounding(run_script, current):
 def test_hardware_script_mode_plans(run_script, selection, modes):
     extra = ['-PlanOnly'] + (['-Modes', selection] if selection is not None else [])
     assert_report(run_script(extra), 'PLAN ONLY', modes)
+
+
+def test_hardware_script_default_runs_every_mode_in_plan_only(run_script):
+    result = run_script(['-PlanOnly'])
+    assert result.returncode == 0, result.stdout + result.stderr
+    expected = ('cc', 'cv', 'cr', 'cw', 'transient-cc', 'transient-cv', 'transient-cr',
+                'transient-cw', 'trace', 'cr-led', 'current-slow-rise', 'trigger', 'input-timer')
+    assert f"Selected modes: {', '.join(expected)}." in result.stdout
+    report_path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)[-1])
+    text = report_path.read_text(encoding='utf-8-sig')
+    report = json.loads(text)
+    names = [item['name'] for item in report['cases']]
+    assert report['overall_status'] == 'PLAN ONLY' and report['hardware_touched'] is False
+    assert len(names) == len(set(names))
+    assert names[:4] == ['identify', 'input-state', 'measure-off', 'trigger-snapshot']
+    assert names.index('trigger-snapshot') < names.index('set-cc-high')
+    for name in ('timer-on', 'trace-powered-on', 'cr-led-set', 'slow-rise-enable',
+                 'trigger-manual-on', 'trigger-external-on', 'trigger-restore'):
+        assert name in names
+    assert all(item['status'] == 'NOT RUN' for item in report['cases'])
+    assert RESOURCE not in text
 
 
 def test_plan_only_console_summary_and_verbose_steps(run_script):
@@ -523,6 +543,18 @@ def test_input_timer_script_invalid_settings_and_selection(run_script, extra):
         assert 'Report:' not in result.stdout
 
 
+def test_input_timer_is_also_selectable_with_modes(run_script):
+    result = run_script(['-PlanOnly', '-Modes', 'input-timer'])
+    assert result.returncode == 0, result.stdout + result.stderr
+    report_path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)[-1])
+    report = json.loads(report_path.read_text(encoding='utf-8-sig'))
+    names = [case['name'] for case in report['cases']]
+    assert 'timer-on' in names and 'timer-disable' in names
+    assert 'trigger-snapshot' not in names and 'set-cc-high' not in names
+    assert report['hardware_touched'] is False
+    assert all(case['status'] == 'NOT RUN' for case in report['cases'])
+
+
 def test_input_timer_script_uses_default_source_limits(run_script):
     result = run_script(['-InputTimerOnly', '-PlanOnly'], source_limits=False)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -646,11 +678,19 @@ def test_trigger_validation_script_plan_preflight_and_noninteractive_refusal(run
         assert (f'trigger-{source}-dispatch' in cases) == (source in ('hold', 'bus'))
     assert cases['trigger-bus-setup']['command'] == 'set-list-cc'
     assert cases['trigger-hold-setup']['command'] == 'set-transient-cc'
+    pulse_args = cases['trigger-hold-setup']['arguments']
+    assert pulse_args[pulse_args.index('--pulse-width') + 1] == '0.1'
+    timer_args = cases['trigger-timer-configure']['arguments']
+    assert timer_args[timer_args.index('--interval-s') + 1] == '1'
     assert not any(name.startswith('transient-') or name.startswith('cc-') for name in cases)
     refused = run_script(['-Modes', 'trigger'])
     assert refused.returncode == 2 and 'requires an interactive console' in refused.stdout
     mixed = run_script(['-Modes', 'transient-cc,trigger', '-PlanOnly'])
-    assert mixed.returncode == 2 and 'preserve the original Trigger Source' in mixed.stdout
+    assert mixed.returncode == 0, mixed.stdout + mixed.stderr
+    mixed_report_path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', mixed.stdout)[-1])
+    mixed_names = [case['name'] for case in json.loads(
+        mixed_report_path.read_text(encoding='utf-8-sig'))['cases']]
+    assert mixed_names.index('trigger-snapshot') < mixed_names.index('transient-continuous-auto-setup')
     preflight = run_script(['-TriggerOnly'], preflight=True)
     assert preflight.returncode == 0, preflight.stdout + preflight.stderr
 

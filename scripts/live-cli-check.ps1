@@ -1,8 +1,9 @@
 <#
 Single, bounded IT8812C CLI hardware validation.
-Default: all eight modes, with common read-only safety prechecks.
--Modes selects cc, cv, cr, cw, transient-cc/cv/cr/cw, trace, cr-led, current-slow-rise and/or trigger.
--InputTimerOnly selects a separate bounded Fixed CC Timer trial; excluded from defaults.
+Default: every supported validation mode, with common read-only safety prechecks.
+-Modes selects any supported validation mode, including trace, cr-led, current-slow-rise,
+trigger and input-timer. Omitted -Modes selects all supported modes.
+-InputTimerOnly is a backward-compatible shortcut for the input-timer-only trial.
 Requires approved source/DUT limits and interactive confirmation before hardware access.
 -PlanOnly validates every planned CLI request without VISA or hardware access.
 #>
@@ -13,7 +14,7 @@ param(
     [string]$Resource,
     [ValidateSet('system')][string]$Backend = 'system',
     [string]$Current = '0.1',
-    [string[]]$Modes = @('cc', 'cv', 'cr', 'cw', 'transient-cc', 'transient-cv', 'transient-cr', 'transient-cw'),
+    [string[]]$Modes = @(),
     [double]$SourceCurrentLimitA = 0.8,
     [double]$SourceVoltageLimitV = 5,
     [string]$Voltage = '3',
@@ -35,12 +36,12 @@ param(
     [string]$PulseWidth = '0.001',
     [switch]$InputTimerOnly,
     [string]$TimerSeconds = '5',
-    [int]$TriggerObservationSeconds,
-    [int]$TriggerMaxOnSeconds,
-    [string]$TriggerIntervalSeconds,
-    [string]$TriggerListWidthA,
-    [string]$TriggerListWidthB,
-    [int]$TriggerListRepeat,
+    [int]$TriggerObservationSeconds = 5,
+    [int]$TriggerMaxOnSeconds = 60,
+    [string]$TriggerIntervalSeconds = '1',
+    [string]$TriggerListWidthA = '0.5',
+    [string]$TriggerListWidthB = '0.5',
+    [int]$TriggerListRepeat = 1,
     [string]$TriggerExternalSetup,
     [switch]$PlanOnly,
     [switch]$DebugArtifacts
@@ -49,11 +50,12 @@ param(
 $ErrorActionPreference = 'Stop'
 $featureModes = @('cr-led', 'current-slow-rise')
 $supportedModes = @('cc', 'cv', 'cr', 'cw', 'transient-cc', 'transient-cv', 'transient-cr', 'transient-cw',
-                    'trace') + $featureModes + @('trigger')
+                    'trace') + $featureModes + @('trigger', 'input-timer')
 if ($InputTimerOnly) {
     if ($PSBoundParameters.ContainsKey('Modes')) { throw 'InputTimerOnly cannot be combined with Modes.' }
-    $supportedModes = @('input-timer')
     $Modes = @('input-timer')
+} elseif (-not $PSBoundParameters.ContainsKey('Modes')) {
+    $Modes = $supportedModes
 }
 $requestedModes = @($Modes | ForEach-Object { $_ -split ',' } |
     ForEach-Object { $_.Trim().ToLowerInvariant() })
@@ -62,6 +64,7 @@ $selectedModes = @($supportedModes | Where-Object { $_ -in $requestedModes })
 $hasValidationModes = @($selectedModes | Where-Object { $_ -ne 'cc' }).Count -gt 0
 $traceSelected = 'trace' -in $selectedModes
 $triggerSelected = 'trigger' -in $selectedModes
+$timerSelected = 'input-timer' -in $selectedModes
 $featureSelected = @($selectedModes | Where-Object { $_ -in $featureModes }).Count -gt 0
 $featureOnly = $featureSelected -and @($selectedModes | Where-Object { $_ -notin $featureModes }).Count -eq 0
 $traceCommunicationUntrusted = $false
@@ -93,6 +96,9 @@ $slowRiseEnableAttempted = $false
 $slowRiseCommunicationTrusted = $false
 $slowRiseCleanup = @()
 $triggerScope = @('--hardware-validation', 'trigger')
+# The Trigger pulse needs an observable preset; the legacy Transient default is unchanged.
+$script:triggerPulseWidth = $(if ($PSBoundParameters.ContainsKey('PulseWidth')) { $PulseWidth } else { '0.1' })
+$script:originalTriggerSnapshot = $null
 $triggerTrials = @()
 $triggerPlans = @()
 $triggerTrusted = $true
@@ -522,27 +528,16 @@ function Assert-InputOff([object]$Result, [string]$CaseName) {
 }
 
 function New-TriggerPlan {
-    # Only dry-run and noninteractive refusal may use example timings.
-    $examples = @{
-        TriggerObservationSeconds=5; TriggerMaxOnSeconds=60; TriggerIntervalSeconds='1'
-        TriggerListWidthA='0.5'; TriggerListWidthB='0.5'; TriggerListRepeat=1
-        LevelA='0.1'; LevelB='0.2'; RiseSlew='0.1'; FallSlew='0.1'; PulseWidth='0.1'
-    }
-    $offline = $PlanOnly -or [Console]::IsInputRedirected -or -not [Environment]::UserInteractive
-    foreach ($name in $examples.Keys) {
-        if (-not $script:PSBoundParameters.ContainsKey($name)) {
-            if (-not $offline) { throw "Trigger LIVE requires an explicit -$name." }
-            Set-Variable -Name $name -Value $examples[$name] -Scope Script
-        }
-    }
-    if (-not $offline -and [string]::IsNullOrWhiteSpace($TriggerExternalSetup)) {
-        throw 'Trigger LIVE requires -TriggerExternalSetup with the reviewed pulse source, electrical limits and wiring.'
+    # The same bounded preset is used for PlanOnly and separately approved interactive LIVE.
+    # A description cannot replace the operator's actual equipment and wiring checks.
+    if ([string]::IsNullOrWhiteSpace($TriggerExternalSetup)) {
+        $script:TriggerExternalSetup = 'Operator must verify rear TRIG/common wiring, TTL low pulse >10 us, and disabled external On/Off/analog programming.'
     }
     if ($TriggerObservationSeconds -le 0 -or $TriggerMaxOnSeconds * 1000 -gt $totalDeadlineMs -or
         $TriggerMaxOnSeconds -le $TriggerObservationSeconds) {
         throw 'Maximum Trigger ON time must exceed the observation time and fit within the total deadline.'
     }
-    foreach ($token in @($LevelA, $LevelB, $RiseSlew, $FallSlew, $PulseWidth,
+    foreach ($token in @($LevelA, $LevelB, $RiseSlew, $FallSlew, $script:triggerPulseWidth,
                          $TriggerIntervalSeconds, $TriggerListWidthA, $TriggerListWidthB)) {
         if ($token -cnotmatch '^(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$') {
             throw 'Trigger levels, slews and times must be nonnegative JSON numbers.'
@@ -556,15 +551,15 @@ function New-TriggerPlan {
         ([decimal]$TriggerListWidthA + [decimal]$TriggerListWidthB) * $TriggerListRepeat -gt $TriggerObservationSeconds) {
         throw 'The finite LIST must fit in the observation window.'
     }
-    if ([decimal]$PulseWidth -ge [decimal]$TriggerIntervalSeconds -or
-        2 * [decimal]$TriggerIntervalSeconds + [decimal]$PulseWidth -gt $TriggerObservationSeconds) {
+    if ([decimal]$script:triggerPulseWidth -ge [decimal]$TriggerIntervalSeconds -or
+        2 * [decimal]$TriggerIntervalSeconds + [decimal]$script:triggerPulseWidth -gt $TriggerObservationSeconds) {
         throw 'Allow time for at least two Timer periods and a distinct pulse shorter than the interval.'
     }
     $setTransient = @('--range','low','--transient-mode','pulse','--level-a',$LevelA,'--level-b',$LevelB,
-        '--rise-slew',$RiseSlew,'--fall-slew',$FallSlew,'--pulse-width',$PulseWidth)
+        '--rise-slew',$RiseSlew,'--fall-slew',$FallSlew,'--pulse-width',$script:triggerPulseWidth)
     $transientJson = '{"range":"low","transient_mode":"pulse","level_a":' + $LevelA +
         ',"level_b":' + $LevelB + ',"rise_slew":' + $RiseSlew + ',"fall_slew":' + $FallSlew +
-        ',"pulse_width":' + $PulseWidth + '}'
+        ',"pulse_width":' + $script:triggerPulseWidth + '}'
     $listJson = '{"range":"low","repeat_count":' + $TriggerListRepeat + ',"steps":[' +
         '{"current_a":' + $LevelA + ',"slew_a_per_us":' + $RiseSlew + ',"width_s":' + $TriggerListWidthA + '},' +
         '{"current_a":' + $LevelB + ',"slew_a_per_us":' + $FallSlew + ',"width_s":' + $TriggerListWidthB + '}]}'
@@ -690,7 +685,7 @@ function Invoke-TriggerTrial($Trial) {
         if ($Trial.isList) {
             Write-Host "Expect LIST CC levels $LevelA A then $LevelB A for $TriggerListWidthA s / $TriggerListWidthB s, repeated $TriggerListRepeat time(s)."
         } else {
-            Write-Host "Expect baseline B ($LevelB A), a pulse at A ($LevelA A) for $PulseWidth s, then a return to B."
+            Write-Host "Expect baseline B ($LevelB A), a pulse at A ($LevelA A) for $($script:triggerPulseWidth) s, then a return to B."
         }
         switch ($Trial.source) {
             'MANUAL' { Write-Host 'When the observation starts, press Local, then Shift + . (Trigger) on the IT8812C.' }
@@ -731,7 +726,7 @@ function Invoke-TriggerTrial($Trial) {
                 $dispatchBudget = $observeUntil - $script:watch.ElapsedMilliseconds
                 $eventDuration = if ($Trial.isList) {
                     ([decimal]$TriggerListWidthA + [decimal]$TriggerListWidthB) * $TriggerListRepeat
-                } else { [decimal]$PulseWidth }
+                } else { [decimal]$script:triggerPulseWidth }
                 $dispatchBudget -= [Math]::Ceiling($eventDuration * 1000)
                 if ($dispatchBudget -le 0) { throw 'Software trigger observation deadline expired.' }
                 $null = Invoke-TriggerStep "$prefix-dispatch" -DeadlineMs $dispatchBudget -TerminationMs $terminationMs
@@ -790,7 +785,8 @@ function Invoke-TriggerTrial($Trial) {
 }
 
 function Invoke-TriggerValidation {
-    $snapshot = Invoke-TriggerStep 'trigger-snapshot'
+    $snapshot = $script:originalTriggerSnapshot
+    if ($null -eq $snapshot) { throw 'Original Trigger snapshot was not captured before mode changes.' }
     Assert-TriggerOff $snapshot 'trigger-snapshot'
     $source = $snapshot.result.source
     $interval = $snapshot.result.interval_s
@@ -917,9 +913,6 @@ try {
     if ($requestedModes.Count -eq 0 -or @($requestedModes | Where-Object { $_ -notin $supportedModes }).Count -gt 0) {
         throw "Modes must contain one or more of: $($supportedModes -join ', ')."
     }
-    if ($triggerSelected -and @($selectedModes | Where-Object { $_.StartsWith('transient-') }).Count -gt 0) {
-        throw 'Run Trigger validation separately from legacy Transient modes to preserve the original Trigger Source.'
-    }
     if (-not $Target -or -not $Resource) {
         Write-Host 'BLOCKED: explicit -Target and -Resource are required.'
         exit 2
@@ -927,7 +920,7 @@ try {
     if (-not (Test-Path -LiteralPath $python) -or -not (Test-Path -LiteralPath $cli)) {
         throw 'Sync the repository .venv with uv before running validation.'
     }
-    if ('cc' -in $selectedModes -or $traceSelected -or $InputTimerOnly -or $featureSelected) {
+    if ('cc' -in $selectedModes -or $traceSelected -or $timerSelected -or $featureSelected) {
         # Preserve the original token; both manual trials and the script ceiling must pass.
         & $python -c 'from electronicload_tool_core.control import validate_current; import sys; value = validate_current(sys.argv[1], sys.argv[2]); validate_current(sys.argv[1], sys.argv[3]); sys.exit(0 if 0 < value <= 2 else 2)' $currentText low high
         if ($LASTEXITCODE -ne 0) {
@@ -936,7 +929,7 @@ try {
         $report.prechecks.current = 'PASS'
     }
     $report.script_current_ceiling_a = $scriptCurrentCeilingA
-    if ($InputTimerOnly) {
+    if ($timerSelected) {
         & $python -c 'import sys; from electronicload_tool_core.control import validate_input_timer; value=validate_input_timer(int(sys.argv[1])); sys.exit(0 if 3 <= value <= 10 else 2)' $TimerSeconds
         if ($LASTEXITCODE -ne 0) { throw 'Timer validation seconds must be an integer from 3 through 10.' }
     }
@@ -952,7 +945,7 @@ try {
         current_a = $SourceCurrentLimitA; voltage_v = $SourceVoltageLimitV
         verification = 'operator-declared; script does not configure or verify the source'
     }
-    if (('cc' -in $selectedModes -or $traceSelected -or $InputTimerOnly -or $featureSelected) -and
+    if (('cc' -in $selectedModes -or $traceSelected -or $timerSelected -or $featureSelected) -and
         [decimal]$currentText -gt [decimal]$SourceCurrentLimitA) {
         throw 'CC current must not exceed the declared source current limit.'
     }
@@ -986,7 +979,7 @@ try {
             @{name='final-input-state';command='input-state';args=@()}
         )
     }
-    if ($InputTimerOnly) {
+    if ($timerSelected) {
         $timerScope = @('--hardware-validation', 'input-timer')
         $timerExpected = '{"current":' + $currentText + ',"range":"low","seconds":' + [int]$TimerSeconds + '}'
         $planned += @(
@@ -1171,7 +1164,13 @@ try {
     foreach ($step in ($planned | Where-Object { $_.ContainsKey('cr_handoff_after') })) {
         $step.condition = "$($step.cr_handoff_after) refused a resistance origin before remote"
     }
-    $allSteps = $planned + $slowRiseCleanup + $triggerPlans
+    # Preserve the original Source/Timer before any legacy Transient can write HOLD.
+    $allSteps = $planned + $slowRiseCleanup
+    if ($triggerSelected) {
+        $allSteps = @($planned | Select-Object -First 3) + @($triggerPlans | Select-Object -First 1) +
+            @($planned | Select-Object -Skip 3) + $slowRiseCleanup +
+            @($triggerPlans | Select-Object -Skip 1)
+    }
     $report.results = @($allSteps | ForEach-Object {
         $entry = [ordered]@{name=$_.name;command=$_.command;arguments=$_.args;status='NOT RUN'}
         if ($_.ContainsKey('expected_error')) { $entry['expected_error'] = $_.expected_error }
@@ -1254,16 +1253,36 @@ try {
         Write-Host 'BLOCKED: controlled LIVE validation requires an interactive console.'
         exit 2
     }
-    if ($InputTimerOnly) {
-        & (Join-Path $PSScriptRoot 'preflight-cli.ps1') -InputTimerOnly
+    # Focused selections keep their preflight; mixed/all-mode runs check
+    # the original base and only the chosen feature-specific offline scopes.
+    $preflightScript = Join-Path $PSScriptRoot 'preflight-cli.ps1'
+    if ($selectedModes.Count -eq 1 -and $timerSelected) {
+        & $preflightScript -InputTimerOnly
     } elseif ($selectedModes.Count -eq 1 -and $traceSelected) {
-        & (Join-Path $PSScriptRoot 'preflight-cli.ps1') -TraceOnly
+        & $preflightScript -TraceOnly
     } elseif ($selectedModes.Count -eq 1 -and $triggerSelected) {
-        & (Join-Path $PSScriptRoot 'preflight-cli.ps1') -TriggerOnly
+        & $preflightScript -TriggerOnly
     } elseif ($featureOnly) {
-        & (Join-Path $PSScriptRoot 'preflight-cli.ps1') -CrLedSlowRiseOnly
+        & $preflightScript -CrLedSlowRiseOnly
     } else {
-        & (Join-Path $PSScriptRoot 'preflight-cli.ps1')
+        & $preflightScript
+        if ($LASTEXITCODE -ne 0) { throw 'Base preflight failed.' }
+        if ($timerSelected) {
+            & $preflightScript -InputTimerOnly
+            if ($LASTEXITCODE -ne 0) { throw 'Input Timer preflight failed.' }
+        }
+        if ($traceSelected) {
+            & $preflightScript -TraceOnly
+            if ($LASTEXITCODE -ne 0) { throw 'TRACE preflight failed.' }
+        }
+        if ($featureSelected) {
+            & $preflightScript -CrLedSlowRiseOnly
+            if ($LASTEXITCODE -ne 0) { throw 'CR-LED/Slow Rise preflight failed.' }
+        }
+        if ($triggerSelected) {
+            & $preflightScript -TriggerOnly
+            if ($LASTEXITCODE -ne 0) { throw 'Trigger preflight failed.' }
+        }
     }
     if ($LASTEXITCODE -ne 0) {
         $report.prechecks.preflight = 'FAIL'
@@ -1359,7 +1378,7 @@ try {
             ($result.result.enabled -isnot [bool] -or $result.result.enabled -cne $step.slow)) {
             Fail-Case $step.name 'readback_mismatch' 'Current Slow Rise state differs from the expected setting.'
         }
-        if ($InputTimerOnly -and $step.command -in @('set-input-timer', 'input-timer-enable', 'input-timer-disable')) {
+        if ($timerSelected -and $step.command -in @('set-input-timer', 'input-timer-enable', 'input-timer-disable')) {
             Assert-InputOff $result $step.name
         }
         if ($step.command -eq 'input-timer-status') {
@@ -1402,6 +1421,10 @@ try {
         if ($step.command -eq 'transient-disable') { $transientEnableAttempted = $false }
         if ($step.name -eq 'slow-rise-status-disabled') { $slowRiseEnableAttempted = $false }
         if ($step.name -eq 'input-state') { $report.prechecks.input_off = 'PASS' }
+        if ($step.name -eq 'measure-off' -and $triggerSelected) {
+            $script:originalTriggerSnapshot = Invoke-TriggerStep 'trigger-snapshot'
+            Assert-TriggerOff $script:originalTriggerSnapshot 'trigger-snapshot'
+        }
         Write-Host "PASS $($step.name)"
     }
 
