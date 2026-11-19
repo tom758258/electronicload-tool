@@ -17,6 +17,24 @@ Avoid tests tied to private helpers, source text, exact help prose, or document
 formatting. Packaging and installation are checked with actual build artifacts;
 do not duplicate those checks in a second permanent test suite.
 
+## CI test boundaries
+
+CI uses the same Linux/Windows Python-version names as the other Tool projects.
+The fast no-hardware matrix runs Core, CLI, Worker and Fake VISA contracts on
+Linux Python 3.10–3.13 and Windows Python 3.10, 3.12 and 3.13. It excludes
+`tests/test_live_validation_script.py`, which exercises real PowerShell
+processes and is not part of routine Python-version compatibility testing.
+
+Changes to the validation scripts, their direct CLI/Core safety boundaries or
+their script tests run `tests/test_live_validation_script.py` once on Linux
+Python 3.13 (including POSIX fake-operator safety cases) and once on Windows
+Python 3.13 (Windows PowerShell contracts). Windows preflight is checked
+separately on the same affected boundary. Unrelated changes skip these costly
+script tests; packaging changes keep the existing wheel/sdist installation smoke.
+A skipped CI job does not mean real hardware was validated or that its tests
+were removed. For a targeted local check, run the changed test file with pytest
+from the repository root. No CI job is authorized to access physical VISA.
+
 ## Local checks
 
 Sync the development environment as described in the [README](../README.md).
