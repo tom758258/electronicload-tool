@@ -995,17 +995,20 @@ def test_list_worker_http_jsonl_cycle_and_unchanged_runtime_status(worker, repea
 
 def test_list_worker_invalid_arguments_are_rejected_before_job_creation(worker):
     _, _, ready = worker
-    invalid = [request('set-list-cc', {**list_arguments(), **changes}) for changes in (
-        {'repeat_count': True}, {'repeat_count': '65536'}, {'repeat_count': 1.0},
-        {'repeat_count': 65537}, {'range': []}, {'steps': []}, {'file': 'client.json'},
-        {'steps': [{'current_a': '1', 'slew_a_per_us': .1, 'width_s': 1}] * 2},
-        {'steps': [{'current_a': 1, 'width_s': 1}] * 2},
-        {'steps': [{'current_a': 1, 'slew_a_per_us': .1, 'width_s': 1, 'extra': 2}] * 2},
-    )]
-    invalid += [request(command, {'slot': slot}) for command in ('list-save', 'list-recall')
-                for slot in (None, 0, 8, True, '1', 1.0)]
-    invalid += [request('list-trigger', {'wait_complete': True}),
-                request('list-status', {'file': 'client.json'}), request('set-list-cc')]
+    # Core covers field-by-field numeric and schema variants; Worker verifies
+    # representative HTTP admission failures without creating a job.
+    invalid = [
+        request('set-list-cc', {**list_arguments(), 'repeat_count': 65537}),
+        request('set-list-cc', {**list_arguments(), 'steps': []}),
+        request('set-list-cc', {**list_arguments(), 'file': 'client.json'}),
+        request('set-list-cc', {**list_arguments(),
+                                'steps': [{'current_a': 1, 'width_s': 1}] * 2}),
+        request('list-save', {'slot': 0}),
+        request('list-recall', {'slot': '1'}),
+        request('list-trigger', {'wait_complete': True}),
+        request('list-status', {'file': 'client.json'}),
+        request('set-list-cc'),
+    ]
     for payload in invalid:
         code, rejected = http(ready['command_url'], payload)
         assert code == 400 and rejected['worker_job_id'] is None

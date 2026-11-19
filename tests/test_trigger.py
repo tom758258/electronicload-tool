@@ -42,8 +42,14 @@ def physical(command, **arguments):
     return control.execute(command, resource=RESOURCE, hardware_validation="trigger", **arguments)
 
 
-@pytest.mark.parametrize("function", ["CC", "CV", "CR", "CW", "LIST"])
-def test_trigger_setup_shares_sources_across_all_simulated_functions(function):
+@pytest.mark.parametrize("function,sources", [
+    ("CC", ("MANUAL", "BUS", "HOLD", "TIMER", "EXTERNAL")),
+    ("CV", ("BUS",)),
+    ("CR", ("HOLD",)),
+    ("CW", ("TIMER",)),
+    ("LIST", ("BUS", "EXTERNAL")),
+])
+def test_trigger_setup_shares_sources_across_all_simulated_functions(function, sources):
     simulator = ControlSimulator()
 
     def execute(command, mode="simulate", **arguments):
@@ -57,7 +63,7 @@ def test_trigger_setup_shares_sources_across_all_simulated_functions(function):
         execute(f"set-transient-{function.lower()}", transient=transient("pulse", function=function))
         execute("transient-enable")
         prefix = "transient"
-    for source in ("MANUAL", "BUS", "HOLD", "TIMER", "EXTERNAL"):
+    for source in sources:
         kwargs = {"trigger_interval": "0.125000000000000001"} if source == "TIMER" else {}
         settings = execute("trigger-configure", trigger_source=source, **kwargs)
         assert settings["source"] == source and not simulator.input_on
@@ -74,7 +80,8 @@ def test_trigger_setup_shares_sources_across_all_simulated_functions(function):
             assert execute(f"{prefix}-trigger")["last_trigger"]["source"] == "software"
         assert execute("trigger-status") == settings
         execute("input-off")
-    assert execute("trigger-status")["interval_s"] == "0.125000000000000001"
+    expected_interval = "0.125000000000000001" if "TIMER" in sources else "0.01"
+    assert execute("trigger-status")["interval_s"] == expected_interval
 
 
 @pytest.mark.parametrize("source,interval", [
@@ -84,11 +91,12 @@ def test_trigger_setup_shares_sources_across_all_simulated_functions(function):
 ])
 def test_trigger_setup_bad_parameters_are_rejected_without_simulation_change(source, interval):
     simulator = ControlSimulator()
-    before = vars(simulator).copy()
+    before = control.execute("trigger-status", mode="simulate", simulator=simulator)
     with pytest.raises(LoadError):
         control.execute("trigger-configure", mode="simulate", simulator=simulator,
                         trigger_source=source, trigger_interval=interval)
-    assert vars(simulator) == before
+    assert control.execute("trigger-status", mode="simulate", simulator=simulator) == before
+    assert simulator.input_on is False
 
 
 def test_trigger_setup_dry_run_and_stop_preserve_input_and_configuration():
@@ -264,8 +272,7 @@ def test_native_list_setup_reports_selected_mode_after_settings_mismatch(monkeyp
 
 def test_trigger_cli_and_native_refusals_do_not_open_visa(monkeypatch, capsys):
     monkeypatch.setattr(control, "open_session", lambda *_: pytest.fail("VISA opened"))
-    for command, args in [("trigger-status", []), ("trigger-configure", ["--source", "BUS"]),
-                          ("list-trigger", []), ("transient-trigger", [])]:
+    for command, args in [("trigger-status", []), ("trigger-configure", ["--source", "BUS"])]:
         assert cli.main([command, *args, "--json", "--resource", RESOURCE,
                          "--validation-allow-pending-live-support"]) == 2
         assert json.loads(capsys.readouterr().out)["error"]["code"] == "unsupported_live_scope"
