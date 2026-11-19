@@ -1099,9 +1099,9 @@ error-queue read or reconnect is added. VISA Close alone does not imply OFF.
 | Any other mode total I/O | 900 s |
 | Cleanup commands | Separate 30 s allowance |
 
-The default eight-mode plan has 192 command invocations (191 report cases
-plus Identify); slow hardware may exhaust 900 seconds. Select a smaller
-`-Modes` set if necessary. V/I/P are separate queries, with no guarantee
+The default plan now includes all supported modes. It retains the existing
+900-second total deadline; slow hardware or operator observations may exhaust
+that budget. Select a smaller `-Modes` set if necessary. V/I/P are separate queries, with no guarantee
 of power freshness, synchronization, waveform timing or accuracy. This
 contributor-only CLI validation **does not** enable Worker LIVE or expand
 Product LIVE support.
@@ -1119,6 +1119,10 @@ The original Transient Pulse default remains 0.001 s; explicitly supplying
 `-PulseWidth` overrides both. A full-mode run saves original Trigger Source
 and Timer before any legacy Transient writes HOLD, then restores them after
 the Trigger trials when Input OFF is confirmed and communication trusted.
+If an earlier selected mode fails after legacy Transient may have changed
+Source, it attempts the same restore only after trusted Input OFF confirmation.
+An untrusted session or unconfirmed OFF blocks further VISA writes and requires
+independent operator action; the run stays FAIL.
 
 | Parameters | Purpose |
 | --- | --- |

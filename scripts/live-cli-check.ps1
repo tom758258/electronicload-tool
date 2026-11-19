@@ -99,6 +99,7 @@ $triggerScope = @('--hardware-validation', 'trigger')
 # The Trigger pulse needs an observable preset; the legacy Transient default is unchanged.
 $script:triggerPulseWidth = $(if ($PSBoundParameters.ContainsKey('PulseWidth')) { $PulseWidth } else { '0.1' })
 $script:originalTriggerSnapshot = $null
+$script:triggerSourceMayHaveChanged = $false
 $triggerTrials = @()
 $triggerPlans = @()
 $triggerTrusted = $true
@@ -373,6 +374,7 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
         $stderr = $process.StandardError.ReadToEndAsync()
         if (-not $process.WaitForExit([int]$remaining)) {
             if ($traceCase) { $script:traceCommunicationUntrusted = $true }
+            if ($script:triggerSelected) { $script:triggerTrusted = $false }
             $terminationAttempted = $true
             $process.Kill()
             $exitStatus = 'TIMEOUT; session/input state unconfirmed'
@@ -390,11 +392,13 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
             $result = $output | ConvertFrom-Json -ErrorAction Stop
         } catch {
             if ($traceCase) { $script:traceCommunicationUntrusted = $true }
+            if ($script:triggerSelected) { $script:triggerTrusted = $false }
             $entry['error_code'] = 'invalid_cli_json'
             throw "$CaseName did not return valid CLI JSON."
         }
         if ($null -eq $result -or $result.ok -isnot [bool]) {
             if ($traceCase) { $script:traceCommunicationUntrusted = $true }
+            if ($script:triggerSelected) { $script:triggerTrusted = $false }
             $entry['error_code'] = 'invalid_cli_json'
             throw "$CaseName returned an incomplete CLI result."
         }
@@ -403,6 +407,11 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
             $code = [string]$result.error.code
             $details = $result.error.details
             $entry['error_code'] = $(if ($code -cmatch '^[a-z_]+$') { $code } else { 'execution_failed' })
+            if ($script:triggerSelected -and ($code -in @('query_failed','write_failed',
+                    'visa_open_failed','visa_configure_failed','cleanup_failed','trace_session_untrusted') -or
+                    $null -ne $details.cleanup_errors)) {
+                $script:triggerTrusted = $false
+            }
             if ($CaseName -ceq 'trigger-restore') {
                 if ($details.trigger_readbacks.source -cin @('CONFIRMED','MISMATCH','UNCONFIRMED')) {
                     $entry['trigger_source_restore'] = $details.trigger_readbacks.source
@@ -513,6 +522,7 @@ function Assert-Runtime([object]$Result, [string]$CaseName) {
     if ($null -eq $Result.result.visa -or
         $Result.result.visa.library -cne $script:expectedLibrary -or
         $Result.result.visa.manufacturer -cne $script:expectedManufacturer) {
+        if ($script:triggerSelected) { $script:triggerTrusted = $false }
         Fail-Case $CaseName 'runtime_mismatch' 'VISA runtime evidence changed between commands; validation cannot pass.'
     }
     if ($script:slowRiseEnableAttempted) { $script:slowRiseCommunicationTrusted = $true }
@@ -784,7 +794,7 @@ function Invoke-TriggerTrial($Trial) {
     }
 }
 
-function Invoke-TriggerValidation {
+function Invoke-TriggerValidation([switch]$RestoreOnly) {
     $snapshot = $script:originalTriggerSnapshot
     if ($null -eq $snapshot) { throw 'Original Trigger snapshot was not captured before mode changes.' }
     Assert-TriggerOff $snapshot 'trigger-snapshot'
@@ -795,7 +805,9 @@ function Invoke-TriggerValidation {
         Fail-Case 'trigger-snapshot' 'invalid_response' 'Both original Trigger settings must be read before any change.'
     }
     try {
-        foreach ($trial in $script:triggerTrials) { Invoke-TriggerTrial $trial }
+        if (-not $RestoreOnly) {
+            foreach ($trial in $script:triggerTrials) { Invoke-TriggerTrial $trial }
+        }
     } finally {
         $script:report.trigger_restore_status = 'FAIL'
         $entry = $script:report.results | Where-Object { $_.name -ceq 'trigger-restore' }
@@ -1358,6 +1370,11 @@ try {
         $commandDeadline = $(if ($traceSelected -and $step.command -eq 'trace-start') {
             $traceStartDeadlineMs
         } else { $perCommandDeadlineMs })
+        if ($triggerSelected -and $step.command -in @('set-transient-cc', 'set-transient-cv',
+                'set-transient-cr', 'set-transient-cw')) {
+            # Legacy validation writes TRIG:SOUR HOLD; mark before a possibly partial write.
+            $script:triggerSourceMayHaveChanged = $true
+        }
         $result = Invoke-LiveCommand -Command $step.command -CaseName $step.name `
             -ExtraArgs $step.args -DeadlineMs $commandDeadline -ExpectedError $step.expected_error `
             -AllowCrHandoff:($step.allow_cr_handoff -eq $true)
@@ -1457,10 +1474,11 @@ try {
         $report.results += [ordered]@{
             name = 'cleanup-input-off'; command = 'input-off'; status = 'NOT RUN'
         }
-        if ($traceCommunicationUntrusted) {
+        if ($traceCommunicationUntrusted -or ($triggerSelected -and -not $script:triggerTrusted)) {
             $report.status = 'FAIL'
-            $report.trace_safe_shutdown_unconfirmed = $true
-            Write-Host 'WARNING: TRACE VISA untrusted: no new Session or blind OFF cleanup; independent operator action required.'
+            if ($traceCommunicationUntrusted) { $report.trace_safe_shutdown_unconfirmed = $true }
+            if ($triggerSelected) { $report.trigger_input_off_unconfirmed = $true }
+            Write-Host 'WARNING: VISA communication untrusted: no new Session or blind OFF cleanup; independent operator action required.'
         } else { try {
             Write-Host 'Input ON was attempted: explicitly commanding OFF cleanup...'
             $cleanup = Invoke-LiveCommand -Command 'input-off' -CaseName 'cleanup-input-off' -Cleanup
@@ -1487,7 +1505,10 @@ try {
     if ($timerEnableAttempted) {
         $report.results += [ordered]@{name='cleanup-timer-state';command='input-state';status='NOT RUN'}
         $report.results += [ordered]@{name='cleanup-timer-disable';command='input-timer-disable';status='NOT RUN'}
-        try {
+        if ($traceCommunicationUntrusted -or ($triggerSelected -and -not $script:triggerTrusted)) {
+            $report.status = 'FAIL'
+            Write-Host 'WARNING: Timer cleanup blocked by untrusted communication; operator action required.'
+        } else { try {
             $state = Invoke-LiveCommand -Command 'input-state' -CaseName 'cleanup-timer-state' -Cleanup
             Assert-Runtime $state 'cleanup-timer-state'
             Assert-InputOff $state 'cleanup-timer-state'
@@ -1500,12 +1521,16 @@ try {
             Write-Host 'WARNING: Timer disable cleanup was not confirmed. Operator action is required.'
         }
         if ($report.status -eq 'PASS') { $report.status = 'FAIL' }
+        }
     }
     if ($transientEnableAttempted) {
         # Disable is separate from OFF. Never attempt it with unconfirmed Input state.
         $report.results += [ordered]@{name='cleanup-input-state';command='input-state';status='NOT RUN'}
         $report.results += [ordered]@{name='cleanup-transient-disable';command='transient-disable';status='NOT RUN'}
-        try {
+        if ($traceCommunicationUntrusted -or ($triggerSelected -and -not $script:triggerTrusted)) {
+            $report.status = 'FAIL'
+            Write-Host 'WARNING: Transient cleanup blocked by untrusted communication; operator action required.'
+        } else { try {
             $state = Invoke-LiveCommand -Command 'input-state' -CaseName 'cleanup-input-state' -Cleanup
             Assert-Runtime $state 'cleanup-input-state'
             Assert-InputOff $state 'cleanup-input-state'
@@ -1519,11 +1544,13 @@ try {
             Write-Host 'WARNING: Transient disable cleanup was not confirmed. Operator action is required.'
         }
         if ($report.status -eq 'PASS') { $report.status = 'FAIL' }
+        }
     }
     if ($slowRiseEnableAttempted) {
         $report.status = 'FAIL'
         $report.slow_rise_cleanup_unconfirmed = $true
-        if ($slowRiseCommunicationTrusted -and -not $traceCommunicationUntrusted) {
+        if ($slowRiseCommunicationTrusted -and -not $traceCommunicationUntrusted -and
+            (-not $triggerSelected -or $script:triggerTrusted)) {
             try {
                 foreach ($step in $slowRiseCleanup) {
                     $result = Invoke-LiveCommand -Command $step.command -CaseName $step.name `
@@ -1545,6 +1572,32 @@ try {
         }
         if ($report.slow_rise_cleanup_unconfirmed) {
             Write-Host 'WARNING: Current Slow Rise OFF was not confirmed. Independent operator action is required.'
+        }
+    }
+    # Legacy Transient can change Source before the Trigger trials begin.
+    # Restore the original settings only after trusted Input OFF cleanup.
+    if ($triggerSelected -and $script:triggerSourceMayHaveChanged -and
+        $null -ne $script:originalTriggerSnapshot -and $report.trigger_restore_status -eq 'NOT RUN') {
+        $report.status = 'FAIL'
+        if ($script:triggerTrusted -and -not $traceCommunicationUntrusted -and
+            -not $inputOnAttempted -and -not $timerEnableAttempted -and
+            -not $slowRiseEnableAttempted) {
+            $report.results += [ordered]@{name='cleanup-trigger-input-state';command='input-state';status='NOT RUN'}
+            try {
+                $state = Invoke-LiveCommand -Command 'input-state' -CaseName 'cleanup-trigger-input-state' -Cleanup
+                Assert-Runtime $state 'cleanup-trigger-input-state'
+                Assert-TriggerOff $state 'cleanup-trigger-input-state'
+                Invoke-TriggerValidation -RestoreOnly
+                Write-Host 'PASS Original Trigger Source and Timer Interval restored after an earlier mode failed.'
+            } catch {
+                if ($report.trigger_restore_status -ne 'PASS') {
+                    $report.trigger_restore_status = 'FAIL'
+                }
+                Write-Host 'WARNING: Trigger cleanup after an earlier mode failure did not complete; check the individual Source/Timer restoration evidence.'
+            }
+        } else {
+            $report.trigger_restore_status = 'FAIL'
+            Write-Host 'WARNING: Trigger Source and Timer Interval restoration blocked by uncertain safety state; operator action required.'
         }
     }
     Save-Report

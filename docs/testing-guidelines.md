@@ -365,7 +365,10 @@ PlanOnly and noninteractive refusal. Default PlanOnly includes every supported
 validation mode and captures Trigger Source/Timer before legacy Transient writes;
 `-Modes trigger` remains selectable. Cover the compatible `-Modes input-timer`
 and `-InputTimerOnly` entries, standard Trigger presets and focused default
-PlanOnly selection without physical VISA.
+PlanOnly selection without physical VISA. In a mixed legacy Transient/Trigger
+run, exercise failure before Trigger trials: verify original settings are
+restored only after trusted Input OFF, otherwise require manual action without
+blind VISA writes.
 
 Use recording Fake VISA for Input OFF guards, exact Source and Timer readback,
 HOLD/BUS dispatch, finite LIST and communication failures. Test script cleanup

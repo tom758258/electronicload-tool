@@ -226,7 +226,9 @@ def test_hardware_script_default_runs_every_mode_in_plan_only(run_script):
     names = [item['name'] for item in report['cases']]
     assert report['overall_status'] == 'PLAN ONLY' and report['hardware_touched'] is False
     assert len(names) == len(set(names))
-    assert names[:4] == ['identify', 'input-state', 'measure-off', 'trigger-snapshot']
+    # Identify is a precheck, not a shareable result case.
+    assert report['prechecks']['identify'] == 'NOT RUN'
+    assert names[:4] == ['input-state', 'measure-off', 'trigger-snapshot', 'set-cc-high']
     assert names.index('trigger-snapshot') < names.index('set-cc-high')
     for name in ('timer-on', 'trace-powered-on', 'cr-led-set', 'slow-rise-enable',
                  'trigger-manual-on', 'trigger-external-on', 'trigger-restore'):
@@ -375,6 +377,8 @@ def test_new_transient_script_refuses_invalid_setup(run_script, scope, args):
 @pytest.mark.parametrize('scope,off_failure', [('transient-cv', False), ('transient-cr', True),
                                               ('transient-cw', False),
                                               ('transient-cv,trace', False),
+                                              ('transient-cv,trigger', False),
+                                              ('transient-cv,trigger', True),
                                               ('input-timer', False), ('input-timer', True)])
 def test_validation_script_failure_cleanup_uses_active_scope(run_script, tmp_path, scope, off_failure):
     # Run the actual script through its interactive gates, with every LIVE CLI
@@ -383,6 +387,7 @@ def test_validation_script_failure_cleanup_uses_active_scope(run_script, tmp_pat
     trace = tmp_path / 'fake-commands.jsonl'
     state = tmp_path / 'fake-state.json'
     mixed_trace = 'trace' in scope
+    mixed_trigger = 'trigger' in scope
     active_scope = scope.split(',')[0]
     customization = tmp_path / 'sitecustomize.py'
     with customization.open('a', encoding='utf-8') as output:
@@ -437,9 +442,10 @@ def test_validation_script_failure_cleanup_uses_active_scope(run_script, tmp_pat
         assert disable_command not in names[names.index('input-on') + 1:]
         assert 'Immediate operator action is required' in text
     else:
-        assert names[-3:] == ['input-off', 'input-state',
-                              'input-timer-disable' if scope == 'input-timer' else 'transient-disable']
-        disable = commands[-1]
+        expected_cleanup = ['input-off', 'input-state',
+                            'input-timer-disable' if scope == 'input-timer' else 'transient-disable']
+        assert (names[-5:-2] if mixed_trigger else names[-3:]) == expected_cleanup
+        disable = commands[-3] if mixed_trigger else commands[-1]
         assert disable[disable.index('--hardware-validation') + 1] == active_scope
     paths = re.findall(r'Report: (.+?/shareable/report\.json)', text)
     report = json.loads(Path(paths[-1]).read_text(encoding='utf-8-sig'))
@@ -456,6 +462,23 @@ def test_validation_script_failure_cleanup_uses_active_scope(run_script, tmp_pat
         # explicit OFF / disable cleanup and not claim TRACE VISA is untrusted.
         assert 'trace-configure' not in names and 'trace-start' not in names
         assert report['trace_safe_shutdown_unconfirmed'] is False
+    if mixed_trigger:
+        assert names.index('trigger-status') < names.index('set-transient-cv')
+        assert cases['trigger-snapshot']['status'] == 'PASS'
+        assert cases['trigger-manual-on']['status'] == 'NOT RUN'
+        if off_failure:
+            # The established Transient cleanup may still query Input state
+            # after OFF fails; it must not issue a Trigger restore write.
+            assert report['trigger_restore_status'] == 'FAIL'
+            assert cases['trigger-restore']['status'] == 'NOT RUN'
+            assert 'trigger-configure' not in names
+        else:
+            assert names[-2:] == ['input-state', 'trigger-configure']
+            assert report['trigger_restore_status'] == 'PASS'
+            assert cases['cleanup-trigger-input-state']['status'] == 'PASS'
+            assert cases['trigger-restore']['status'] == 'PASS'
+            saved = json.loads(state.read_text())
+            assert saved['source'] == 'EXTERNAL' and saved['interval_s'] == '0.375'
     assert cases['cleanup-input-off']['status'] == ('FAIL' if off_failure else 'PASS')
     assert RESOURCE not in Path(paths[-1]).read_text(encoding='utf-8-sig')
     assert not (Path(paths[-1]).parents[1] / 'private').exists()
@@ -473,7 +496,9 @@ def fake_main(argv=None):
     command = args[0]
     with open(TRACE, 'a', encoding='utf-8') as trace:
         trace.write(json.dumps(args) + '\n')
-    state = json.loads(Path(STATE).read_text()) if Path(STATE).exists() else {'on': False}
+    state = json.loads(Path(STATE).read_text()) if Path(STATE).exists() else {
+        'on': False, 'source': 'EXTERNAL', 'interval_s': '0.375'
+    }
     failed = (command == 'transient-trigger'
               or (command == 'input-timer-status' and state['on'])
               or (command == 'input-off' and OFF_FAILURE))
@@ -481,18 +506,24 @@ def fake_main(argv=None):
         state['on'] = True
     if command == 'input-off' and not failed:
         state['on'] = False
+    if command == 'trigger-configure':
+        state['source'] = args[args.index('--source') + 1]
+        if '--interval-s' in args:
+            state['interval_s'] = args[args.index('--interval-s') + 1]
     if command in ('transient-enable', 'input-timer-enable'):
         state['enabled'] = True
     if command in ('transient-disable', 'input-timer-disable'):
         state['enabled'] = False
     Path(STATE).write_text(json.dumps(state))
     if command.startswith('set-transient-'):
+        state['source'] = 'HOLD'
         selected = args[args.index('--range') + 1] if '--range' in args else None
         if selected == 'auto':
             selected = 'low' if command == 'set-transient-cv' else 'high'
         state['configuration'] = {'range': selected}
         Path(STATE).write_text(json.dumps(state))
     result = {'seconds': 5, 'configuration': state.get('configuration'),
+              'source': state['source'], 'interval_s': state['interval_s'],
               'input_state': 'ON' if state['on'] else 'OFF',
               'enabled': state.get('enabled', False),
               'visa': {'library': 'FAKE', 'manufacturer': 'FAKE'}}
