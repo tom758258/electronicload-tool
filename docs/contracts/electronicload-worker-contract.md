@@ -86,6 +86,9 @@ Common contracts remain authoritative for the HTTP and JSONL envelopes.
 | `list-exit` | `{}` | Confirmed Input OFF required; select FIXED, retain LIST data |
 | `trigger-configure` | `{"source":<source>}` or `{"source":"TIMER","interval_s":<number>}` | Offline Trigger Setup |
 | `trigger-status` | `{}` | Stored Trigger Source and Timer interval |
+| `protection-status` | `{}` or `{"events":true}` | Input, settings, condition register, optional read-and-clear event register |
+| `protection-set` | `{"confirm":true,...}` | Verify and apply only the requested settings or one power defaults group |
+| `protection-clear` | `{"confirm":true}` | Clear simulated latched faults with Input OFF |
 | `input-on` | `{"confirm_input_on": true}` | Confirmed `input_state: "ON"` or failure/UNKNOWN |
 | `input-off` | `{}` | Confirmed `input_state: "OFF"` or failure/UNKNOWN |
 
@@ -99,6 +102,29 @@ A live request uses `context: {"mode": "live"}` with optional matching
 `expected_model_id`. Simulation/dry-run uses the canonical
 `planning_model_id: "itech-it8812c"`; the Worker startup mode constrains the
 request mode. Worker does **not** allow the contributor-validation override.
+
+## Offline Protection
+
+The three Protection commands are async jobs. Status accepts an optional
+boolean `events`, default false. It returns `input_state`, `settings`,
+`condition` and, if requested, `events`. Each register has `raw` (integer)
+and `flags` (array of known mnemonics). Explicit event reads consume the
+simulated event register. Dry-run previews the request without changing state.
+
+Set accepts `confirm: true` and one or more of `software_current_enabled`
+(boolean), `software_current_limit` (A), `software_current_delay` (s),
+`software_power_limit` (W), `software_power_delay` (s) and
+`hardware_power_limit` (W). Limits and delays are JSON numbers. Alternatively,
+use `restore_defaults: "software-power"` or `"hardware-power"` with
+`confirm: true`. Individual settings and defaults are mutually exclusive.
+Status and Set preserve decimals as strings in `settings` and `applied`,
+respectively. Set and Clear require Input OFF and fail without changing state
+if Input is ON. Clear returns `input_state` and the resulting `condition`.
+
+Malformed arguments return HTTP 400. Missing confirmation follows the existing
+HTTP 409 confirmation rejection. Legal LIVE requests on a live Worker receive
+HTTP 202 and finish with `unsupported_live_scope` before opening VISA.
+Stop, Cancel and `GET /status` retain their Common v3 behavior.
 
 ## Offline CR-LED and Current Slow Rise
 

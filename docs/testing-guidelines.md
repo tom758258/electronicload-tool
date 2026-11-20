@@ -78,7 +78,7 @@ affected CLI parser/help/version and read-only CLI contracts:
 
 Worker integration uses a real local simulated subprocess, HTTP and JSONL,
 but never physical hardware. The **single** `live-cli-check.ps1` defaults to
-all supported validation modes: CC/CV/CR/CW, Transient CC/CV/CR/CW,
+the established validation modes: CC/CV/CR/CW, Transient CC/CV/CR/CW,
 TRACE, CR-LED, Current Slow Rise, Trigger and Input Timer. `-Modes` selects one or more
 modes while retaining common read-only safety prechecks and each selected
 mode's explicit Input ON/OFF flow. Test its `-PlanOnly` operation and unattended
@@ -349,7 +349,7 @@ Use only fictional Resources in automated tests. Fake clock checks may replace
 real long waits. PowerShell unavailable is SKIP, never PASS. Ruff checks only
 modified Python files, and `git diff --check` checks the patch.
 
-The script defaults to all supported validation modes. Keep TRACE-only checks
+The script defaults to the established validation modes, including TRACE. Keep TRACE-only checks
 focused; do not add unrelated Fixed/Transient/LIST/Worker or release acceptance
 tests. Ordinary CI retains its repository-configured offline checks, irrespective of local
 focused selection. Contributor physical TRACE remains NOT RUN until a
@@ -401,6 +401,22 @@ Check the four-source PlanOnly presets (2 s pulse, 5 s Timer, 2/2 s LIST,
 original MANUAL Source using existing focused tests. Do not extend unrelated
 Transient timing tests. Follow the
 [contributor Trigger procedure](cli/README.md#contributor-trigger-validation).
+
+## Protection focused checks
+
+Run `tests/test_protection.py`, Protection cases in `tests/test_worker.py`
+and `tests/test_live_validation_script.py`, and the affected help/version
+checks. Run Ruff on modified Python files. Recording Fake VISA covers the
+Input OFF guards, identity, exact readback, partial or uncertain writes and
+Clear's one bounded OFF attempt. The PowerShell tests exercise
+`preflight-cli.ps1 -ProtectionOnly` and `live-cli-check.ps1 -Modes protection`
+in PlanOnly and noninteractive mode, with a fictional Resource and a VISA
+blocker. The shareable report leaves physical cases `NOT RUN`.
+
+Only the separately approved, operator-confirmed
+[Protection procedure](cli/README.md#contributor-protection-validation)
+can establish physical trip, power limit, Clear, defaults and restoration.
+Use the selected Protection mode by itself.
 
 ## Packaging checks
 

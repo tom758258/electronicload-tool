@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param([switch]$TransientOnly, [switch]$FixedAutoOnly, [switch]$FixedSlewVonShortOnly,
-      [switch]$InputTimerOnly, [switch]$TraceOnly, [switch]$CrLedSlowRiseOnly, [switch]$TriggerOnly)
+      [switch]$InputTimerOnly, [switch]$TraceOnly, [switch]$CrLedSlowRiseOnly, [switch]$TriggerOnly,
+      [switch]$ProtectionOnly)
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -20,12 +21,33 @@ function Invoke-PreflightCli {
 }
 
 try {
-    if (@($TransientOnly, $FixedAutoOnly, $FixedSlewVonShortOnly, $InputTimerOnly, $TraceOnly, $CrLedSlowRiseOnly, $TriggerOnly |
+    if (@($TransientOnly, $FixedAutoOnly, $FixedSlewVonShortOnly, $InputTimerOnly, $TraceOnly, $CrLedSlowRiseOnly, $TriggerOnly, $ProtectionOnly |
             Where-Object { $_ }).Count -gt 1) {
         throw 'Select only one focused preflight switch.'
     }
     if (-not (Test-Path -LiteralPath $cli)) {
         throw 'Sync the repository .venv with uv before running preflight.'
+    }
+    if ($ProtectionOnly) {
+        $manifest = Invoke-PreflightCli @('manifest')
+        foreach ($command in @('protection-status','protection-set','protection-clear')) {
+            if ($manifest.commands.$command.kind -cne 'async_job') { throw 'Protection Manifest command missing.' }
+            $extra = @(switch ($command) {
+                'protection-status' { '--events' }
+                'protection-set' { '--confirm'; '--restore-defaults'; 'software-power' }
+                'protection-clear' { '--confirm' }
+            })
+            $plan = Invoke-PreflightCli (@($command,'--dry-run') + $extra)
+            $simulated = Invoke-PreflightCli (@($command,'--simulate') + $extra)
+            if ($plan.result.hardware_access -ne $false -or $simulated.result.state_source -cne 'simulate') {
+                throw 'Protection preview or simulation failed.'
+            }
+            $refused = Invoke-PreflightCli (@($command,'--validation-allow-pending-live-support',
+                '--resource','USB0::0xFFFF::0x0001::SYNTHETIC::INSTR') + $extra) 2
+            if ($refused.error.code -cne 'unsupported_live_scope') { throw 'Protection LIVE refusal failed.' }
+        }
+        Write-Host 'PASS: Protection preflight'
+        exit 0
     }
     if ($TriggerOnly) {
         $manifest = Invoke-PreflightCli @('manifest')

@@ -18,6 +18,9 @@ from electronicload_tool_core.control import (CONTROL_COMMANDS, execute as contr
                                               validate_list_cc, validate_list_slot)
 from electronicload_tool_core.errors import LoadError
 from electronicload_tool_core.identity import MODEL_ID
+from electronicload_tool_core.protection import (COMMANDS as PROTECTION_COMMANDS,
+                                                execute as protection_execute,
+                                                validate_arguments as validate_protection_arguments)
 from electronicload_tool_core.readonly import (COMMANDS as READ_COMMANDS, NATIVE_MEASUREMENTS,
                                                validate_metric, execute as read_execute)
 from electronicload_tool_core.simulator import ControlSimulator
@@ -29,7 +32,7 @@ from electronicload_tool_core.visa import TraceSessionLost, mark_session_untrust
 from .json_input import decode_decimal_json
 
 SCHEMA = 3
-COMMANDS = READ_COMMANDS + CONTROL_COMMANDS + TRACE_COMMANDS
+COMMANDS = READ_COMMANDS + CONTROL_COMMANDS + TRACE_COMMANDS + PROTECTION_COMMANDS
 FEATURES = {"common.async_jobs": {"contract_version": 1},
             "common.job_cancel": {"contract_version": 1, "commands": ["trace-start"]}}
 TRACE_RECOVERY_COMMANDS = {"input-state", "input-off", "trace-configure"}
@@ -105,6 +108,10 @@ class Runtime:
     def _execute(self, command, arguments, context):
         # Common v3 uses dry_run; Core uses dry-run.
         core_mode = "dry-run" if context["mode"] == "dry_run" else context["mode"]
+        if command in PROTECTION_COMMANDS:
+            return protection_execute(command, mode=core_mode, resource=self.resource,
+                                      backend=self.backend, arguments=arguments,
+                                      simulator=self.simulator, stop=self.stop)
         if command in TRACE_COMMANDS:
             return trace_execute(
                 command, mode=core_mode, resource=self.resource, backend=self.backend,
@@ -245,6 +252,9 @@ def _context(request, mode):
 def _arguments(command, raw, runtime):
     if not isinstance(raw, dict):
         raise LoadError("argument_error", "Arguments must be an object.")
+    if command in PROTECTION_COMMANDS:
+        validate_protection_arguments(command, raw, json_numbers=True)
+        return raw
     permitted = ({"current", "range", "rise_slew", "fall_slew"} if command == "set-cc" else
                  {"voltage", "range"} if command == "set-cv" else
                  {"resistance", "range"} if command == "set-cr" else
@@ -360,7 +370,8 @@ def _handler(runtime):
                         and isinstance(value.get("arguments"), dict)):
                     # Core must validate the original decimal tokens.
                     value["arguments"] = json.loads(body, parse_float=Decimal)["arguments"]
-                if value.get("command") in (*LIST_COMMANDS, *TRACE_COMMANDS, "trigger-configure"):
+                if value.get("command") in (*LIST_COMMANDS, *TRACE_COMMANDS, *PROTECTION_COMMANDS,
+                                            "trigger-configure"):
                     # Preserve nested numeric tokens; reject duplicate fields/nonfinite JSON.
                     value = decode_decimal_json(body)
                 return value

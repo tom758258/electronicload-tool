@@ -70,6 +70,53 @@ def request(command,arguments=None):
             'context':{'mode':'simulate','planning_model_id':'itech-it8812c'}}
 
 
+def test_protection_worker_validates_requests_and_persists_simulated_settings(worker, capsys):
+    from electronicload_tool_cli.cli import main
+
+    _, out, ready = worker
+    url = ready['command_url']
+    status_fields = http(ready['status_url'])[1].keys()
+    for command, arguments in [
+        ('protection-status', {'events': 1}),
+        ('protection-status', {'hardware_validation': 'protection'}),
+        ('protection-set', {'confirm': True, 'software_power_limit': '0.50'}),
+        ('protection-set', {'confirm': True, 'restore_defaults': 'software-power',
+                            'software_power_limit': 0.5}),
+        ('protection-clear', {}),
+    ]:
+        code, rejected = http(url, request(command, arguments))
+        assert code == (409 if command == 'protection-clear' else 400)
+        assert rejected['worker_job_id'] is None
+
+    def job(command, arguments=None, *, mode='simulate'):
+        payload = request(command, arguments)
+        payload['context']['mode'] = mode
+        code, accepted = http(url, payload)
+        assert code == 202 and accepted['kind'] == 'async_job'
+        return wait_finished(out, accepted['worker_job_id'])
+
+    value = '0.501234567890123456'
+    assert main(['send-command', '--url', url, '--worker-command', 'protection-set',
+                 '--arguments-json', '{"confirm":true,"software_power_limit":' + value + '}',
+                 '--context-json', json.dumps(request('protection-set')['context']), '--json']) == 0
+    accepted = json.loads(capsys.readouterr().out)
+    assert wait_finished(out, accepted['worker_job_id'])['result']['applied']['software_power_limit'] == value
+    dry = job('protection-set', {'confirm': True, 'restore_defaults': 'software-power'}, mode='dry_run')
+    assert dry['result']['hardware_access'] is False
+    assert job('protection-status', {'events': True})['result']['settings']['software_power_limit'] == value
+    assert job('input-on', {'confirm_input_on': True})['state'] == 'succeeded'
+    assert job('protection-clear', {'confirm': True})['error']['code'] == 'input_not_off'
+    assert job('input-state')['result']['input_state'] == 'ON'
+    assert job('input-off')['state'] == 'succeeded'
+    assert job('protection-clear', {'confirm': True})['result']['input_state'] == 'OFF'
+    assert http(ready['status_url'])[1].keys() == status_fields
+    assert main(['manifest']) == 0
+    manifest = json.loads(capsys.readouterr().out)
+    assert manifest['schema_version'] == 2 and manifest['worker_protocol']['schema_versions'] == [3]
+    assert all(manifest['commands'][name] == {'kind': 'async_job'}
+               for name in ('protection-status', 'protection-set', 'protection-clear'))
+
+
 def test_trigger_worker_persists_exact_setup_without_extending_live(worker, monkeypatch, capsys):
     from electronicload_tool_cli.cli import main
     from electronicload_tool_cli.worker import Runtime
@@ -237,7 +284,7 @@ def test_measurement_worker_admission_results_and_average_state(worker, capsys):
     assert run('set-average', {'count': 8}) == {'average_count': 8}
 
 
-def test_offline_measurement_and_trace_live_jobs_fail_before_visa(fake_visa):
+def test_offline_measurement_trace_and_protection_live_jobs_fail_before_visa(fake_visa):
     from http.server import ThreadingHTTPServer
     from electronicload_tool_cli import worker as worker_module
     runtime = worker_module.Runtime(mode='live',
@@ -252,6 +299,9 @@ def test_offline_measurement_and_trace_live_jobs_fail_before_visa(fake_visa):
                 ('measure-min-max', {}), ('measure-discharge', {}), ('set-average', {'count': 8}),
                 ('average-status', {}), ('trace-start', {}),
                 ('trace-configure', {'source': 'TWO', 'points': 4, 'interval_s': 0.001}),
+                ('protection-status', {'events': True}),
+                ('protection-set', {'confirm': True, 'hardware_power_limit': 0.5}),
+                ('protection-clear', {'confirm': True}),
                 ('measure', {}),
             ):
                 payload = {'schema_version': 3, 'command': command, 'context': {'mode': 'live'},

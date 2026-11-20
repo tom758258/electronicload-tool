@@ -70,6 +70,9 @@ class ControlSimulator:
         self.trace_feed = "NEVER"
         self.trace_capturing = False
         self.trace_data = ""
+        self.protection_settings = {}
+        self.protection_condition = 0
+        self.protection_events = 0
 
     def list_settings(self) -> dict:
         configuration = self.list_configuration
@@ -154,7 +157,8 @@ class ControlSimulator:
             "TRAC:FILT?": self.trace_filter,
             "TRAC:FEED:CONT?": self.trace_feed,
             "TRAC:DATA?": self.trace_data,
-            "STAT:QUES:COND?": str(TRACE_BUFFER_FULL if self.trace_data else 0),
+            "STAT:QUES:COND?": str(self.protection_condition
+                                   | (TRACE_BUFFER_FULL if self.trace_data else 0)),
             "SYST:ERR?": '0,"No error"',
             **NATIVE_MEASUREMENTS,
         }[command]
