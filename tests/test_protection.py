@@ -20,8 +20,8 @@ class Instrument:
         self.replies = {
             "*IDN?": "ITECH Ltd,IT8812C,FAKE,1.0", "INP:STAT?": "0",
             "CURR:PROT:LEV?": "60", "CURR:PROT:DEL?": "3", "CURR:PROT:STAT?": "0.0E+0",
-            "POW:PROT?": "200", "POW:PROT:DEL?": "2", "POW:CONF?": "225",
-            "POW:PROT? MAX": "249.9", "POW:CONF? MAX": "249.99",
+            "POW:PROT?": "260", "POW:PROT:DEL?": "3", "POW:CONF?": "225",
+            "POW:PROT? MAX": "260", "POW:CONF? MAX": "250",
             "STAT:QUES:COND?": "8194", "STAT:QUES:EVEN?": "+8194",
             "FUNC:MODE?": "FIX", "FUNC?": "CURR", "CURR:RANG?": "6", "CURR?": "0.2",
             "TRAN?": "0", "INP:SHOR:STAT?": "0", "INP:TIM?": "0",
@@ -139,15 +139,21 @@ def test_protection_set_off_guards_and_reports_partial_writes(instrument, failur
 
 @pytest.mark.parametrize(("group", "writes", "applied"), [
     ("software-power", ["POW:PROT MAX", "POW:PROT:DEL 0"],
-     {"software_power_limit": "249.9", "software_power_delay": "0"}),
-    ("hardware-power", ["POW:CONF MAX"], {"hardware_power_limit": "249.99"}),
+     {"software_power_limit": "260", "software_power_delay": "0"}),
+    ("hardware-power", ["POW:CONF MAX"], {"hardware_power_limit": "250"}),
 ])
 def test_protection_defaults_are_independent_and_read_back(instrument, group, writes, applied):
+    original = physical("protection-status", snapshot=True)["settings"]
+    assert original["software_power_limit"] == "260"
+    assert original["software_power_delay"] == "3"
     result = physical("protection-set", arguments={"confirm": True, "restore_defaults": group})
     assert result["applied"] == applied
     assert instrument.writes == ["SYST:REM", *writes]
     assert all(instrument.calls.index(key + "? MAX") < instrument.calls.index("SYST:REM")
                for key in ("POW:PROT", "POW:CONF") if key + " MAX" in writes)
+    saved = {field: original[field] for field in applied}
+    assert physical("protection-set", arguments={"confirm": True, **saved})["applied"] == saved
+    assert physical("protection-status", snapshot=True)["settings"] == original
 
 
 @pytest.mark.parametrize("outcome", ["off", "restored_on", "off_refused", "lost", "still_active", "already_on"])
@@ -204,7 +210,7 @@ def test_protection_simulation_preserves_mode_and_pending_events_until_read():
               "hardware_power_limit": "1.123456789012345678"}
     assert run("protection-set", change)["applied"]["software_current_enabled"]
     assert run("protection-set", {"confirm": True, "restore_defaults": "software-power"})["applied"] == {
-        "software_power_limit": "250", "software_power_delay": "0",
+        "software_power_limit": "260", "software_power_delay": "0",
     }
     assert run("protection-clear", {"confirm": True})["condition"]["flags"] == ["RUN"]
     first = run("protection-status", {"events": True})
@@ -219,6 +225,8 @@ def test_protection_simulation_preserves_mode_and_pending_events_until_read():
     {"confirm": True},
     {"confirm": True, "software_current_delay": 61},
     {"confirm": True, "software_power_limit": "NaN"},
+    {"confirm": True, "software_power_limit": "260.01"},
+    {"confirm": True, "hardware_power_limit": "250.01"},
     {"confirm": True, "hardware_power_limit": True},
     {"confirm": True, "restore_defaults": "software-power", "software_power_delay": 0},
 ])
@@ -228,7 +236,9 @@ def test_protection_set_bad_arguments_have_no_side_effects(instrument, arguments
     assert not instrument.calls
 
 
-@pytest.mark.parametrize("trial", ["software-current", "software-power", "hardware-power"])
+@pytest.mark.parametrize("trial", [
+    "software-current", "software-power", "hardware-power-baseline", "hardware-power",
+])
 def test_protection_trial_requires_exact_profile_and_refuses_interfering_protection(instrument, monkeypatch, trial):
     monkeypatch.setattr(protection, "sleep", lambda _: None)
     instrument.replies["STAT:QUES:COND?"] = "0"
@@ -236,6 +246,13 @@ def test_protection_trial_requires_exact_profile_and_refuses_interfering_protect
         instrument.replies[protection.REGISTERS[field] + "?"] = "1" if value is True else str(value)
     physical("protection-status", snapshot=True)
     arguments = {"trial": trial, "arguments": {"confirm": True}}
+    if trial == "hardware-power-baseline":
+        instrument.replies["POW:CONF?"] = "0.50"
+        with pytest.raises(LoadError, match="existing protection") as error:
+            physical("input-on", **arguments)
+        assert error.value.details["input_state"] == "OFF"
+        assert instrument.writes == []
+        instrument.replies.update({"POW:CONF?": "250", "MEAS:CURR?": "0.20", "FETC:POW?": "0.60"})
     instrument.replies["INP:TIM?"] = "1"
     with pytest.raises(LoadError, match="could affect the trial"):
         physical("input-on", **arguments)
@@ -252,7 +269,10 @@ def test_protection_trial_requires_exact_profile_and_refuses_interfering_protect
     result = physical("input-on", **arguments)
     assert result["input_state"] == "ON" and instrument.writes[-2:] == ["SYST:REM", "INP ON"]
     if trial == "hardware-power":
-        assert result["power_w"] == 0.5
+        assert result["calculated_power_w"] == result["power_w"] == 0.5
+    if trial == "hardware-power-baseline":
+        assert result["calculated_power_w"] == 1
+        assert result["power_w"] == 0.6
 
 
 def test_protection_cli_json_confirmation_and_live_refusal(capsys):

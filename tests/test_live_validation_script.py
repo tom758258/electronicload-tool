@@ -196,6 +196,16 @@ def test_protection_preflight_and_explicit_mode_report_without_visa(run_script):
                 assert list(cases).index(f'{prefix}-source-off') < list(cases).index(f'{prefix}-clear')
             else:
                 assert f'{prefix}-clear' not in cases
+                assert cases[f'{prefix}-baseline-on']['command'] == 'operator-observation'
+                assert cases[f'{prefix}-baseline-trial']['arguments'] == [
+                    '--hardware-validation', 'protection', '--confirm', '--protection-trial',
+                    'hardware-power-baseline',
+                ]
+                assert cases[f'{prefix}-baseline-off']['command'] == 'input-off'
+                baseline_start = list(cases).index(f'{prefix}-cc') + 1
+                assert list(cases)[baseline_start:baseline_start + 5] == [
+                    f'{prefix}-{step}' for step in ('baseline-on', 'baseline-trial', 'baseline-off', 'set', 'on')
+                ]
         for group in ('software-power', 'hardware-power'):
             assert cases[f'protection-default-{group}-set']['arguments'][-2:] == ['--restore-defaults', group]
 

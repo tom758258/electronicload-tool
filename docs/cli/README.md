@@ -935,10 +935,17 @@ Use `protection-set --confirm` with one or more of these options:
 | `--software-current-enabled` | `on` or `off` |
 | `--software-current-limit` | Amperes, 0 through 60 |
 | `--software-current-delay` | Seconds, 0 through 60 |
-| `--software-power-limit` | Watts, 0 through 250 |
+| `--software-power-limit` | Watts, 0 through 260 |
 | `--software-power-delay` | Seconds, 0 through 60 |
 | `--hardware-power-limit` | Watts, 0 through 250 |
 | `--restore-defaults` | `software-power` (instrument maximum and 0 s) or `hardware-power` (instrument maximum), each used on its own |
+
+The IT8812C profile uses separate Software Power and Hardware Power bounds.
+For each power default, the contributor command reads that setting's own
+instrument maximum and verifies the value after applying it. The software
+current limit uses a conservative 60 A application bound. The programming
+guide specifies 0 through MAX for this setting without a model-specific
+software current maximum.
 
 Status returns settings with decimal values as strings and the software current
 enable field as a boolean. Set reports the requested and verified fields in
@@ -1165,7 +1172,16 @@ The operator confirms each Input ON with a fresh Enter.
 | --- | --- | --- |
 | Software current | Enabled, 0.10 A, 1 s | OC and PS with Input OFF |
 | Software power | 0.50 W, 1 s | OP and PS with Input OFF, after exposure above 0.50 W |
-| Hardware power | 0.50 W | Input ON and measured power around 0.50 W at normal source voltage, then explicit OFF |
+| Hardware power | 0.50 W | With Input ON and no PS, compare the baseline at approximately 0.20 A with V×I at 0.45–0.55 W under the limit. Both observations require 4.75–5.25 V and explicit OFF. |
+
+For Hardware Power, first measure the baseline with the saved protection settings.
+The script requires 0.18–0.22 A at the load during the baseline to establish that
+the source and wiring sustain the intended current. After confirming Input OFF,
+the script applies the temporary 0.50 W limit. Keep the same source settings and
+wiring, and press Enter again for the limited observation. The report records
+V×I for each observation and includes the stored `FETC:POW?` reading for
+reference. The stored reading does not trigger a fresh power measurement and
+the load's power readback accuracy does not support the narrow window at 0.50 W.
 
 For each software trip, verify the physical trip and Input OFF, isolate the
 external source, and confirm again before Clear. The load can momentarily
@@ -1180,6 +1196,9 @@ The contributor scope does not open Product or Worker LIVE.
 The register meanings, Clear behavior and configuration syntax are in the
 [IT8800 Programming Guide V2.1](https://assets.testequity.com/te1/Documents/pdf/itech/ITECH_IT8800-Programming-Guide-EN.pdf),
 printed pp.15–16, 47, 49–50 and 58–59.
+See also p.36 for stored power readback and the
+[IT8800 User's Manual](https://www.itechate.com/uploadfiles/2019/10/20191015163409349.pdf)
+for the IT8812C measurement specifications.
 
 ### Contributor Trigger validation
 

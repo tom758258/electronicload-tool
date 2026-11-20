@@ -27,11 +27,13 @@ REGISTERS = {
     "hardware_power_limit": "POW:CONF",
 }
 LIMITS = {
-    "software_current_limit": Decimal(str(c.RANGE_LIMITS["high"])),
+    # The profile conservatively admits software OCP through the rated 60 A.
+    # The programming guide does not specify a model-specific OCP maximum.
+    "software_current_limit": Decimal("60"),
     "software_current_delay": Decimal("60"),
-    "software_power_limit": c.CW_MAX_POWER,
+    "software_power_limit": Decimal("260"),
     "software_power_delay": Decimal("60"),
-    "hardware_power_limit": c.CW_MAX_POWER,
+    "hardware_power_limit": Decimal("250"),
 }
 DEFAULTS = {
     "software-power": {"software_power_limit": "MAX", "software_power_delay": Decimal("0")},
@@ -51,8 +53,10 @@ TRIALS = {
                          "software_current_delay": Decimal("1")},
     "software-power": {"software_power_limit": Decimal("0.50"),
                        "software_power_delay": Decimal("1")},
+    "hardware-power-baseline": {},
     "hardware-power": {"hardware_power_limit": Decimal("0.50")},
 }
+HARDWARE_POWER_TRIALS = ("hardware-power-baseline", "hardware-power")
 TRIAL_CURRENT = Decimal("0.20")
 
 
@@ -231,7 +235,8 @@ def _trial_snapshot(session) -> dict:
     if (c._flag(session, "INP:TIM?") != "OFF"
             or c._flag(session, c.SLOW_RISE_QUERY) != "OFF"
             or c._decimal_readback(session, "VOLT:ON?") >= Decimal("4.75")):
-        raise LoadError("protection_trial_interlock", "Timer, slow rise or VON could affect the trial.")
+        raise LoadError("protection_trial_interlock", "Timer, slow rise or VON could affect the trial.",
+                        input_state="OFF")
     current = c.validate_current(c._decimal_readback(session, "CURR?"), cc["range"])
     return {"range": cc["range"], "current_a": str(current)}
 
@@ -239,16 +244,19 @@ def _trial_snapshot(session) -> dict:
 def _trial_guard(session, trial: str, stop) -> None:
     cc = _trial_snapshot(session)
     if Decimal(cc["current_a"]) != TRIAL_CURRENT:
-        raise LoadError("protection_trial_interlock", "Protection trials require Fixed CC at 0.20 A.")
+        raise LoadError("protection_trial_interlock", "Protection trials require Fixed CC at 0.20 A.",
+                        input_state="OFF")
     settings = {field: _read_setting(session, field) for field in REGISTERS}
     if any(settings[field] != value for field, value in TRIALS[trial].items()):
-        raise LoadError("readback_mismatch", "Protection trial settings do not match the requested case.", 3)
+        raise LoadError("readback_mismatch", "Protection trial settings do not match the requested case.", 3,
+                        input_state="OFF")
     if ((trial != "software-current" and settings[ENABLE]
          and settings["software_current_limit"] <= TRIAL_CURRENT)
             or (trial != "software-power" and settings["software_power_limit"] <= Decimal("1.05"))
             or (trial != "hardware-power" and settings["hardware_power_limit"] <= Decimal("1.05"))
             or _condition(session)["raw"] & FAULT_MASK):
-        raise LoadError("protection_trial_interlock", "An existing protection could affect the trial.")
+        raise LoadError("protection_trial_interlock", "An existing protection could affect the trial.",
+                        input_state="OFF")
     c._mutation_off(session, stop)
 
 
@@ -261,7 +269,7 @@ def _run_trial(session, trial: str, stop) -> dict:
         # Capture the software trial's available stimulus before the delay
         # expires. A late sample cannot disprove an observed trip.
         sample = {}
-        if trial != "hardware-power":
+        if trial not in HARDWARE_POWER_TRIALS:
             sample = {"voltage_v": c._number(session, "MEAS:VOLT?"),
                       "current_a": c._number(session, "MEAS:CURR?")}
             sample["power_w"] = sample["voltage_v"] * sample["current_a"]
@@ -269,10 +277,11 @@ def _run_trial(session, trial: str, stop) -> dict:
         # the complete process, including queries and explicit OFF.
         sleep(2)
         result = {"input_state": c._flag(session, "INP:STAT?"), "condition": _condition(session), **sample}
-        if trial == "hardware-power":
+        if trial in HARDWARE_POWER_TRIALS:
             result.update(voltage_v=c._number(session, "MEAS:VOLT?"),
                           current_a=c._number(session, "MEAS:CURR?"),
                           power_w=c._number(session, "FETC:POW?"))
+            result["calculated_power_w"] = result["voltage_v"] * result["current_a"]
     except LoadError as exc:
         exc.details.update(input_on_attempted=True, input_state="UNKNOWN", operator_action_required=True)
         raise

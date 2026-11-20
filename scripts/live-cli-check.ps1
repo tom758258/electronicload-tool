@@ -295,8 +295,11 @@ function Save-Report {
     if ($public.trigger_input_off_unconfirmed) {
         $lines += 'Trigger Input OFF was not confirmed. Use the independent manual OFF procedure immediately.'
     }
-    if ($public.protection_input_off_unconfirmed -or $public.protection_restore_unconfirmed) {
-        $lines += 'Protection Input OFF or restoration is unconfirmed. Independent operator action is required.'
+    if ($public.protection_input_off_unconfirmed) {
+        $lines += 'Protection Input OFF is unconfirmed. Use the independent manual OFF procedure immediately.'
+    }
+    if ($public.protection_restore_unconfirmed) {
+        $lines += 'Protection restoration is unconfirmed. Verify the original settings manually after confirming Input OFF.'
     }
     if ($script:protectionSelected) {
         foreach ($trial in $public.protection_trials.Keys) {
@@ -444,13 +447,19 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
             $details = $result.error.details
             $entry['error_code'] = $(if ($code -cmatch '^[a-z_]+$') { $code } else { 'execution_failed' })
             if ($CaseName.StartsWith('protection-') -and $result.ok -eq $false -and
-                $null -eq $details.cleanup_errors -and -not $details.operator_action_required -and
-                $code -in @('readback_mismatch','protection_trial_interlock','protection_still_active',
-                            'protection_clear_unexpected_on')) {
-                $entry['protection_exchange_confirmed'] = $true
-                if ($details.input_state -ceq 'OFF') { $entry['protection_state'] = 'OFF' }
-                if ($Command -ceq 'input-on' -and -not $details.input_on_attempted) {
-                    $entry['protection_on_refused'] = $true
+                $null -eq $details.cleanup_errors) {
+                if ($details.input_state -cin @('ON','OFF')) {
+                    $entry['protection_state'] = $details.input_state
+                } elseif ($code -in @('already_on','input_not_off')) {
+                    $entry['protection_state'] = 'ON'
+                }
+                if (-not $details.operator_action_required -and
+                    $code -in @('readback_mismatch','protection_trial_interlock','protection_still_active',
+                                'protection_clear_unexpected_on')) {
+                    $entry['protection_exchange_confirmed'] = $true
+                    if ($Command -ceq 'input-on' -and -not $details.input_on_attempted) {
+                        $entry['protection_on_refused'] = $true
+                    }
                 }
             }
             if ($script:triggerSelected -and ($code -in @('query_failed','write_failed',
@@ -735,7 +744,16 @@ function New-ProtectionPlan {
         $trialArgs = @(Get-ProtectionSetArgs $trial.settings)
         $script:protectionPlans += @(
             @{name="$prefix-original";command='protection-status';args=$status},
-            @{name="$prefix-cc";command='set-cc';args=@('--current','0.20','--range','low')},
+            @{name="$prefix-cc";command='set-cc';args=@('--current','0.20','--range','low')}
+        )
+        if ($trial.name -ceq 'hardware-power') {
+            $script:protectionPlans += @(
+                @{name="$prefix-baseline-on";command='operator-observation';args=@()},
+                @{name="$prefix-baseline-trial";command='input-on';args=$set + @('--protection-trial','hardware-power-baseline')},
+                @{name="$prefix-baseline-off";command='input-off';args=@()}
+            )
+        }
+        $script:protectionPlans += @(
             @{name="$prefix-set";command='protection-set';args=$set + $trialArgs},
             @{name="$prefix-on";command='operator-observation';args=@()},
             @{name="$prefix-trial";command='input-on';args=$set + @('--protection-trial',$trial.name)}
@@ -785,6 +803,8 @@ function Invoke-ProtectionStep([string]$Name, [string[]]$ArgsOverride, [switch]$
         $entry.arguments = $extra
     }
     $confirmed = $false
+    $entry['protection_state'] = 'UNKNOWN'
+    $script:report.protection_input_off_unconfirmed = $true
     try {
         $response = Invoke-LiveCommand -Command $step.command -CaseName $Name -ExtraArgs $extra -Cleanup:$Cleanup
         Assert-Runtime $response $Name
@@ -798,9 +818,14 @@ function Invoke-ProtectionStep([string]$Name, [string[]]$ArgsOverride, [switch]$
             $entry['protection_measurements'] = [ordered]@{
                 voltage_v=$response.result.voltage_v;current_a=$response.result.current_a;power_w=$response.result.power_w
             }
+            if ($null -ne $response.result.calculated_power_w) {
+                $entry.protection_measurements['calculated_power_w'] = $response.result.calculated_power_w
+            }
         }
+        if ($step.command -cne 'input-on') { Assert-InputOff $response $Name }
         return $response
     } finally {
+        $script:report.protection_input_off_unconfirmed = $entry.protection_state -cne 'OFF'
         $script:protectionTrusted = $script:protectionTrusted -and
             ($confirmed -or $entry.Contains('protection_exchange_confirmed'))
     }
@@ -814,15 +839,31 @@ function Confirm-ProtectionOperator([string]$Name, [string]$Prompt) {
     ($script:report.results | Where-Object { $_.name -ceq $Name }).status = 'PASS'
 }
 
+function Invoke-PoweredProtectionTrial([string]$Prefix, [string]$Trial, [switch]$ExplicitOff) {
+    Confirm-ProtectionOperator "$Prefix-on" "Confirm the same dedicated source is ON at 5 V / 0.8 A, Input is OFF and manual cutoff is ready. Press Enter for $Trial at 0.20 A (Ctrl+C to cancel)."
+    $script:protectionPowered = $true
+    try {
+        return (Invoke-ProtectionStep "$Prefix-trial").result
+    } finally {
+        try {
+            $entry = $script:report.results | Where-Object { $_.name -ceq "$Prefix-trial" }
+            if ($script:protectionTrusted -and -not $entry.protection_on_refused -and
+                ($ExplicitOff -or $script:report.protection_input_off_unconfirmed)) {
+                $null = Invoke-ProtectionStep "$Prefix-off" -Cleanup
+            }
+        } finally {
+            $script:protectionPowered = $false
+        }
+    }
+}
+
 function Restore-Protection([string]$Prefix, $Original, $Fields, [bool]$RestoreCc) {
     $script:report.protection_restore_unconfirmed = $true
     if (-not $script:protectionTrusted -or $script:report.protection_input_off_unconfirmed) {
         Write-Host 'Protection restoration needs trusted VISA and confirmed Input OFF. Verify manually.'
         return
     }
-    $script:report.protection_input_off_unconfirmed = $true
-    Assert-InputOff (Invoke-ProtectionStep "$Prefix-restore-guard") "$Prefix-restore-guard"
-    $script:report.protection_input_off_unconfirmed = $false
+    $null = Invoke-ProtectionStep "$Prefix-restore-guard"
     if ($Fields.Count -gt 0) {
         $settings = [ordered]@{}
         foreach ($field in $Fields) { $settings[$field] = $Original.settings.$field }
@@ -834,8 +875,6 @@ function Restore-Protection([string]$Prefix, $Original, $Fields, [bool]$RestoreC
         $null = Invoke-ProtectionStep "$Prefix-restore-cc" -ArgsOverride $arguments
     }
     $final = Invoke-ProtectionStep "$Prefix-final"
-    $script:report.protection_input_off_unconfirmed = $final.result.input_state -cne 'OFF'
-    Assert-InputOff $final "$Prefix-final"
     if ($final.result.fixed_cc.range -cne $Original.fixed_cc.range -or
         [decimal]$final.result.fixed_cc.current_a -ne [decimal]$Original.fixed_cc.current_a) {
         Fail-Case "$Prefix-final" 'readback_mismatch' 'Fixed CC restoration did not match its original settings.'
@@ -856,27 +895,24 @@ function Invoke-ProtectionValidation {
         $prefix = "protection-$($trial.name)"
         $script:report.protection_trials[$trial.name] = 'FAIL'
         $original = Invoke-ProtectionStep "$prefix-original"
-        Assert-InputOff $original "$prefix-original"
         $fields = @()
-        $onPending = $false
-        $offAttempted = $false
         try {
             $script:report.protection_restore_unconfirmed = $true
             $null = Invoke-ProtectionStep "$prefix-cc"
+            if ($trial.name -ceq 'hardware-power') {
+                $baseline = Invoke-PoweredProtectionTrial "$prefix-baseline" 'hardware-power-baseline' -ExplicitOff
+                if ($baseline.input_state -cne 'ON' -or 'PS' -cin $baseline.condition.flags -or
+                    $baseline.voltage_v -lt 4.75 -or $baseline.voltage_v -gt 5.25 -or
+                    $baseline.current_a -lt 0.18 -or $baseline.current_a -gt 0.22) {
+                    Fail-Case "$prefix-baseline-trial" 'power_baseline_unconfirmed' 'The source did not sustain approximately 0.20 A at 5 V before limiting.'
+                }
+            }
             $fields = @($trial.settings.Keys)
             $null = Invoke-ProtectionStep "$prefix-set"
-            Confirm-ProtectionOperator "$prefix-on" "Confirm the dedicated source is ON at 5 V / 0.8 A, Input is OFF and manual cutoff is ready. Press Enter for $($trial.name) at 0.20 A (Ctrl+C to cancel)."
-            $onPending = $true
-            $script:protectionPowered = $true
-            $script:report.protection_input_off_unconfirmed = $true
-            $observed = (Invoke-ProtectionStep "$prefix-trial").result
-            if ($observed.input_state -ceq 'OFF') {
-                $onPending = $false
-                $script:protectionPowered = $false
-                $script:report.protection_input_off_unconfirmed = $false
-            }
+            $observed = Invoke-PoweredProtectionTrial $prefix $trial.name -ExplicitOff:($trial.flags.Count -eq 0)
             if ($trial.flags.Count -gt 0) {
-                if ($onPending -or @($trial.flags | Where-Object { $_ -cnotin $observed.condition.flags }).Count -gt 0) {
+                if ($observed.input_state -cne 'OFF' -or
+                    @($trial.flags | Where-Object { $_ -cnotin $observed.condition.flags }).Count -gt 0) {
                     if (($trial.name -eq 'software-current' -and $observed.current_a -le 0.10) -or
                         ($trial.name -eq 'software-power' -and $observed.power_w -le 0.50)) {
                         Fail-Case "$prefix-trial" 'protection_exposure_not_proven' 'Measurements did not establish exposure above the software threshold.'
@@ -885,38 +921,20 @@ function Invoke-ProtectionValidation {
                 }
                 ($script:report.results | Where-Object { $_.name -ceq "$prefix-off" }).status = 'SKIP'
             } else {
-                $offAttempted = $true
-                Assert-InputOff (Invoke-ProtectionStep "$prefix-off" -Cleanup) "$prefix-off"
-                $onPending = $false
-                $script:protectionPowered = $false
-                $script:report.protection_input_off_unconfirmed = $false
-                $calculated = [double]$observed.voltage_v * [double]$observed.current_a
+                $calculated = $observed.calculated_power_w
                 if ($observed.input_state -cne 'ON' -or 'PS' -cin $observed.condition.flags -or
                     $observed.voltage_v -lt 4.75 -or $observed.voltage_v -gt 5.25 -or
-                    $observed.power_w -lt 0.45 -or $observed.power_w -gt 0.55 -or
-                    $calculated -lt 0.45 -or $calculated -gt 0.55) {
+                    $calculated -lt 0.45 -or $calculated -gt 0.55 -or
+                    $calculated -ge $baseline.calculated_power_w) {
                     Fail-Case "$prefix-trial" 'power_limit_unconfirmed' 'Measurements did not confirm the 0.50 W hardware limit.'
                 }
             }
-            Assert-InputOff (Invoke-ProtectionStep "$prefix-events") "$prefix-events"
+            $null = Invoke-ProtectionStep "$prefix-events"
             if ($trial.flags.Count -gt 0) {
                 Confirm-ProtectionOperator "$prefix-source-off" 'Verify the trip on the load, turn OFF and isolate the external source, and press Enter only after confirming the fault condition is removed (Ctrl+C to cancel).'
-                $script:report.protection_input_off_unconfirmed = $true
-                Assert-InputOff (Invoke-ProtectionStep "$prefix-clear") "$prefix-clear"
-                $script:report.protection_input_off_unconfirmed = $false
+                $null = Invoke-ProtectionStep "$prefix-clear"
             }
         } finally {
-            $trialEntry = $script:report.results | Where-Object { $_.name -ceq "$prefix-trial" }
-            $clearEntry = $script:report.results | Where-Object { $_.name -ceq "$prefix-clear" }
-            if ($trialEntry.protection_on_refused -or $clearEntry.protection_state -ceq 'OFF') {
-                $onPending = $false
-                $script:report.protection_input_off_unconfirmed = $false
-            }
-            if ($onPending -and -not $offAttempted -and $script:protectionTrusted) {
-                Assert-InputOff (Invoke-ProtectionStep "$prefix-off" -Cleanup) "$prefix-off"
-                $script:report.protection_input_off_unconfirmed = $false
-            }
-            $script:protectionPowered = $false
             Restore-Protection $prefix $original.result $fields $true
         }
         $script:report.protection_trials[$trial.name] = 'PASS'
@@ -924,7 +942,6 @@ function Invoke-ProtectionValidation {
     foreach ($group in @('software-power', 'hardware-power')) {
         $prefix = "protection-default-$group"
         $original = Invoke-ProtectionStep "$prefix-original"
-        Assert-InputOff $original "$prefix-original"
         $fields = @('hardware_power_limit')
         if ($group -eq 'software-power') { $fields = @('software_power_limit','software_power_delay') }
         try {
@@ -1657,6 +1674,9 @@ try {
             # Legacy validation writes TRIG:SOUR HOLD; mark before a possibly partial write.
             $script:triggerSourceMayHaveChanged = $true
         }
+        if ($protectionSelected -and $step.name -ceq 'input-state') {
+            $report.protection_input_off_unconfirmed = $true
+        }
         $result = Invoke-LiveCommand -Command $step.command -CaseName $step.name `
             -ExtraArgs $step.args -DeadlineMs $commandDeadline -ExpectedError $step.expected_error `
             -AllowCrHandoff:($step.allow_cr_handoff -eq $true)
@@ -1666,6 +1686,9 @@ try {
             continue
         }
         Assert-Runtime $result $step.name
+        if ($protectionSelected -and $step.name -ceq 'input-state') {
+            $report.protection_input_off_unconfirmed = $result.result.input_state -cne 'OFF'
+        }
         if ($step.ContainsKey('trace_expected')) { Assert-TraceResult $result $step }
         if ($step.ContainsKey('led') -and
             ($result.result.led_enabled -cne $step.led -or $result.result.fixed_cr -cne $step.fixed_cr -or
@@ -1885,6 +1908,9 @@ try {
         }
     }
     foreach ($artifact in $protectionArtifacts) { Save-CommandArtifacts $artifact }
+    if ($protectionSelected -and $report.protection_input_off_unconfirmed) {
+        Write-Host 'Protection Input OFF is unconfirmed. Use the independent manual OFF procedure immediately.'
+    }
     Save-Report
     if ($null -ne $reportDirectory) {
         if ($report.status -ne 'PASS' -and $report.status -ne 'PLAN ONLY') { Show-Summary }
