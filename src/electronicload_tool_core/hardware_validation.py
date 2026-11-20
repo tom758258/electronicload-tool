@@ -592,6 +592,9 @@ def execute_trigger(command, *, mode, resource, source, interval, transient, lis
     if mode == "dry-run":
         return {**marker, "command": command, "hardware_access": False,
                 "planned_writes": ["SYST:REM", *writes] if writes else []}
+    if command == "input-on" and trigger["source"] == "MANUAL":
+        raise LoadError("unsupported_live_scope",
+                        "MANUAL Trigger powered contributor LIVE is not physically validated.")
     with c.open_session(resource) as (session, runtime):
         if scope is not None or command in {"input-off", "transient-disable"}:
             setup_writes = writes if transient_setup else []

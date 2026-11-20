@@ -393,7 +393,13 @@ Use recording Fake VISA for Input OFF guards, exact Source and Timer readback,
 HOLD/BUS dispatch, finite LIST and communication failures. Script tests cover
 PlanOnly and noninteractive refusal without simulating operator keystrokes.
 Physical Trigger validation requires separate approval, the operator-supplied
-resource and settings, and manual observation of each source. Follow the
+resource and settings, and manual observation of HOLD, TIMER, BUS and EXTERNAL
+only. The MANUAL physical Input ON path remains unvalidated and blocked; its
+offline setup and Input-OFF-safe original-setting restoration remain supported.
+Check the four-source PlanOnly presets (2 s pulse, 5 s Timer, 2/2 s LIST,
+15 s observation), the MANUAL pre-VISA Input ON refusal, and restoration of an
+original MANUAL Source using existing focused tests. Do not extend unrelated
+Transient timing tests. Follow the
 [contributor Trigger procedure](cli/README.md#contributor-trigger-validation).
 
 ## Packaging checks

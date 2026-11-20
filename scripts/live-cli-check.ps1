@@ -36,11 +36,11 @@ param(
     [string]$PulseWidth = '0.001',
     [switch]$InputTimerOnly,
     [string]$TimerSeconds = '5',
-    [int]$TriggerObservationSeconds = 5,
+    [int]$TriggerObservationSeconds = 15,
     [int]$TriggerMaxOnSeconds = 60,
-    [string]$TriggerIntervalSeconds = '1',
-    [string]$TriggerListWidthA = '0.5',
-    [string]$TriggerListWidthB = '0.5',
+    [string]$TriggerIntervalSeconds = '5',
+    [string]$TriggerListWidthA = '2',
+    [string]$TriggerListWidthB = '2',
     [int]$TriggerListRepeat = 1,
     [string]$TriggerExternalSetup,
     [switch]$PlanOnly,
@@ -97,7 +97,7 @@ $slowRiseCommunicationTrusted = $false
 $slowRiseCleanup = @()
 $triggerScope = @('--hardware-validation', 'trigger')
 # The Trigger pulse needs an observable preset; the legacy Transient default is unchanged.
-$script:triggerPulseWidth = $(if ($PSBoundParameters.ContainsKey('PulseWidth')) { $PulseWidth } else { '0.1' })
+$script:triggerPulseWidth = $(if ($PSBoundParameters.ContainsKey('PulseWidth')) { $PulseWidth } else { '2' })
 $script:originalTriggerSnapshot = $null
 $script:triggerSourceMayHaveChanged = $false
 $triggerTrials = @()
@@ -574,7 +574,7 @@ function New-TriggerPlan {
         '{"current_a":' + $LevelA + ',"slew_a_per_us":' + $RiseSlew + ',"width_s":' + $TriggerListWidthA + '},' +
         '{"current_a":' + $LevelB + ',"slew_a_per_us":' + $FallSlew + ',"width_s":' + $TriggerListWidthB + '}]}'
     $script:triggerPlans = @(@{name='trigger-snapshot';command='trigger-status';args=$triggerScope})
-    foreach ($source in @('MANUAL','HOLD','TIMER','BUS','EXTERNAL')) {
+    foreach ($source in @('HOLD','TIMER','BUS','EXTERNAL')) {
         $prefix = 'trigger-' + $source.ToLowerInvariant()
         $isList = $source -in @('BUS','EXTERNAL')
         $function = if ($isList) { 'LIST' } else { 'CC' }
@@ -691,14 +691,13 @@ function Invoke-TriggerTrial($Trial) {
             $armed = $true
             Assert-TriggerOff (Invoke-TriggerStep "$prefix-enable") "$prefix-enable"
         }
-        Write-Host "Trigger $($Trial.source), CLI readback confirmed. Observe the load current with the approved meter or capture instrument."
+        Write-Host "Trigger $($Trial.source), CLI readback confirmed. Observe the IT8812C panel current, or an approved capture instrument if needed."
         if ($Trial.isList) {
             Write-Host "Expect LIST CC levels $LevelA A then $LevelB A for $TriggerListWidthA s / $TriggerListWidthB s, repeated $TriggerListRepeat time(s)."
         } else {
             Write-Host "Expect baseline B ($LevelB A), a pulse at A ($LevelA A) for $($script:triggerPulseWidth) s, then a return to B."
         }
         switch ($Trial.source) {
-            'MANUAL' { Write-Host 'When the observation starts, press Local, then Shift + . (Trigger) on the IT8812C.' }
             'EXTERNAL' {
                 Write-Host 'Keep the source inactive until the observation starts. Apply one TTL low pulse (>10 us) to rear TRIG and its shared negative terminal.'
                 Write-Host "Confirm the reviewed equipment and wiring: $TriggerExternalSetup"
@@ -1228,7 +1227,7 @@ try {
         Write-Host 'CR-LED and Current Slow Rise trials keep Input OFF and verify configuration readback.'
     }
     if ($triggerSelected) {
-        Write-Host 'Trigger: five source trials with manual observation, explicit OFF and restoration of original Source and Timer.'
+        Write-Host 'Trigger: four source trials (HOLD, TIMER, BUS, EXTERNAL) with manual observation, explicit OFF and restoration of original Source and Timer.'
         Write-Host "Each Trigger observation is $TriggerObservationSeconds s. The Input ON/OFF budget is $TriggerMaxOnSeconds s per trial."
     }
     if ('current-slow-rise' -in $selectedModes) {

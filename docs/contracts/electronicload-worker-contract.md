@@ -493,7 +493,9 @@ other trigger guards are satisfied. Input OFF and Stop preserve Trigger Setup.
 These commands use the existing Common v3 async jobs and Manifest schema 2.
 Valid LIVE requests are admitted and fail with `unsupported_live_scope`
 before VISA access. The CLI-only Trigger validation option is unavailable
-through Worker arguments and context. See [Trigger Setup](../cli/README.md#trigger-setup).
+through Worker arguments and context. Contributor MANUAL powered Input ON is
+not physically validated and is refused before opening VISA; read-only Source
+status and Input-OFF-safe MANUAL restoration remain available in that scope. See [Trigger Setup](../cli/README.md#trigger-setup).
 
 ## Safety
 

@@ -156,6 +156,13 @@ def test_trigger_physical_snapshot_write_and_restore(monkeypatch, fault):
     restored = physical("trigger-configure", trigger_source=original["source"],
                         trigger_interval=original["interval_s"])
     assert restored == original and not fake.input
+    # MANUAL must remain a readable/restorable OFF setting, even though
+    # powered contributor MANUAL validation is not open.
+    manual = physical("trigger-configure", trigger_source="MANUAL")
+    assert manual["source"] == "MANUAL" and manual["input_state"] == "OFF"
+    assert physical("trigger-status")["source"] == "MANUAL"
+    assert physical("trigger-configure", trigger_source=original["source"],
+                    trigger_interval=original["interval_s"]) == original
 
 
 def prepare_native_trigger(monkeypatch, function, source):
@@ -286,5 +293,11 @@ def test_trigger_cli_and_native_refusals_do_not_open_visa(monkeypatch, capsys):
         with pytest.raises(LoadError, match="HOLD or BUS"):
             physical("list-trigger", validation_settings={"function": "LIST",
                      "configuration": list_configuration(), "trigger": setup})
+    with pytest.raises(LoadError) as manual:
+        physical("input-on", confirmed=True, validation_settings={
+            "function": "CC", "configuration": transient("pulse"),
+            "trigger": {"source": "MANUAL"},
+        })
+    assert manual.value.code == "unsupported_live_scope"
     with pytest.raises(LoadError, match="finite LIST repeats"):
         physical("set-list-cc", list_configuration=list_configuration(repeat_count=65536))

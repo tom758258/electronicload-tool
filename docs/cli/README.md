@@ -911,7 +911,9 @@ Input OFF. Readback includes `source`, `interval_s` as a decimal string, and
 BUS, with the existing dynamic-mode, Input ON and Stop guards. The contributor
 path uses `TRIG:IMM` for HOLD and `*TRG` for BUS. MANUAL uses the front panel,
 EXTERNAL uses the rear Trigger Input, and TIMER uses the instrument oscillator.
-Software trigger requests for those three sources fail. A successful software
+Software trigger requests for those three sources fail. MANUAL powered
+contributor LIVE validation remains blocked before VISA access; reading or
+restoring MANUAL with confirmed Input OFF remains supported. A successful software
 trigger establishes command acceptance only. Input OFF remains explicit and
 Worker Stop preserves the stored Trigger Setup.
 
@@ -967,7 +969,7 @@ for focused verification.
 | `trace` | Five bounded TRACE captures, including powered CC and Full CSV | Yes |
 | `cr-led` | Fixed CR-LED at 50 Ω and 1 V Vdrop, plain CR and exit to CC, all with Input OFF | Yes |
 | `current-slow-rise` | Fixed CC enable, retention after explicit OFF and CC setup, disable and readback | Yes |
-| `trigger` | All five sources, using Transient CC Pulse and finite LIST CC, with manual acceptance and Trigger Setup restoration | Yes |
+| `trigger` | Four physical sources (HOLD, TIMER, BUS, EXTERNAL), using Transient CC Pulse and finite LIST CC with observation and Trigger Setup restoration; MANUAL powered validation is excluded | Yes |
 | `input-timer` | Bounded Fixed CC Input Timer, expiry and explicit disable | Yes |
 
 `-InputTimerOnly` remains a compatible shortcut for the single
@@ -1014,9 +1016,9 @@ source limit is not a measured value or a guarantee of DUT safety.
 | `-WidthA` / `-WidthB` | `0.001` / `0.002` | Seconds, Continuous |
 | `-PulseWidth` | `0.001` | Seconds, Pulse |
 | `-TimerSeconds` | `5` | Seconds, Input Timer mode (allowed integer 3–10) |
-| `-TriggerObservationSeconds` / `-TriggerMaxOnSeconds` | `5` / `60` | Seconds per Trigger trial; includes explicit OFF deadline |
-| `-TriggerIntervalSeconds` | `1` | Seconds, Trigger TIMER source |
-| `-TriggerListWidthA` / `-TriggerListWidthB` | `0.5` / `0.5` | Seconds, finite LIST dwell |
+| `-TriggerObservationSeconds` / `-TriggerMaxOnSeconds` | `15` / `60` | Seconds per Trigger trial; includes explicit OFF deadline |
+| `-TriggerIntervalSeconds` | `5` | Seconds, Trigger TIMER source |
+| `-TriggerListWidthA` / `-TriggerListWidthB` | `2` / `2` | Seconds, finite LIST dwell |
 | `-TriggerListRepeat` | `1` | Finite LIST repetitions |
 | `-TriggerExternalSetup` | Optional | Extra external trigger wiring notes; operator still confirms equipment and safety |
 
@@ -1112,8 +1114,8 @@ Select `live-cli-check.ps1 -Modes trigger` with the usual approved model,
 explicit USB Resource, source/DUT limits and independent manual OFF procedure.
 Add `-PlanOnly` to check the command plan without VISA access. Trigger uses
 built-in preset settings by default: 0.1/0.2 A levels, 0.1 A/µs slews,
-0.1 s pulse, 1 s TIMER interval, 0.5/0.5 s LIST dwell, one LIST repeat,
-5 s observation and a 60 s trial ON/OFF deadline. These are controlled
+2 s pulse, 5 s TIMER interval, 2/2 s LIST dwell, one LIST repeat,
+15 s observation and a 60 s trial ON/OFF deadline. These are controlled
 validation presets, not proof that a particular supply or DUT is safe.
 The original Transient Pulse default remains 0.001 s; explicitly supplying
 `-PulseWidth` overrides both. A full-mode run saves original Trigger Source
@@ -1133,15 +1135,19 @@ independent operator action; the run stays FAIL.
 | `-TriggerExternalSetup` | Optional explanatory note; the console still requires physical equipment and wiring confirmation. |
 
 Use a current observation method that can resolve the chosen levels and pulse
-or dwell times. MANUAL, HOLD and TIMER use Transient CC Pulse (baseline B,
-pulse at A for the configured width, then back to B). BUS and EXTERNAL
-use a two-step LIST CC, with a zero fixed-current baseline before LIST
-selection. The test replaces the active CC Transient and LIST configurations.
-Use the IT8812C Local key followed by Shift plus the decimal/Trigger key for
-MANUAL. For EXTERNAL, use the rear TRIG terminal and its common negative
-terminal with a TTL low pulse longer than 10 μs. Verify the actual source
-voltage levels, common reference and wiring against the instrument and signal
-equipment before use. Confirm external On/Off and analog programming are
+or dwell times. The IT8812C panel display may suffice for qualitative 2-second
+changes; if no change can be reliably observed, answer No rather than inferring
+PASS from command acceptance. This is not a pulse-width or amplitude calibration.
+HOLD and TIMER use Transient CC Pulse (baseline B, pulse at A for the
+configured width, then back to B). BUS and EXTERNAL use a two-step LIST CC,
+with a zero fixed-current baseline before LIST selection. The test replaces
+the active CC Transient and LIST configurations.
+MANUAL remains implemented for offline Trigger Setup and as an original Source
+to read or restore after validation, but it has no powered contributor trial;
+no Local or front-panel Trigger action is required. For EXTERNAL, use the rear
+TRIG terminal and its common negative terminal with a TTL low pulse longer than
+10 μs. Verify the actual source voltage levels, common reference and wiring
+against the instrument and signal equipment before use. Confirm external On/Off and analog programming are
 disabled. [IT8800 User’s Manual V2.7, §§3.1, 3.4, 3.19.2](https://mm.digikey.com/Volume0/opasdata/d220001/medias/docus/5562/IT8800%20User%20Manual.pdf)
 
 The script saves the original Trigger Source and interval while Input is OFF.

@@ -224,8 +224,9 @@ def test_hardware_script_default_runs_every_mode_in_plan_only(run_script):
     assert report['prechecks']['identify'] == 'NOT RUN'
     assert names[:4] == ['input-state', 'measure-off', 'trigger-snapshot', 'set-cc-high']
     assert names.index('trigger-snapshot') < names.index('set-cc-high')
+    assert not any(name.startswith('trigger-manual-') for name in names)
     for name in ('timer-on', 'trace-powered-on', 'cr-led-set', 'slow-rise-enable',
-                 'trigger-manual-on', 'trigger-external-on', 'trigger-restore'):
+                 'trigger-hold-on', 'trigger-external-on', 'trigger-restore'):
         assert name in names
     assert all(item['status'] == 'NOT RUN' for item in report['cases'])
     assert RESOURCE not in text
@@ -471,7 +472,10 @@ def test_trigger_validation_script_plan_preflight_and_noninteractive_refusal(run
     assert RESOURCE not in text and not (report_path.parents[1] / 'private').exists()
     cases = {entry['name']: entry for entry in report['cases']}
     assert all(case['status'] == 'NOT RUN' for case in cases.values())
-    for source in ('manual', 'hold', 'timer', 'bus', 'external'):
+    assert report['trigger_observation_seconds'] == 15
+    assert report['trigger_max_on_seconds'] == 60
+    assert not any(name.startswith('trigger-manual-') for name in cases)
+    for source in ('hold', 'timer', 'bus', 'external'):
         assert cases[f'trigger-{source}-configure']['command'] == 'trigger-configure'
         assert '--confirm' in cases[f'trigger-{source}-on']['arguments']
         assert cases[f'trigger-{source}-off']['command'] == 'input-off'
@@ -480,9 +484,13 @@ def test_trigger_validation_script_plan_preflight_and_noninteractive_refusal(run
     assert cases['trigger-bus-setup']['command'] == 'set-list-cc'
     assert cases['trigger-hold-setup']['command'] == 'set-transient-cc'
     pulse_args = cases['trigger-hold-setup']['arguments']
-    assert pulse_args[pulse_args.index('--pulse-width') + 1] == '0.1'
+    assert pulse_args[pulse_args.index('--pulse-width') + 1] == '2'
     timer_args = cases['trigger-timer-configure']['arguments']
-    assert timer_args[timer_args.index('--interval-s') + 1] == '1'
+    assert timer_args[timer_args.index('--interval-s') + 1] == '5'
+    list_args = cases['trigger-bus-setup']['arguments']
+    list_plan = json.loads(list_args[list_args.index('--arguments-json') + 1])
+    assert list_plan['repeat_count'] == 1
+    assert [step['width_s'] for step in list_plan['steps']] == [2, 2]
     assert not any(name.startswith('transient-') or name.startswith('cc-') for name in cases)
     refused = run_script(['-Modes', 'trigger'])
     assert refused.returncode == 2 and 'requires an interactive console' in refused.stdout
