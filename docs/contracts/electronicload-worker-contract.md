@@ -84,6 +84,8 @@ Common contracts remain authoritative for the HTTP and JSONL envelopes.
 | `list-trigger` | `{}` | LIST status with software-trigger record; no completion inference |
 | `list-status` | `{}` | Known simulated LIST configuration/mode/slot/trigger |
 | `list-exit` | `{}` | Confirmed Input OFF required; select FIXED, retain LIST data |
+| `trigger-configure` | `{"source":<source>}` or `{"source":"TIMER","interval_s":<number>}` | Offline Trigger Setup |
+| `trigger-status` | `{}` | Stored Trigger Source and Timer interval |
 | `input-on` | `{"confirm_input_on": true}` | Confirmed `input_state: "ON"` or failure/UNKNOWN |
 | `input-off` | `{}` | Confirmed `input_state: "OFF"` or failure/UNKNOWN |
 
@@ -371,7 +373,7 @@ See the [source manuals and CLI usage](../cli/README.md#transient-modes).
 | Setup | Input OFF, Transient disabled; replace the complete configuration and clear the last trigger |
 | Enable | Configured and Input OFF; enable Transient without changing Input |
 | Input ON | Existing per-request confirmation, valid enabled Transient configuration, Input OFF, Short OFF and Worker not stopping |
-| Trigger | Configured, enabled, Input ON and Worker not stopping; record a software trigger |
+| Trigger | Configured, enabled, Input ON, Short OFF, Source HOLD or BUS, Worker not stopping |
 | Input OFF | Existing explicit operation; leaves Transient enabled |
 | Disable | Input OFF; clear enabled only, retaining configuration and last trigger |
 | Fixed setup | Explicitly disable Transient first; successful Fixed setup invalidates Transient configuration and trigger history |
@@ -460,7 +462,7 @@ replace inactive Transient setup without disabling an active one. Fixed setup
 and Transient mutations require explicit LIST exit first. Save may operate on
 retained configuration after exit. Empty Recall fails without mutation.
 Trigger requires configured selected CC LIST, Input ON, Transient OFF, Short
-OFF and Worker not stopping. Every LIST mutation checks Stop. Status is
+OFF, Source HOLD or BUS and Worker not stopping. Every LIST mutation checks Stop. Status is
 read-only and returns independent in-memory snapshots with
 `state_source: "simulate"`; `GET /status` keeps its Worker/job shape.
 
@@ -471,6 +473,29 @@ repeat; 65536 means infinite. Input OFF and LIST exit are explicit and separate.
 Stop is I/O-free and does not change Input. The Orchestrator must attempt and
 confirm explicit Input OFF before Worker Stop on normal/error/user-stop exits;
 Input OFF does not prove the internal LIST engine aborted.
+
+## Trigger Setup
+
+Source is one of `MANUAL`, `BUS`, `HOLD`, `TIMER`, or `EXTERNAL`. TIMER requires
+a JSON number `interval_s` between 0.01 and 999.99 seconds. Non-TIMER sources
+omit `interval_s` and retain the stored interval. The CLI client and Worker
+preserve exact numeric tokens. Invalid, duplicate, or extra fields are rejected
+with HTTP 400 before job creation.
+
+Simulation starts in HOLD with a stored interval of 0.01 s. Configuration
+requires Input OFF and a running Worker. Both commands return `source`,
+`interval_s` as a decimal string, and `state_source: "simulate"`. Dry-run
+previews supplied settings with `hardware_access: false` and preserves state.
+Trigger commands accept HOLD and BUS. Requests to actively trigger MANUAL,
+EXTERNAL, or TIMER are admitted and fail with `unsafe_trigger_source` when
+other trigger guards are satisfied. Input OFF and Stop preserve Trigger Setup.
+
+These commands use the existing Common v3 async jobs and Manifest schema 2.
+Valid LIVE requests are admitted and fail with `unsupported_live_scope`
+before VISA access. The CLI-only Trigger validation option is unavailable
+through Worker arguments and context. Contributor MANUAL powered Input ON is
+not physically validated and is refused before opening VISA; read-only Source
+status and Input-OFF-safe MANUAL restoration remain available in that scope. See [Trigger Setup](../cli/README.md#trigger-setup).
 
 ## Safety
 
@@ -590,7 +615,7 @@ real hardware behavior.
 ## Separate CLI hardware validation
 
 The standalone CLI offers an explicit `--hardware-validation` option for
-controlled contributor CV/CR/CW/Transient trials. It is not a Worker command,
+controlled contributor CV/CR/CW/Transient and Trigger trials. It is not a Worker command,
 argument, context, feature, or LIVE promotion. The Worker does not forward this
 option or its `validation_settings` and continues to reject extra arguments.
 All LIVE refusal and admission/terminal behavior described above remains in

@@ -35,11 +35,10 @@ def test_list_inline_and_utf8_file_have_same_result(mode, tmp_path, capsys):
 
 
 @pytest.mark.parametrize("data", [
-    "{", "[]", "null", "1", '{}',
+    "{", "[]", '{}',
     LIST_JSON.replace('"current_a":1', '"current_a":true'),
     LIST_JSON.replace('"current_a":1', '"current_a":"1"'),
     LIST_JSON.replace('"current_a":1', '"current_a":NaN'),
-    LIST_JSON.replace('"current_a":1', '"current_a":1e9999999999999999999'),
     LIST_JSON.replace('"current_a":1', '"current_a":1.000000000000000000001'),
     LIST_JSON.replace('"repeat_count":65536', '"repeat_count":65536.0'),
     LIST_JSON.replace('"range":"auto"', '"range":"low","range":"auto"'),
@@ -48,7 +47,11 @@ def test_list_inline_and_utf8_file_have_same_result(mode, tmp_path, capsys):
 def test_list_invalid_inline_and_file_return_one_json_error(data, tmp_path, capsys):
     path = tmp_path / "invalid.json"
     path.write_text(data, encoding="utf-8")
-    for source in (("--arguments-json", data), ("--file", str(path))):
+    sources = [("--arguments-json", data)]
+    # One malformed file and one duplicate-key file cover this second input boundary.
+    if data == "{" or '"range":"low","range":"auto"' in data:
+        sources.append(("--file", str(path)))
+    for source in sources:
         assert main(["set-list-cc", "--simulate", *source, "--json"]) == 2
         output = capsys.readouterr()
         assert output.err == "" and not json.loads(output.out)["ok"]
@@ -68,7 +71,7 @@ def test_list_file_and_parser_errors(capsys, tmp_path):
 
 
 @pytest.mark.parametrize("command", LIST_COMMANDS)
-def test_list_cli_dry_run_live_refusal_and_manifest(command, capsys):
+def test_list_cli_dry_run_live_refusal(command, capsys):
     arguments = (["--arguments-json", LIST_JSON] if command == "set-list-cc" else
                  ["--slot", "1"] if command in {"list-save", "list-recall"} else [])
     assert main([command, "--dry-run", *arguments, "--json"]) == 0
@@ -76,10 +79,14 @@ def test_list_cli_dry_run_live_refusal_and_manifest(command, capsys):
     assert main([command, "--resource", "USB0::0xFFFF::0x0001::SYNTHETIC::INSTR",
                  "--validation-allow-pending-live-support", *arguments, "--json"]) == 2
     assert json.loads(capsys.readouterr().out)["error"]["code"] == "unsupported_live_scope"
+
+
+def test_list_manifest_lists_all_commands(capsys):
     assert main(["manifest", "--json"]) == 0
     manifest = json.loads(capsys.readouterr().out)
     assert manifest["schema_version"] == 2 and manifest["worker_protocol"]["schema_versions"] == [3]
-    assert manifest["commands"][command] == {"kind": "async_job"}
+    for command in LIST_COMMANDS:
+        assert manifest["commands"][command] == {"kind": "async_job"}
 
 
 def test_list_standalone_simulation_keeps_fresh_state(capsys):

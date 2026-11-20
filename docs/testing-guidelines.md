@@ -17,6 +17,24 @@ Avoid tests tied to private helpers, source text, exact help prose, or document
 formatting. Packaging and installation are checked with actual build artifacts;
 do not duplicate those checks in a second permanent test suite.
 
+## CI test boundaries
+
+CI uses the same Linux/Windows Python-version names as the other Tool projects.
+The fast no-hardware matrix runs Core, CLI, Worker and Fake VISA contracts on
+Linux Python 3.10–3.13 and Windows Python 3.10, 3.12 and 3.13. It excludes
+`tests/test_live_validation_script.py`, which exercises real PowerShell
+processes and is not part of routine Python-version compatibility testing.
+
+Changes to validation scripts, their direct CLI/Core boundaries or their
+script tests run the PowerShell PlanOnly, refusal and report contracts once on
+Windows Python 3.13. Windows offline preflight runs separately on the same
+affected boundary. Python Core/CLI/Worker tests own command, sequencing and
+failure behavior; CI does not duplicate these as Linux pseudo-terminal operator
+simulations. Unrelated changes skip the PowerShell checks; packaging changes
+retain the wheel/sdist installation smoke. Skipping a CI job does not imply
+real-instrument validation. Run focused tests from the repository root.
+No CI job is authorized to access physical VISA.
+
 ## Local checks
 
 Sync the development environment as described in the [README](../README.md).
@@ -60,7 +78,8 @@ affected CLI parser/help/version and read-only CLI contracts:
 
 Worker integration uses a real local simulated subprocess, HTTP and JSONL,
 but never physical hardware. The **single** `live-cli-check.ps1` defaults to
-all eight modes: CC, CV, CR, CW and Transient CC/CV/CR/CW. `-Modes` selects one or more
+all supported validation modes: CC/CV/CR/CW, Transient CC/CV/CR/CW,
+TRACE, CR-LED, Current Slow Rise, Trigger and Input Timer. `-Modes` selects one or more
 modes while retaining common read-only safety prechecks and each selected
 mode's explicit Input ON/OFF flow. Test its `-PlanOnly` operation and unattended
 LIVE refusal with a **fictional** USB Resource. In noninteractive LIVE runs, verify it refuses before opening any VISA
@@ -323,15 +342,16 @@ changed contributor boundaries:
 Use a recording Fake VISA for the explicit-scope Core dispatcher, actual native
 Configure/Start sequencing, original Product LIVE refusal, untrusted Session
 rejection, exact identity and USB/System connection requirements. For the
-PowerShell Script, use PlanOnly, noninteractive gate refusal, and the existing
-pseudo-terminal/fake-CLI style of focused ON/OFF and Fail Closed verification.
+PowerShell Script, check PlanOnly, noninteractive refusal and report contracts.
+Check Input OFF and failure handling primarily at the owning Core/CLI Fake VISA
+layer rather than simulating operator keystrokes in a pseudo-terminal.
 Use only fictional Resources in automated tests. Fake clock checks may replace
 real long waits. PowerShell unavailable is SKIP, never PASS. Ruff checks only
 modified Python files, and `git diff --check` checks the patch.
 
-The original eight script modes and default remain unchanged; do not add
-unrelated Fixed/Transient/LIST/Worker or release acceptance tests. Ordinary
-CI retains its repository-configured offline checks, irrespective of local
+The script defaults to all supported validation modes. Keep TRACE-only checks
+focused; do not add unrelated Fixed/Transient/LIST/Worker or release acceptance
+tests. Ordinary CI retains its repository-configured offline checks, irrespective of local
 focused selection. Contributor physical TRACE remains NOT RUN until a
 separately approved, bounded interactive run using an operator-supplied Resource,
 safe DUT/source, and independent manual Input OFF contingency.
@@ -353,6 +373,34 @@ Slow Rise interlock case, verify with recording Fake VISA that the planned
 CV setup is refused before any control write and that the report recognizes
 only the expected refusal. Run Ruff on modified Python files. Configured
 CI retains its normal checks.
+
+## Trigger Setup focused checks
+
+Exercise `test_trigger.py` and the related Worker and live validation script
+cases. Select affected Transient and LIST tests, the existing contributor
+Transient paths, and parser help/version. Run Ruff on modified Python files.
+Use `preflight-cli.ps1 -TriggerOnly` and an explicitly fictional Resource for
+PlanOnly and noninteractive refusal. Default PlanOnly includes every supported
+validation mode and captures Trigger Source/Timer before legacy Transient writes;
+`-Modes trigger` remains selectable. Cover the compatible `-Modes input-timer`
+and `-InputTimerOnly` entries, standard Trigger presets and focused default
+PlanOnly selection without physical VISA. For mixed legacy Transient/Trigger
+plans, confirm snapshot-before-write order. Test trusted Input OFF and
+restore behavior at the owning Core/CLI boundary; uncertain communication
+requires manual action rather than blind VISA writes.
+
+Use recording Fake VISA for Input OFF guards, exact Source and Timer readback,
+HOLD/BUS dispatch, finite LIST and communication failures. Script tests cover
+PlanOnly and noninteractive refusal without simulating operator keystrokes.
+Physical Trigger validation requires separate approval, the operator-supplied
+resource and settings, and manual observation of HOLD, TIMER, BUS and EXTERNAL
+only. The MANUAL physical Input ON path remains unvalidated and blocked; its
+offline setup and Input-OFF-safe original-setting restoration remain supported.
+Check the four-source PlanOnly presets (2 s pulse, 5 s Timer, 2/2 s LIST,
+15 s observation), the MANUAL pre-VISA Input ON refusal, and restoration of an
+original MANUAL Source using existing focused tests. Do not extend unrelated
+Transient timing tests. Follow the
+[contributor Trigger procedure](cli/README.md#contributor-trigger-validation).
 
 ## Packaging checks
 

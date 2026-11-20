@@ -18,6 +18,7 @@ from electronicload_tool_core.control import (CONTROL_COMMANDS, execute as contr
                                               AVERAGE_COMMANDS, CR_COMMANDS)
 from electronicload_tool_core.trace import (CONFIG_FIELDS, CSV_FIELDS, SAMPLE_FIELDS,
                                            TRACE_COMMANDS, execute as trace_execute)
+from electronicload_tool_core.trigger import TRIGGER_SOURCES
 from .json_input import decode_decimal_json
 from .worker import manifest, run_worker
 from .worker_client import request as worker_request, wait_ready
@@ -108,10 +109,15 @@ def main(argv: list[str] | None = None) -> int:
                                                      *AVERAGE_COMMANDS):
             sub.add_argument("--hardware-validation", choices=("input-timer", "cv", "cr", "cw", "transient-cc",
                                                                "transient-cv", "transient-cr", "transient-cw",
-                                                               "cr-led", "current-slow-rise"),
+                                                               "cr-led", "current-slow-rise", "trigger"),
                              help="Explicit contributor hardware-validation scope; not Product LIVE.")
             sub.add_argument("--validation-settings-json",
                              help="Expected complete setup for validation enable, ON and trigger.")
+        elif name in {"set-list-cc", "list-trigger", "list-exit"}:
+            sub.add_argument("--hardware-validation", choices=("trigger",),
+                             help="Explicit CLI-only Trigger hardware validation.")
+            if name == "list-trigger":
+                sub.add_argument("--validation-settings-json", help="Expected LIST and Trigger Setup.")
         if name in TRACE_COMMANDS:
             sub.add_argument("--hardware-validation", choices=("trace",),
                              help="Explicit CLI-only IT8812C TRACE hardware validation; not Product LIVE.")
@@ -127,6 +133,9 @@ def main(argv: list[str] | None = None) -> int:
             sub.add_argument("--count", required=True, type=int, help="Integer average count, 2 through 16.")
         elif name == "set-input-timer":
             sub.add_argument("--seconds", required=True, type=int, help="Integer seconds, 1 through 60000.")
+        elif name == "trigger-configure":
+            sub.add_argument("--source", required=True, type=str.upper, choices=TRIGGER_SOURCES)
+            sub.add_argument("--interval-s", help="Trigger Timer interval in seconds.")
         elif name == "set-cc":
             sub.add_argument("--current", required=True, type=_current_token)
             sub.add_argument("--range", required=True, choices=FIXED_RANGE_CHOICES)
@@ -161,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
                 sub.add_argument(f"--{field}", default=argparse.SUPPRESS, help="Seconds")
         elif name == "set-list-cc":
             data = sub.add_mutually_exclusive_group(required=True)
-            data.add_argument("--arguments-json", help="Complete LIST configuration JSON (offline only).")
+            data.add_argument("--arguments-json", help="Complete LIST configuration JSON.")
             data.add_argument("--file", help="UTF-8 JSON file containing the same LIST configuration.")
         elif name in {"list-save", "list-recall"}:
             sub.add_argument("--slot", required=True, type=int, help="Instrument LIST slot, 1 through 7.")
@@ -192,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.command == "send-command":
                 try:
                     arguments = (decode_decimal_json(args.arguments_json)
-                                 if args.worker_command in (*LIST_COMMANDS, *TRACE_COMMANDS)
+                                 if args.worker_command in (*LIST_COMMANDS, *TRACE_COMMANDS, "trigger-configure")
                                  else json.loads(args.arguments_json))
                     context = json.loads(args.context_json)
                 except (ValueError, UnicodeError, RecursionError) as exc:
@@ -207,7 +216,7 @@ def main(argv: list[str] | None = None) -> int:
                 if args.job_id is not None:
                     body["job_id"] = args.job_id
                 if args.worker_command in {*FIXED_RANGE_COMMANDS, *TRANSIENT_SETUP_COMMANDS,
-                                           *LIST_COMMANDS, *TRACE_COMMANDS, "set-von"}:
+                                           *LIST_COMMANDS, *TRACE_COMMANDS, "set-von", "trigger-configure"}:
                     # Forward original numeric tokens; Core in the Worker validates them.
                     # Parsing above already guarantees a complete JSON value.
                     del body["arguments"]
@@ -244,8 +253,9 @@ def main(argv: list[str] | None = None) -> int:
             validation_settings = None
             if getattr(args, "validation_settings_json", None) is not None:
                 try:
-                    validation_settings = json.loads(args.validation_settings_json,
-                                                     parse_float=Decimal)
+                    validation_settings = (decode_decimal_json(args.validation_settings_json)
+                                           if args.hardware_validation == "trigger" else
+                                           json.loads(args.validation_settings_json, parse_float=Decimal))
                 except (ValueError, UnicodeError) as exc:
                     raise LoadError("argument_error", "Validation settings JSON is invalid.") from exc
                 if not isinstance(validation_settings, dict):
@@ -273,6 +283,8 @@ def main(argv: list[str] | None = None) -> int:
                 latch=getattr(args, "latch", None),
                 seconds=getattr(args, "seconds", None),
                 count=getattr(args, "count", None),
+                trigger_source=getattr(args, "source", None),
+                trigger_interval=getattr(args, "interval_s", None),
             )
         else:
             result = read_execute(args.command, mode=mode, resource=args.resource,

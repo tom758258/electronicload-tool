@@ -13,6 +13,9 @@ from decimal import Decimal, localcontext
 from . import control as c
 from .errors import LoadError
 from .identity import parse_identity
+from .trigger import (SOURCE_TOKENS, TRIGGER_COMMANDS, TRIGGER_INTERVAL_QUERY,
+                      TRIGGER_SOURCE_QUERY, read_source, software_trigger, validate_interval,
+                      validate_setup)
 
 
 FUNCTIONS = {"cv": ("VOLT", "VOLTAGE"), "cr": ("RES", "RESISTANCE"),
@@ -153,7 +156,7 @@ def _serial(settings):
             for key, value in settings.items()}
 
 
-def _snapshot(session, scope):
+def _snapshot(session, scope, *, require_hold=True):
     fixed = c._query(session, "FUNC:MODE?").upper()
     function = c._query(session, "FUNC?").upper()
     if fixed not in {"FIX", "FIXED"} or function not in FUNCTIONS[scope]:
@@ -209,7 +212,7 @@ def _snapshot(session, scope):
                             width_b=_number(session, f"{prefix}:TRAN:BWID?"))
         elif settings["transient_mode"] == "pulse":
             settings["pulse_width"] = _number(session, f"{prefix}:TRAN:AWID?")
-        if c._query(session, "TRIG:SOUR?").upper() != "HOLD":
+        if require_hold and c._query(session, TRIGGER_SOURCE_QUERY).upper() != "HOLD":
             raise LoadError("unsafe_trigger_source", "Validation requires software-only HOLD source.")
     validated = _configuration(scope, settings)
     return {"input_state": c._flag(session, "INP:STAT?"), "enabled": enabled,
@@ -238,7 +241,7 @@ def _setup_guard(session, stop):
         raise LoadError("unsafe_mode", "Setup requires Transient and Short OFF.")
 
 
-def _sequence(scope, settings):
+def _sequence(scope, settings, *, set_hold=True):
     sequence = ["FUNC:MODE FIX", f"FUNC {FUNCTIONS[scope][0]}"]
     if scope == "cv":
         ceiling = c.CV_RANGE_LIMITS[settings["range"]]
@@ -266,11 +269,12 @@ def _sequence(scope, settings):
                          f"{prefix}:TRAN:BWID {settings['width_b']:f}"]
         elif settings["transient_mode"] == "pulse":
             sequence += [f"{prefix}:TRAN:AWID {settings['pulse_width']:f}"]
-        sequence += ["TRIG:SOUR HOLD"]
+        if set_hold:
+            sequence += ["TRIG:SOUR HOLD"]
     return sequence
 
 
-def _perform(session, command, scope, expected, sequence, stop):
+def _perform(session, command, scope, expected, sequence, stop, *, trigger=None, trigger_scope=False):
     parse_identity(c._query(session, "*IDN?"))
     if command == "input-off":
         # Reuse the established explicit OFF and bounded confirmation path.
@@ -278,7 +282,7 @@ def _perform(session, command, scope, expected, sequence, stop):
                           power=None, range_name=None, confirmed=False, stop=stop,
                           allow_cv=False, allow_cr=False, allow_cw=False)
     if command == "transient-status":
-        return _snapshot(session, scope)
+        return _snapshot(session, scope, require_hold=not trigger_scope)
     _stopping(stop)
     if sequence:
         completed = []
@@ -298,7 +302,7 @@ def _perform(session, command, scope, expected, sequence, stop):
                 _stopping(stop)
                 c._write(session, write)
                 completed.append(write)
-            snapshot = _snapshot(session, scope)
+            snapshot = _snapshot(session, scope, require_hold=not trigger_scope)
             _match(snapshot, expected)
             _setup_guard(session, stop)
             return snapshot
@@ -311,8 +315,12 @@ def _perform(session, command, scope, expected, sequence, stop):
         if command == "transient-disable":
             c._input_off(session)
             return None
-        result = _snapshot(session, scope)
+        result = _snapshot(session, scope, require_hold=not trigger_scope)
         _match(result, expected)
+        if trigger is not None:
+            _check_trigger(session, trigger)
+            if c._flag(session, "INP:TIM?") != "OFF":
+                raise LoadError("input_timer_enabled", "Disable Input Timer before Trigger validation.")
         wanted_input = "ON" if command == "transient-trigger" else "OFF"
         if result["input_state"] != wanted_input:
             raise LoadError("unsafe_input_state", f"Validation requires Input {wanted_input}.")
@@ -344,6 +352,8 @@ def _perform(session, command, scope, expected, sequence, stop):
             exc.details["completed_steps"] = completed
         raise
     if command == "input-on":
+        if trigger_scope:
+            c._mutation_off(session, stop)
         try:
             c._write(session, "INP ON")
             if not c._confirm_input_state(session, "ON"):
@@ -353,7 +363,9 @@ def _perform(session, command, scope, expected, sequence, stop):
             raise
         return {**snapshot, "input_state": "ON"}
     if command == "transient-trigger":
-        c._write(session, "TRIG:IMM")
+        if trigger_scope:
+            _require_trigger_input_on(session, stop, "Transient")
+        c._write(session, software_trigger(trigger["source"]) if trigger else "TRIG:IMM")
         return {**snapshot, "trigger_dispatched_at_utc": datetime.now(timezone.utc).isoformat(),
                 "waveform_completion_known": False}
     c._write(session, "TRAN ON" if enabling_transient else "TRAN OFF")
@@ -362,6 +374,242 @@ def _perform(session, command, scope, expected, sequence, stop):
     c._input_off(session)
     return {"input_state": "OFF", "enabled": enabling_transient,
             **({"configuration": snapshot["configuration"]} if snapshot else {})}
+
+
+def _trigger_snapshot(session):
+    source = read_source(c._query(session, TRIGGER_SOURCE_QUERY))
+    return {"source": source, "interval_s": _trigger_interval(session)}
+
+
+def _trigger_interval(session):
+    interval = _number(session, TRIGGER_INTERVAL_QUERY)
+    try:
+        validate_interval(interval)
+    except LoadError as exc:
+        raise LoadError("invalid_response", "Trigger Timer readback is outside its documented bounds.", 3) from exc
+    return interval
+
+
+def _check_trigger(session, expected):
+    actual = _trigger_snapshot(session)
+    if any(actual[key] != value for key, value in expected.items()):
+        raise LoadError("readback_mismatch", "Trigger Setup differs from the requested settings.", 3)
+    return actual
+
+
+def _configure_trigger(session, settings, writes, stop):
+    readbacks = {"source": "UNCONFIRMED", "interval_s": "UNCONFIRMED"}
+    try:
+        c._mutation_off(session, stop)
+        expected = {**_trigger_snapshot(session), **settings}
+        c._mutation_off(session, stop)
+        c._write(session, "SYST:REM")
+        for write in writes:
+            c._mutation_off(session, stop)
+            writing_interval = write.startswith("TRIG:TIM ")
+            if not writing_interval:
+                # A Source write invalidates the earlier Timer readback.
+                readbacks["interval_s"] = "UNCONFIRMED"
+            c._write(session, write)
+            if writing_interval:
+                if _trigger_interval(session) != expected["interval_s"]:
+                    readbacks["interval_s"] = "MISMATCH"
+                    raise LoadError("readback_mismatch", "Trigger Timer did not match.", 3)
+                readbacks["interval_s"] = "CONFIRMED"
+        interval = _trigger_interval(session)
+        readbacks["interval_s"] = "CONFIRMED" if interval == expected["interval_s"] else "MISMATCH"
+        source = read_source(c._query(session, TRIGGER_SOURCE_QUERY))
+        readbacks["source"] = "CONFIRMED" if source == expected["source"] else "MISMATCH"
+        if "MISMATCH" in readbacks.values():
+            raise LoadError("readback_mismatch", "Trigger Setup differs from the requested settings.", 3)
+        c._input_off(session)
+        return {"source": source, "interval_s": str(interval), "input_state": "OFF",
+                "state_source": "instrument_readback"}
+    except LoadError as exc:
+        exc.details["trigger_readbacks"] = readbacks
+        raise
+
+
+def _require_trigger_input_on(session, stop, function):
+    if c._flag(session, "INP:STAT?") != "ON":
+        raise LoadError("input_not_on", f"{function} trigger requires Input ON.")
+    _stopping(stop)
+
+
+def _list_writes(configuration):
+    ceiling = c.RANGE_LIMITS[configuration["range"]]
+    steps = configuration["steps"]
+    # Use a known zero fixed-current setting before selecting and arming LIST.
+    writes = ["FUNC:MODE FIX", "FUNC CURR", "CURR 0", f"LIST:RANG {ceiling:g}",
+              f"LIST:COUN {configuration['repeat_count']}", f"LIST:STEP {len(steps)}"]
+    for index, step in enumerate(steps, 1):
+        writes.extend([f"LIST:LEV {index},{step['current_a']:f}",
+                       f"LIST:SLEW {index},{step['slew_a_per_us']:f}",
+                       f"LIST:WID {index},{step['width_s']:f}"])
+    return [*writes, "FUNC:MODE LIST"]
+
+
+def _list_snapshot(session, configuration):
+    mode, function = c._load_mode(session)
+    if mode != "LIST" or function not in FUNCTIONS["transient-cc"]:
+        raise LoadError("unsafe_mode", "Trigger validation requires selected CC LIST.")
+    checks = {"CURR?": Decimal(0), "LIST:RANG?": Decimal(str(c.RANGE_LIMITS[configuration["range"]])),
+              "LIST:COUN?": configuration["repeat_count"],
+              "LIST:STEP?": len(configuration["steps"])}
+    for index, step in enumerate(configuration["steps"], 1):
+        checks.update({f"LIST:LEV? {index}": step["current_a"],
+                       f"LIST:SLEW? {index}": step["slew_a_per_us"],
+                       f"LIST:WID? {index}": step["width_s"]})
+    for query, value in checks.items():
+        if _number(session, query) != value:
+            raise LoadError("readback_mismatch", "Physical LIST differs from the authorized settings.", 3,
+                            query=query, list_selected=True)
+    return {"function_mode": mode, "function": function,
+            "configuration": {**configuration, "steps": [_serial(step) for step in configuration["steps"]]}}
+
+
+def _validation_list(session, command, configuration, trigger, writes, stop):
+    def guard():
+        _stopping(stop)
+        if command == "list-trigger":
+            _require_trigger_input_on(session, stop, "LIST")
+            if c._flag(session, "TRAN?") != "OFF" or c._flag(session, "INP:SHOR:STAT?") != "OFF":
+                raise LoadError("unsafe_mode", "LIST trigger requires Transient and Short OFF.")
+        else:
+            _setup_guard(session, stop)
+        if command != "list-exit" and c._flag(session, "INP:TIM?") != "OFF":
+            raise LoadError("input_timer_enabled", "Disable Input Timer before LIST validation.")
+        if trigger is not None:
+            _check_trigger(session, trigger)
+        if command == "list-exit":
+            mode, function = c._load_mode(session)
+            if mode != "LIST" or function not in FUNCTIONS["transient-cc"]:
+                raise LoadError("unsafe_mode", "Only selected CC LIST can be exited.")
+        return _list_snapshot(session, configuration) if trigger is not None else {}
+
+    guard()
+    if command == "set-list-cc":
+        c._check_mode_change(session)
+    if command == "list-trigger":
+        _require_trigger_input_on(session, stop, "LIST")
+    else:
+        c._mutation_off(session, stop)
+    c._write(session, "SYST:REM")
+    result = guard()
+    if command == "set-list-cc":
+        c._leave_cr_led(session, c._check_mode_change(session), stop)
+        for write in writes:
+            _setup_guard(session, stop)
+            c._mutation_off(session, stop)
+            c._write(session, write)
+        result = _list_snapshot(session, configuration)
+    elif command == "input-on":
+        c._mutation_off(session, stop)
+        try:
+            c._write(session, "INP ON")
+            if not c._confirm_input_state(session, "ON"):
+                raise LoadError("input_on_not_confirmed", "LIST Input ON was not confirmed.", 3)
+        except LoadError as exc:
+            exc.details.update(input_state="UNKNOWN", input_on_attempted=True)
+            raise
+        return {**result, "input_state": "ON"}
+    elif command == "list-trigger":
+        _require_trigger_input_on(session, stop, "LIST")
+        c._write(session, software_trigger(trigger["source"]))
+        return {**result, "input_state": "ON",
+                "trigger_dispatched_at_utc": datetime.now(timezone.utc).isoformat(),
+                "waveform_completion_known": False}
+    else:
+        c._mutation_off(session, stop)
+        c._write(session, "FUNC:MODE FIX")
+        if c._query(session, "FUNC:MODE?").upper() not in {"FIX", "FIXED"}:
+            raise LoadError("readback_mismatch", "Fixed mode was not confirmed after LIST exit.", 3)
+    c._input_off(session)
+    return {**result, "input_state": "OFF"}
+
+
+def _finite_list(configuration):
+    settings = c.validate_list_cc(configuration)
+    if settings["repeat_count"] == 65536:
+        raise LoadError("argument_error", "Trigger validation requires finite LIST repeats.")
+    return settings
+
+
+def execute_trigger(command, *, mode, resource, source, interval, transient, list_configuration,
+                    expected, confirmed, stop):
+    """Use native SCPI only in the explicitly selected standalone CLI scope."""
+    transient_setup = command in c.TRANSIENT_SETUP_COMMANDS
+    list_setup = command == "set-list-cc"
+    needs_expected = command in {"input-on", "transient-enable", "transient-trigger", "list-trigger"}
+    if mode not in {"live", "dry-run"} or command not in {
+        *TRIGGER_COMMANDS, *c.TRANSIENT_SETUP_COMMANDS, "transient-enable", "transient-disable",
+        "transient-trigger", "set-list-cc", "list-trigger", "list-exit", "input-on", "input-off"
+    }:
+        raise LoadError("argument_error", "Command/mode does not match Trigger validation.")
+    if (not transient_setup and transient is not None) or (not list_setup and list_configuration is not None):
+        raise LoadError("argument_error", "Dynamic setup arguments apply only to their setup command.")
+    if (not needs_expected and expected is not None) or (confirmed and command != "input-on"):
+        raise LoadError("argument_error", "Unexpected Trigger validation arguments.")
+    if command == "input-on" and not confirmed:
+        raise LoadError("confirmation_required", "Input ON requires explicit confirmation.")
+    configuration = trigger = scope = None
+    writes = []
+    if command == "trigger-configure":
+        # The contributor script supplies both fields when restoring a full snapshot.
+        trigger = validate_setup(source, interval, restoring=interval is not None)
+        if interval is not None:
+            writes.append(f"TRIG:TIM {trigger['interval_s']:f}")
+        writes.append(f"TRIG:SOUR {SOURCE_TOKENS[source]}")
+    elif transient_setup:
+        scope = command.removeprefix("set-")
+        configuration = _configuration(scope, transient)
+        writes = _sequence(scope, configuration, set_hold=False)
+    elif list_setup:
+        configuration = _finite_list(list_configuration)
+        writes = _list_writes(configuration)
+    elif needs_expected:
+        if (not isinstance(expected, dict) or set(expected) != {"function", "configuration", "trigger"}
+                or not isinstance(expected["trigger"], dict)
+                or set(expected["trigger"]) not in ({"source"}, {"source", "interval_s"})):
+            raise LoadError("argument_error", "Supply function, complete configuration and expected Trigger Setup.")
+        trigger = validate_setup(**expected["trigger"])
+        function = expected["function"]
+        if function == "LIST" and command in {"input-on", "list-trigger"}:
+            configuration = _finite_list(expected["configuration"])
+        elif function in ("CC", "CV", "CR", "CW") and command != "list-trigger":
+            scope = f"transient-{function.lower()}"
+            configuration = _configuration(scope, expected["configuration"])
+        else:
+            raise LoadError("argument_error", "Function does not match the Trigger validation command.")
+        if command in {"transient-trigger", "list-trigger"}:
+            writes = [software_trigger(trigger["source"])]
+        else:
+            writes = ["INP ON" if command == "input-on" else "TRAN ON"]
+    elif command in {"input-off", "transient-disable", "list-exit"}:
+        writes = [{"input-off": "INP OFF", "transient-disable": "TRAN OFF",
+                   "list-exit": "FUNC:MODE FIX"}[command]]
+    marker = {"validation_only": True, "validation_scope": "trigger"}
+    if mode == "dry-run":
+        return {**marker, "command": command, "hardware_access": False,
+                "planned_writes": ["SYST:REM", *writes] if writes else []}
+    if command == "input-on" and trigger["source"] == "MANUAL":
+        raise LoadError("unsupported_live_scope",
+                        "MANUAL Trigger powered contributor LIVE is not physically validated.")
+    with c.open_session(resource) as (session, runtime):
+        if scope is not None or command in {"input-off", "transient-disable"}:
+            setup_writes = writes if transient_setup else []
+            result = _perform(session, command, scope or "transient-cc", configuration, setup_writes,
+                              stop, trigger=trigger, trigger_scope=True)
+        else:
+            parse_identity(c._query(session, "*IDN?"))
+            if command == "trigger-status":
+                result = {**_serial(_trigger_snapshot(session)), "input_state": c._flag(session, "INP:STAT?"),
+                          "state_source": "instrument_readback"}
+            elif command == "trigger-configure":
+                result = _configure_trigger(session, trigger, writes, stop)
+            else:
+                result = _validation_list(session, command, configuration, trigger, writes, stop)
+        return {**result, **marker, "visa": runtime}
 
 
 def _execute_led_or_slow_rise(command, *, scope, mode, resource, current, resistance,

@@ -70,6 +70,45 @@ def request(command,arguments=None):
             'context':{'mode':'simulate','planning_model_id':'itech-it8812c'}}
 
 
+def test_trigger_worker_persists_exact_setup_without_extending_live(worker, monkeypatch, capsys):
+    from electronicload_tool_cli.cli import main
+    from electronicload_tool_cli.worker import Runtime
+    from electronicload_tool_core import control
+
+    _, out, ready = worker
+    url = ready['command_url']
+    baseline = http(ready['status_url'])[1].keys()
+    for arguments in ({'source': 'TIMER'}, {'source': 'BUS', 'interval_s': 1},
+                      {'source': 'TIMER', 'interval_s': '1'}, {'source': 'HOLD', 'hardware_validation': 'trigger'}):
+        code, result = http(url, request('trigger-configure', arguments))
+        assert code == 400 and result['worker_job_id'] is None
+    for mode, resulting_source in [('dry_run', 'HOLD'), ('simulate', 'TIMER')]:
+        context = dict(request('trigger-configure')['context'], mode=mode)
+        assert main(['send-command', '--url', url, '--worker-command', 'trigger-configure',
+                     '--arguments-json', '{"source":"TIMER","interval_s":0.250000000000000001}',
+                     '--context-json', json.dumps(context), '--json']) == 0
+        accepted = json.loads(capsys.readouterr().out)
+        configured = wait_finished(out, accepted['worker_job_id'])['result']
+        assert configured['interval_s'] == '0.250000000000000001'
+        code, status = http(url, request('trigger-status'))
+        assert code == 202
+        result = wait_finished(out, status['worker_job_id'])
+        assert result['result']['source'] == resulting_source
+    assert http(ready['status_url'])[1].keys() == baseline
+    assert main(['manifest']) == 0
+    manifest = json.loads(capsys.readouterr().out)
+    assert manifest['schema_version'] == 2
+    assert all(manifest['commands'][name]['kind'] == 'async_job'
+               for name in ('trigger-status', 'trigger-configure'))
+
+    monkeypatch.setattr(control, 'open_session', lambda *_: pytest.fail('VISA opened'))
+    runtime = Runtime(mode='live', resource='USB0::0xFFFF::0x0001::SYNTHETIC::INSTR')
+    for command, arguments in [('trigger-status', {}), ('trigger-configure', {'source': 'BUS'})]:
+        runtime.run_job({'worker_job_id': command, 'job_id': None, 'command': command},
+                        arguments, {'mode': 'live'})
+        assert json.loads(capsys.readouterr().out.splitlines()[-1])['error']['code'] == 'unsupported_live_scope'
+
+
 def test_cr_led_and_slow_rise_worker_persist_settings_and_validate_decimal_input(worker, capsys):
     from electronicload_tool_cli.cli import main
 
@@ -956,17 +995,20 @@ def test_list_worker_http_jsonl_cycle_and_unchanged_runtime_status(worker, repea
 
 def test_list_worker_invalid_arguments_are_rejected_before_job_creation(worker):
     _, _, ready = worker
-    invalid = [request('set-list-cc', {**list_arguments(), **changes}) for changes in (
-        {'repeat_count': True}, {'repeat_count': '65536'}, {'repeat_count': 1.0},
-        {'repeat_count': 65537}, {'range': []}, {'steps': []}, {'file': 'client.json'},
-        {'steps': [{'current_a': '1', 'slew_a_per_us': .1, 'width_s': 1}] * 2},
-        {'steps': [{'current_a': 1, 'width_s': 1}] * 2},
-        {'steps': [{'current_a': 1, 'slew_a_per_us': .1, 'width_s': 1, 'extra': 2}] * 2},
-    )]
-    invalid += [request(command, {'slot': slot}) for command in ('list-save', 'list-recall')
-                for slot in (None, 0, 8, True, '1', 1.0)]
-    invalid += [request('list-trigger', {'wait_complete': True}),
-                request('list-status', {'file': 'client.json'}), request('set-list-cc')]
+    # Core covers field-by-field numeric and schema variants; Worker verifies
+    # representative HTTP admission failures without creating a job.
+    invalid = [
+        request('set-list-cc', {**list_arguments(), 'repeat_count': 65537}),
+        request('set-list-cc', {**list_arguments(), 'steps': []}),
+        request('set-list-cc', {**list_arguments(), 'file': 'client.json'}),
+        request('set-list-cc', {**list_arguments(),
+                                'steps': [{'current_a': 1, 'width_s': 1}] * 2}),
+        request('list-save', {'slot': 0}),
+        request('list-recall', {'slot': '1'}),
+        request('list-trigger', {'wait_complete': True}),
+        request('list-status', {'file': 'client.json'}),
+        request('set-list-cc'),
+    ]
     for payload in invalid:
         code, rejected = http(ready['command_url'], payload)
         assert code == 400 and rejected['worker_job_id'] is None

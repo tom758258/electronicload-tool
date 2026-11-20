@@ -24,6 +24,7 @@ from electronicload_tool_core.simulator import ControlSimulator
 from electronicload_tool_core.trace import (CONFIG_FIELDS, CSV_FIELDS, TRACE_COMMANDS,
                                            execute as trace_execute,
                                            validate_configuration, validate_csv)
+from electronicload_tool_core.trigger import validate_setup as validate_trigger_setup
 from electronicload_tool_core.visa import TraceSessionLost, mark_session_untrusted, validate_connection
 from .json_input import decode_decimal_json
 
@@ -131,6 +132,8 @@ class Runtime:
                 latch=arguments.get("latch"),
                 seconds=arguments.get("seconds"),
                 count=arguments.get("count"),
+                trigger_source=arguments.get("source"),
+                trigger_interval=arguments.get("interval_s"),
             )
         return read_execute(command, mode=core_mode, resource=self.resource,
                             backend=self.backend, model_id=MODEL_ID,
@@ -250,6 +253,7 @@ def _arguments(command, raw, runtime):
                  {"voltage", "latch"} if command == "set-von" else
                  {"seconds"} if command == "set-input-timer" else
                  {"count"} if command == "set-average" else
+                 {"source", "interval_s"} if command == "trigger-configure" else
                  CONFIG_FIELDS if command == "trace-configure" else
                  CSV_FIELDS if command == "trace-start" else
                  {"metric"} if command in NATIVE_MEASUREMENTS else
@@ -271,6 +275,10 @@ def _arguments(command, raw, runtime):
         validate_metric(command, raw["metric"])
     if command == "set-average":
         validate_average(raw.get("count"))
+    if command == "trigger-configure":
+        if "interval_s" in raw and type(raw["interval_s"]) not in (int, float, Decimal):
+            raise LoadError("argument_error", "Trigger interval_s must be a JSON number.")
+        validate_trigger_setup(raw.get("source"), raw.get("interval_s"))
     if command == "set-input-timer":
         validate_input_timer(raw.get("seconds"))
     if command == "set-list-cc":
@@ -352,7 +360,7 @@ def _handler(runtime):
                         and isinstance(value.get("arguments"), dict)):
                     # Core must validate the original decimal tokens.
                     value["arguments"] = json.loads(body, parse_float=Decimal)["arguments"]
-                if value.get("command") in (*LIST_COMMANDS, *TRACE_COMMANDS):
+                if value.get("command") in (*LIST_COMMANDS, *TRACE_COMMANDS, "trigger-configure"):
                     # Preserve nested numeric tokens; reject duplicate fields/nonfinite JSON.
                     value = decode_decimal_json(body)
                 return value

@@ -14,6 +14,7 @@ from .errors import LoadError, communication_error
 from .identity import MODEL_ID, parse_identity
 from .visa import open_session, require_trusted_session, validate_connection
 from .simulator import ControlSimulator
+from .trigger import TRIGGER_COMMANDS, software_trigger, validate_setup as validate_trigger_setup
 
 TRANSIENT_SETUP_COMMANDS = {"set-transient-cc": "CC", "set-transient-cv": "CV",
                             "set-transient-cr": "CR", "set-transient-cw": "CW"}
@@ -36,7 +37,8 @@ SLOW_RISE_QUERY = "CURR:SLEW:STAT?"
 RESISTANCE_FUNCTIONS = {"RES", "RESISTANCE"}
 CONTROL_COMMANDS = ("set-cc", "set-cv", "set-cr", "set-cw", "input-on", "input-off",
                     *TRANSIENT_COMMANDS, *LIST_COMMANDS, *AUXILIARY_COMMANDS, *INPUT_TIMER_COMMANDS,
-                    *AVERAGE_COMMANDS, "set-cr-led", "cr-led-status", *SLOW_RISE_COMMANDS)
+                    *AVERAGE_COMMANDS, "set-cr-led", "cr-led-status", *SLOW_RISE_COMMANDS,
+                    *TRIGGER_COMMANDS)
 FIXED_RANGE_COMMANDS = ("set-cc", "set-cv", *CR_COMMANDS)
 FIXED_RANGE_CHOICES = ("auto", "low", "high")
 TRANSIENT_FIELDS = frozenset({"transient_mode", "range", "level_a", "level_b", "rise_slew",
@@ -285,6 +287,7 @@ def _list_simulation(session, command, configuration, slot, stop):
             raise LoadError("input_not_on", "LIST trigger requires Input ON.")
         if _flag(session, "INP:SHOR:STAT?") != "OFF":
             raise LoadError("unsafe_mode", "Short must be OFF.")
+        software_trigger(session.trigger_source)
         check_stop()
         previous = session.list_last_trigger
         session.list_last_trigger = {"sequence": previous["sequence"] + 1 if previous else 1,
@@ -337,6 +340,11 @@ def _transient_simulation(session, command, configuration, stop):
             raise LoadError("transient_not_enabled", "Trigger requires enabled Transient setup.")
         if _flag(session, "INP:STAT?") != "ON":
             raise LoadError("input_not_on", "Trigger requires Input ON.")
+        if _flag(session, "INP:SHOR:STAT?") != "OFF":
+            raise LoadError("unsafe_mode", "Short must be OFF.")
+        software_trigger(session.trigger_source)
+        if stop is not None and stop.is_set():
+            raise LoadError("stopping", "Transient trigger was blocked because Worker is stopping.")
         previous = session.last_trigger
         session.last_trigger = {"sequence": previous["sequence"] + 1 if previous else 1,
                                 "accepted_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -1129,7 +1137,8 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
             list_configuration: dict | None = None, slot: int | None = None,
             rise_slew: object | None = None, fall_slew: object | None = None,
             latch: str | None = None, seconds: int | None = None,
-            count: int | None = None, vdrop: object | None = None) -> dict:
+            count: int | None = None, vdrop: object | None = None,
+            trigger_source: str | None = None, trigger_interval: object | None = None) -> dict:
     if command not in CONTROL_COMMANDS or mode not in {"live", "simulate", "dry-run"}:
         raise LoadError("argument_error", "Unknown control command or mode.")
     if model_id != MODEL_ID:
@@ -1137,6 +1146,38 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
     validate_connection(resource, backend, required=mode == "live")
     if mode == "simulate":
         require_trusted_session(simulator)
+    if command in TRIGGER_COMMANDS or hardware_validation == "trigger":
+        if any(value is not None for value in (current, voltage, resistance, power,
+                range_name, slot, rise_slew, fall_slew, latch, seconds, count, vdrop)):
+            raise LoadError("argument_error", "Unexpected Trigger Setup arguments.")
+        if command != "trigger-configure" and (trigger_source is not None or trigger_interval is not None):
+            raise LoadError("argument_error", "Trigger Source and Interval require trigger-configure.")
+        if hardware_validation == "trigger":
+            from .hardware_validation import execute_trigger
+
+            return execute_trigger(command, mode=mode, resource=resource, source=trigger_source,
+                                   interval=trigger_interval, transient=transient,
+                                   list_configuration=list_configuration, expected=validation_settings,
+                                   confirmed=confirmed, stop=stop)
+        if (hardware_validation is not None or validation_settings is not None or confirmed
+                or transient is not None or list_configuration is not None):
+            raise LoadError("argument_error", "Unexpected Trigger Setup arguments.")
+        if mode == "live":
+            raise LoadError("unsupported_live_scope", "Trigger Setup is offline only.")
+        settings = (validate_trigger_setup(trigger_source, trigger_interval)
+                    if command == "trigger-configure" else {})
+        if mode == "dry-run":
+            return {"command": command, "hardware_access": False,
+                    **{key: str(value) for key, value in settings.items()}}
+        simulated = simulator or ControlSimulator()
+        if settings:
+            _mutation_off(simulated, stop)
+            simulated.trigger_source = settings["source"]
+            simulated.trigger_interval = settings.get("interval_s", simulated.trigger_interval)
+        return {"source": simulated.trigger_source, "interval_s": str(simulated.trigger_interval),
+                "state_source": "simulate"}
+    if trigger_source is not None or trigger_interval is not None:
+        raise LoadError("argument_error", "Trigger Source and Interval require trigger-configure.")
     if command == "set-cr-led":
         if (any(value is not None for value in (current, voltage, power, transient,
                 list_configuration, slot, rise_slew, fall_slew, latch, seconds, count)) or confirmed):
