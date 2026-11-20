@@ -1191,6 +1191,9 @@ and trusted communication. The script separately checks
 software and hardware power defaults and restores their saved values without
 resetting the instrument. The shareable report records trip, register,
 measurement, OFF and restoration results without the VISA resource string.
+When the CLI returns partial write progress, the report's
+`protection_write_progress` records confirmed setting values, unconfirmed
+writes, and settings that were never attempted.
 The contributor scope does not open Product or Worker LIVE.
 
 The register meanings, Clear behavior and configuration syntax are in the

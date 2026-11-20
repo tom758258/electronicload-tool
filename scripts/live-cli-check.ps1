@@ -198,7 +198,8 @@ function Save-Report {
         }
         if ($entry.Contains('confirmed_input_state')) { $case.input_state = $entry.confirmed_input_state }
         foreach ($field in @('protection_state','protection_condition','protection_events',
-                             'protection_settings','protection_fixed_cc','protection_measurements')) {
+                             'protection_settings','protection_fixed_cc','protection_measurements',
+                             'protection_write_progress')) {
             if ($entry.Contains($field)) { $case[$field] = $entry[$field] }
         }
         if ($entry.status -eq 'PASS') {
@@ -373,6 +374,28 @@ function Save-CommandArtifacts($Artifact) {
         $Artifact.exitStatus, [Text.UTF8Encoding]::new($false))
 }
 
+function Get-ProtectionWriteProgress($Details) {
+    if ($Details.confirmed -isnot [pscustomobject] -or
+        $Details.unconfirmed -isnot [array] -or $Details.not_attempted -isnot [array]) { return }
+
+    # Keep only setting names and typed readbacks in the shareable report.
+    $settings = @('software_current_enabled','software_current_limit','software_current_delay',
+                  'software_power_limit','software_power_delay','hardware_power_limit')
+    $confirmed = [ordered]@{}
+    foreach ($field in $settings) {
+        $value = $Details.confirmed.$field
+        $valid = if ($field -ceq 'software_current_enabled') { $value -is [bool] } else {
+            $value -is [string] -and $value -cmatch '\A[+-]?[0-9]+(?:\.[0-9]+)?(?:[Ee][+-]?[0-9]+)?\z'
+        }
+        if ($valid) { $confirmed[$field] = $value }
+    }
+    return [ordered]@{
+        confirmed = $confirmed
+        unconfirmed = @($Details.unconfirmed | Where-Object { $_ -is [string] -and $_ -cin $settings })
+        not_attempted = @($Details.not_attempted | Where-Object { $_ -is [string] -and $_ -cin $settings })
+    }
+}
+
 function Invoke-LiveCommand([string]$Command, [string]$CaseName,
                             [string[]]$ExtraArgs = @(),
                             [int]$DeadlineMs = 30000,
@@ -446,6 +469,10 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
             $code = [string]$result.error.code
             $details = $result.error.details
             $entry['error_code'] = $(if ($code -cmatch '^[a-z_]+$') { $code } else { 'execution_failed' })
+            if ($Command -ceq 'protection-set' -and $result.ok -eq $false) {
+                $progress = Get-ProtectionWriteProgress $details
+                if ($null -ne $progress) { $entry['protection_write_progress'] = $progress }
+            }
             if ($CaseName.StartsWith('protection-') -and $result.ok -eq $false -and
                 $null -eq $details.cleanup_errors) {
                 if ($details.input_state -cin @('ON','OFF')) {
