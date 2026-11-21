@@ -1788,6 +1788,20 @@ def test_configuration_readback_worker_uses_session_and_async_contract(worker, c
     assert job("fixed-status", mode="dry_run")["result"]["planned_writes"] == []
     job("trace-configure", {"source": "VOLT", "points": 8, "interval_s": 0.125})
     assert job("trace-status")["result"]["points"] == 8
+    job("set-transient-cc", {"transient_mode": "pulse", "range": "low", "level_a": 0.25,
+                             "level_b": 0.5, "rise_slew": 0.1, "fall_slew": 0.2, "pulse_width": 0.001})
+    fixed = job("fixed-status")["result"]
+    assert fixed["function_mode"] == "FIX" and fixed["active_mode"] == "fixed"
+    assert fixed["current_a"] == 0.25 and fixed["transient_enabled"] is False
+    assert job("transient-status")["result"]["configured"] is True
+    job("transient-enable")
+    assert job("fixed-status")["error"]["code"] == "mode_not_fixed"
+    summary = job("readback")["result"]
+    assert summary["active_mode"] == "transient"
+    assert summary["configuration"] == {"transient_mode": "pulse", "range": "low",
+                                        "level_a_a": 0.25, "level_b_a": 0.5}
+    job("transient-disable")
+    assert job("fixed-slew-status")["result"]["active_mode"] == "fixed"
     job("set-list-cc", {"range": "low", "repeat_count": 1, "steps": [
         {"current_a": 0.25, "slew_a_per_us": 0.1, "width_s": 0.001},
         {"current_a": 0.5, "slew_a_per_us": 0.1, "width_s": 0.001},

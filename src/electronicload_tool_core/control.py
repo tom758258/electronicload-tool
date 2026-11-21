@@ -13,7 +13,7 @@ from time import monotonic, sleep
 from .errors import LoadError, communication_error
 from .identity import MODEL_ID, parse_identity
 from .visa import open_session, require_trusted_session, validate_connection
-from .simulator import ControlSimulator
+from .simulator import ControlSimulator, list_settings, transient_settings
 from .trigger import TRIGGER_COMMANDS, software_trigger, validate_setup as validate_trigger_setup
 
 TRANSIENT_SETUP_COMMANDS = {"set-transient-cc": "CC", "set-transient-cv": "CV",
@@ -271,6 +271,7 @@ def _list_simulation(session, command, configuration, slot, stop):
     """Control state only; no physical LIST engine, SCPI, timer or completion claim."""
     if command == "list-status":
         return session.list_status()
+    expected_settings = list_settings(configuration) if command == "set-list-cc" else None
 
     def check_stop():
         if stop is not None and stop.is_set():
@@ -321,13 +322,19 @@ def _list_simulation(session, command, configuration, slot, stop):
             session.list_slot = slot
         elif command == "list-exit":
             session.mode = "FIX"
-    return session.list_status()
+    status = session.list_status()
+    if expected_settings is not None and (not status["selected"]
+                                          or status["configuration"] != expected_settings):
+        raise LoadError("readback_mismatch", "LIST setup did not match simulated readback.", 3)
+    return status
 
 
 def _transient_simulation(session, command, configuration, stop):
     """Control state only: no SCPI, waveform, timer or physical completion claim."""
     if command == "transient-status":
         return session.transient_status()
+    function = TRANSIENT_SETUP_COMMANDS.get(command)
+    expected_settings = transient_settings(function, configuration) if function else None
     if stop is not None and stop.is_set():
         raise LoadError("stopping", "Transient control was blocked because Worker is stopping.")
     if (command in {*TRANSIENT_SETUP_COMMANDS, "transient-enable"}
@@ -358,8 +365,8 @@ def _transient_simulation(session, command, configuration, stop):
             session.transient_configuration = dict(configuration)
             session.last_trigger = None
             session.mode = "TRAN"
-            session.transient_function = TRANSIENT_SETUP_COMMANDS[command]
-            session.function = TRANSIENT_FUNCTIONS[session.transient_function]
+            session.transient_function = function
+            session.function = TRANSIENT_FUNCTIONS[function]
         elif command == "transient-enable":
             if session.transient_configuration is None:
                 raise LoadError("transient_not_configured", "Enable requires Transient setup.")
@@ -367,7 +374,15 @@ def _transient_simulation(session, command, configuration, stop):
             session.transient_enabled = True
         elif command == "transient-disable":
             session.transient_enabled = False
-    return session.transient_status()
+    status = session.transient_status()
+    if expected_settings is not None and (status["function"] != function or status["enabled"]
+                                          or status["configuration"] != expected_settings):
+        raise LoadError("readback_mismatch", "Transient setup did not match simulated readback.", 3)
+    if command in {"transient-enable", "transient-disable"}:
+        enabled = command == "transient-enable"
+        if status["enabled"] != enabled or (_flag(session, "TRAN?") == "ON") != enabled:
+            raise LoadError("readback_mismatch", "Transient enable state did not match readback.", 3)
+    return status
 
 
 def validate_voltage(value: object, range_name: str) -> Decimal:

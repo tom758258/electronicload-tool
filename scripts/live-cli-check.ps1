@@ -46,7 +46,13 @@ param(
     [int]$TriggerListRepeat = 1,
     [string]$TriggerExternalSetup,
     [switch]$PlanOnly,
-    [switch]$DebugArtifacts
+    [switch]$DebugArtifacts,
+    [decimal]$ExpectedRiseSlew,
+    [decimal]$ExpectedFallSlew,
+    [decimal]$ExpectedVonThreshold,
+    [ValidateSet('on','off')][string]$ExpectedVonLatch,
+    [ValidateSet('on','off')][string]$ExpectedShort,
+    [ValidateRange(2,16)][int]$ExpectedAverageCount
 )
 
 $ErrorActionPreference = 'Stop'
@@ -192,6 +198,8 @@ function Save-Report {
         if ($entry.Contains('error_code')) { $case.error_code = $entry.error_code }
         if ($entry.Contains('expected_error')) { $case.expected_error = $entry.expected_error }
         if ($entry.Contains('expected_range')) { $case.expected_range = $entry.expected_range }
+        if ($entry.Contains('expected_readback')) { $case.expected_readback = $entry.expected_readback }
+        if ($entry.Contains('readback_comparison')) { $case.readback_comparison = $entry.readback_comparison }
         if ($entry.Contains('condition')) { $case.condition = $entry.condition }
         if ($entry.Contains('origin_function')) { $case.origin_function = $entry.origin_function }
         foreach ($field in @('trace_source','trace_points','trace_interval_s','trace_sample_count',
@@ -205,7 +213,7 @@ function Save-Report {
                              'protection_write_progress')) {
             if ($entry.Contains($field)) { $case[$field] = $entry[$field] }
         }
-        if ($entry.status -eq 'PASS') {
+        if ($entry.status -eq 'PASS' -or $entry.readback_comparison -in @('OBSERVED ONLY','MISMATCH')) {
             if ($entry.command -in @('input-state','input-on','input-off','input-timer-status',
                                      'trigger-configure','trigger-status')) {
                 $case.input_state = $entry.response.result.input_state
@@ -578,7 +586,7 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
             $result.result | Add-Member -MemberType NoteProperty -Name read_timestamp_utc_plus_8 `
                 -Value $stampMatch.Groups[1].Value -Force
         }
-        $entry.status = 'PASS'
+        $entry.status = if ($entry.Contains('readback_comparison')) { 'NOT RUN' } else { 'PASS' }
         $entry['response'] = $result
         if ($null -ne $result.result.visa) {
             # Compare metadata before shortening library paths in shareable output.
@@ -611,6 +619,9 @@ function Fail-Case([string]$Name, [string]$Code, [string]$Message) {
     if ($null -ne $case) {
         $case.status = 'FAIL'
         $case['error_code'] = $Code
+        if ($case.Contains('readback_comparison') -and $Code -ceq 'readback_mismatch') {
+            $case.readback_comparison = 'MISMATCH'
+        }
     }
     throw $Message
 }
@@ -1363,12 +1374,36 @@ try {
         @{name='measure-off';command='measure';args=@()}
     )
     if ($readbackSelected) {
+        $baselineParameters = @{
+            'fixed-slew-status' = @{rise_slew_a_per_us='ExpectedRiseSlew';fall_slew_a_per_us='ExpectedFallSlew'}
+            'von-status' = @{threshold_v='ExpectedVonThreshold';latch='ExpectedVonLatch'}
+            'short-status' = @{short_state='ExpectedShort'}
+            'average-status' = @{average_count='ExpectedAverageCount'}
+        }
         foreach ($command in @('readback','fixed-status','fixed-slew-status','von-status','short-status','average-status')) {
             $expected = @{state_source='instrument_readback'}
             if ($command -in @('readback','fixed-status','fixed-slew-status')) {
                 $expected += @{active_mode='fixed';function='CC';input_state='OFF'}
             }
-            $planned += @{name=$command;command=$command;args=$readbackScope;readback_expected=$expected}
+            $step = @{name=$command;command=$command;args=$readbackScope;readback_expected=$expected}
+            if ($baselineParameters.ContainsKey($command)) {
+                $baseline = @{}
+                foreach ($field in $baselineParameters[$command].Keys) {
+                    $parameter = $baselineParameters[$command][$field]
+                    if ($PSBoundParameters.ContainsKey($parameter)) { $baseline[$field] = $PSBoundParameters[$parameter] }
+                }
+                if ($baseline.Count -eq $baselineParameters[$command].Count) {
+                    if ($baseline.ContainsKey('latch')) { $baseline.latch = $baseline.latch.ToLowerInvariant() }
+                    if ($baseline.ContainsKey('short_state')) { $baseline.short_state = $baseline.short_state.ToUpperInvariant() }
+                    $expected += $baseline
+                    $step.readback_expected = $expected
+                    $step.expected_readback = $baseline
+                } else {
+                    $step.condition = 'Settings are observed only without all expected values for this command.'
+                }
+                $step.check_readback_settings = $true
+            }
+            $planned += $step
         }
     }
     if ('cc' -in $selectedModes) {
@@ -1600,6 +1635,8 @@ try {
         $entry = [ordered]@{name=$_.name;command=$_.command;arguments=$_.args;status='NOT RUN'}
         if ($_.ContainsKey('expected_error')) { $entry['expected_error'] = $_.expected_error }
         if ($_.ContainsKey('condition')) { $entry['condition'] = $_.condition }
+        if ($_.ContainsKey('expected_readback')) { $entry['expected_readback'] = $_.expected_readback }
+        if ($_.ContainsKey('check_readback_settings')) { $entry['readback_comparison'] = 'NOT RUN' }
         $entry
     })
     $plannedRanges = @{}
@@ -1636,6 +1673,7 @@ try {
     Write-Host "Plan: Identify, Input State, Measure."
     if ($readbackSelected) {
         Write-Host 'Readback requires Fixed CC and confirmed Input OFF. It queries existing settings only.'
+        Write-Host 'Use known front-panel settings as expected values. Incomplete comparisons are recorded as NOT RUN.'
     }
     if ($protectionSelected) {
         Write-Host 'Protection: independent software current trip, software power trip and hardware power limit trials at 0.20 A.'
@@ -1877,6 +1915,16 @@ try {
             $step.readback_expected.state_source = 'instrument_readback'
             Assert-ReadbackFields $result.result $step.readback_expected $step.name
         }
+        if ($step.ContainsKey('check_readback_settings')) {
+            $entry = $report.results | Where-Object { $_.name -eq $step.name } | Select-Object -First 1
+            if (-not $step.ContainsKey('expected_readback')) {
+                $entry.readback_comparison = 'OBSERVED ONLY'
+                Write-Host "NOT RUN $($step.name): observed values without a complete expected setting."
+                continue
+            }
+            $entry.readback_comparison = 'MATCHED'
+            $entry.status = 'PASS'
+        }
         if ($step.ContainsKey('transient_expected')) {
             Assert-ReadbackFields $result.result.configuration $step.transient_expected $step.name
         }
@@ -1898,10 +1946,16 @@ try {
     }
     if ($triggerSelected) { Invoke-TriggerValidation }
     if ($protectionSelected) { Invoke-ProtectionValidation }
-    $report.status = 'PASS'
+    $report.status = if ($readbackSelected -and ($report.results.readback_comparison -contains 'OBSERVED ONLY')) {
+        'OBSERVED ONLY'
+    } else { 'PASS' }
     Save-Report
     Show-Summary
-    Write-Host 'PASS: one-run CLI LIVE validation.'
+    if ($report.status -eq 'OBSERVED ONLY') {
+        Write-Host 'Readback complete. Only comparisons with supplied expected values were verified.'
+    } else {
+        Write-Host 'PASS: one-run CLI LIVE validation.'
+    }
     exit 0
 } catch {
     if ($report.status -ne 'BLOCKED') {
@@ -2055,7 +2109,7 @@ try {
     }
     Save-Report
     if ($null -ne $reportDirectory) {
-        if ($report.status -ne 'PASS' -and $report.status -ne 'PLAN ONLY') { Show-Summary }
+        if ($report.status -notin @('PASS','PLAN ONLY','OBSERVED ONLY')) { Show-Summary }
         Write-Host "Report: $reportDirectory/shareable/report.json"
         if ($DebugArtifacts) { Write-Host "Private debug logs: $reportDirectory/private (review before sharing)" }
     }

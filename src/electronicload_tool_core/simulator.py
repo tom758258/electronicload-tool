@@ -85,12 +85,7 @@ class ControlSimulator:
         self.protection_events = 0
 
     def list_settings(self) -> dict:
-        configuration = self.list_configuration
-        # LIST width/slew have no documented decimal step; retain all accepted digits.
-        return {"range": configuration["range"], "repeat_count": configuration["repeat_count"],
-                "steps": [{"current_a": float(step["current_a"]),
-                           "slew_a_per_us": str(step["slew_a_per_us"]),
-                           "width_s": str(step["width_s"])} for step in configuration["steps"]]}
+        return list_settings(self.list_configuration)
 
     def list_status(self) -> dict:
         configuration = self.list_configuration
@@ -258,6 +253,14 @@ class ControlSimulator:
             self.trace_filter = value
         else:
             raise ValueError("Unknown or unarmed simulator TRACE command")
+
+
+def list_settings(configuration) -> dict:
+    # LIST width/slew have no documented decimal step; retain all accepted digits.
+    return {"range": configuration["range"], "repeat_count": configuration["repeat_count"],
+            "steps": [{"current_a": float(step["current_a"]),
+                       "slew_a_per_us": str(step["slew_a_per_us"]),
+                       "width_s": str(step["width_s"])} for step in configuration["steps"]]}
 
 
 def transient_settings(function, configuration) -> dict:

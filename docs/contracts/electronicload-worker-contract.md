@@ -121,8 +121,10 @@ with `unsupported_live_scope` before opening VISA.
 
 `readback` returns `active_mode` (`fixed`, `transient`, or `list`),
 `function_mode`, `function`, `transient_enabled`, `input_state`,
-`short_state`, and mode-specific `configuration`. LIST configuration in
-this summary contains the Range, repeat count and step count. `fixed-status`
+`short_state`, and mode-specific `configuration`. Disabled Transient reports
+`active_mode: "fixed"` and `function_mode: "FIX"` unless LIST is selected.
+The Transient summary contains waveform mode, applicable Range and levels
+A/B. The LIST summary contains Range, repeat count and step count. `fixed-status`
 returns the Fixed setpoint in its unit-specific field and the applicable
 Range. `fixed-slew-status` requires Fixed CC and reports `configured` and
 the two slew rates as decimal strings or null before simulated configuration.

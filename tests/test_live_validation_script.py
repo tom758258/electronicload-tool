@@ -582,14 +582,27 @@ def test_configuration_readback_script_plan_preflight_and_noninteractive_refusal
 
     expected = ['input-state', 'measure-off', 'readback', 'fixed-status',
                 'fixed-slew-status', 'von-status', 'short-status', 'average-status']
-    for options, status in [(['-PlanOnly'], 'PLAN ONLY'), ([], 'BLOCKED')]:
+    baseline = ['-ExpectedRiseSlew', '0.1', '-ExpectedFallSlew', '0.2',
+                '-ExpectedVonThreshold', '0', '-ExpectedVonLatch', 'OFF',
+                '-ExpectedShort', 'on', '-ExpectedAverageCount', '8']
+    settings = {'fixed-slew-status': {'rise_slew_a_per_us': 0.1, 'fall_slew_a_per_us': 0.2},
+                'von-status': {'threshold_v': 0, 'latch': 'off'}, 'short-status': {'short_state': 'ON'},
+                'average-status': {'average_count': 8}}
+    for options, status in [(['-PlanOnly', *baseline], 'PLAN ONLY'),
+                            (['-ExpectedRiseSlew', '0.1'], 'BLOCKED')]:
         result = run_script(['-Modes', 'readback', *options])
-        assert result.returncode == (0 if options else 2), result.stdout + result.stderr
+        assert result.returncode == (0 if status == 'PLAN ONLY' else 2), result.stdout + result.stderr
         path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)[-1])
         report = json.loads(path.read_text(encoding='utf-8-sig'))
         assert report['overall_status'] == status and report['hardware_touched'] is False
         assert [case['command'] for case in report['cases'][:1]] == ['input-state']
         assert [case['name'] for case in report['cases']] == expected
         assert all(case['status'] == 'NOT RUN' for case in report['cases'])
-        if not options:
+        for case in report['cases'][-4:]:
+            assert case['readback_comparison'] == 'NOT RUN'
+            if status == 'PLAN ONLY':
+                assert case['expected_readback'] == settings[case['name']]
+            else:
+                assert 'expected_readback' not in case and case['condition']
+        if status == 'BLOCKED':
             assert 'requires an interactive console' in result.stdout

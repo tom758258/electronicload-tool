@@ -62,6 +62,18 @@ def test_list_cycle_save_recall_overwrite_and_snapshot_isolation():
     assert all(key not in second for key in ("completed", "running", "waveform_complete"))
 
 
+def test_configuration_readback_simulated_list_write_detects_a_mismatch():
+    class DifferentWidth(ControlSimulator):
+        def list_status(self):
+            status = super().list_status()
+            status["configuration"]["steps"][0]["width_s"] = "2"
+            return status
+
+    with pytest.raises(LoadError) as failure:
+        run(DifferentWidth(), "set-list-cc", list_configuration=configuration())
+    assert failure.value.code == "readback_mismatch"
+
+
 @pytest.mark.parametrize("level,slew,selected", [
     (0, "0.0001", "low"), (6, "0.25", "low"), (60, "2.5", "high"),
     (Decimal("6.001"), "0.1", "high"), (2, "0.251", "high"),

@@ -393,10 +393,15 @@ def test_offline_modes_do_not_open_visa(command):
     ("CURRENT", {"CURR:RANG?": "0", "CURR?": "1.25e-1"}, {"range": "low", "current_a": 0.125}),
     ("VOLT", {"VOLT:RANG?": "18", "VOLT:RANG:AUTO?": "1", "VOLT?": "3.25"},
      {"range": "low", "range_auto": True, "voltage_v": 3.25}),
+    ("VOLT", {"VOLT:RANG?": "25", "VOLT:RANG:AUTO?": "0", "VOLT?": "25"},
+     {"range": None, "range_readback_v": 25, "voltage_v": 25}),
     ("RESISTANCE", {"RES:RANG?": "7500", "RES?": "50"}, {"range": "high", "resistance_ohm": 50}),
     ("POW", {"POW?": "2.5"}, {"range": None, "power_w": 2.5}),
 ])
-def test_configuration_readback_fixed_queries_only_current_function(fake_visa, function, readings, expected):
+def test_configuration_readback_fixed_queries_only_current_function(
+        fake_visa, monkeypatch, function, readings, expected):
+    writes = []
+    monkeypatch.setattr(type(fake_visa.session), 'write', lambda _, command: writes.append(command), raising=False)
     fake_visa.responses.update({"FUNC:MODE?": "FIXED", "FUNC?": function, "TRAN?": "0",
                                 "INP:SHOR:STAT?": "1", "RES:LED:STAT?": "0", **readings})
     result = execute("readback", resource=RESOURCE, hardware_validation="readback")
@@ -408,7 +413,25 @@ def test_configuration_readback_fixed_queries_only_current_function(fake_visa, f
         "*IDN?", "FUNC:MODE?", "FUNC?", "TRAN?", "INP:STAT?", "INP:SHOR:STAT?", *readings,
         *({"RES:LED:STAT?"} if function == "RESISTANCE" else set()),
     }
+    assert writes == []
     assert fake_visa.calls[-2:] == ["session_close", "manager_close"]
+    fake_visa.failures["FUNC?"] = OSError("query link failed")
+    with pytest.raises(LoadError) as failure:
+        execute("readback", resource=RESOURCE, hardware_validation="readback")
+    assert failure.value.code == "query_failed"
+    assert fake_visa.calls[-2:] == ["session_close", "manager_close"]
+    assert writes == []
+
+
+@pytest.mark.parametrize("function,readings", [
+    ("CURR", {"CURR:RANG?": "6", "CURR?": "60"}),
+    ("RES", {"RES:RANG?": "7500", "RES?": "0"}),
+])
+def test_configuration_readback_fixed_rejects_values_outside_known_range(fake_visa, function, readings):
+    fake_visa.responses.update({"FUNC:MODE?": "FIX", "FUNC?": function, "TRAN?": "0", **readings})
+    with pytest.raises(LoadError) as failure:
+        execute("fixed-status", resource=RESOURCE, hardware_validation="readback")
+    assert failure.value.code == "invalid_response" and failure.value.exit_code == 3
 
 
 @pytest.mark.parametrize("mode,enabled", [("FIX", "1"), ("LIST", "0"), ("LIST", "1")])

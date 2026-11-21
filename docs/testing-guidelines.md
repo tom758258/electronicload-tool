@@ -428,13 +428,17 @@ Run the affected Core, CLI and Worker cases from the repository root.
 ```
 
 Use recording Fake VISA for mode selection, the bounded LIST step count, and
-status replies. Verify query-only operation and LIVE refusal before VISA.
+status replies. Check the compact Transient summary, known Range conflicts,
+and native LIST width readback. Verify query-only operation, session closure
+on errors, and LIVE refusal before VISA. Use simulated status mismatches for
+LIST and Transient write verification.
 Select existing help/version tests when changing CLI arguments. Exercise
 `-Modes readback -PlanOnly` and noninteractive refusal, and the directly
-affected Fixed, Transient, TRACE and Trigger script plans. Use a fictional
-USB Resource and block VISA in child processes. Real-instrument validation
-requires the separate interactive approval and reports physical cases as
-`NOT RUN` in PlanOnly.
+affected Fixed, Transient, TRACE and Trigger script plans. Verify that the
+readback plan records known expected settings and distinguishes any missing
+baseline. Use a fictional USB Resource and block VISA in child processes.
+Real-instrument validation requires the separate interactive approval and
+reports physical cases as `NOT RUN` in PlanOnly.
 
 ## Packaging checks
 

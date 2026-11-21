@@ -20,8 +20,12 @@ TRANSIENT_MODES = {"CONT": "continuous", "CONTINUOUS": "continuous",
                    "PULS": "pulse", "PULSE": "pulse", "TOGG": "toggle", "TOGGLE": "toggle"}
 SLEW_QUERIES = {"rise_slew": "CURR:SLEW:POS", "fall_slew": "CURR:SLEW:NEG"}
 TRANSIENT_LEVEL_QUERIES = {"level_a": "CURR:TRAN:ALEV", "level_b": "CURR:TRAN:BLEV", **SLEW_QUERIES}
-MAX_SETPOINT = {"CC": c.RANGE_LIMITS["high"], "CV": c.CV_RANGE_LIMITS["high"],
-                "CR": c.CR_RANGE_LIMITS["high"][1], "CW": c.CW_MAX_POWER}
+SETPOINT_LIMITS = {
+    "CC": {name: (0, maximum) for name, maximum in c.RANGE_LIMITS.items()},
+    "CV": {name: (c.CV_MIN_VOLTAGE, maximum) for name, maximum in c.CV_RANGE_LIMITS.items()},
+    "CR": c.CR_RANGE_LIMITS,
+    "CW": {None: (0, c.CW_MAX_POWER)},
+}
 FIXED_FIELDS = {"CC": "current_a", "CV": "voltage_v", "CR": "resistance_ohm", "CW": "power_w"}
 SHORT_QUERY = "INP:SHOR:STAT?"
 
@@ -34,7 +38,9 @@ def _selection(session):
     if token not in FUNCTIONS:
         raise LoadError("invalid_response", "Unknown load function.", 3, query="FUNC?")
     enabled = c._flag(session, "TRAN?") == "ON"
-    selected = "list" if mode == "LIST" else "transient" if enabled or simulated_mode else "fixed"
+    selected = "list" if mode == "LIST" else "transient" if enabled else "fixed"
+    if simulated_mode and not enabled:
+        mode = "FIX"
     return {"active_mode": selected, "function_mode": mode, "function": FUNCTIONS[token],
             "transient_enabled": enabled}
 
@@ -48,12 +54,17 @@ def _range(session, function):
             raise LoadError("invalid_range_readback", "Current range readback is outside model limits.",
                             3, query=query)
         return c._range_name(raw), raw
-    limits = c.CV_RANGE_LIMITS if function == "CV" else {
-        name: values[1] for name, values in c.CR_RANGE_LIMITS.items()}
+    limits = {name: maximum for name, (_, maximum) in SETPOINT_LIMITS[function].items()}
     if not 0 <= raw <= limits["high"]:
         raise LoadError("invalid_range_readback", "Range readback is outside model limits.", 3, query=query)
     # The guide describes numeric selectors. Only label the known range endpoints.
     return {value: name for name, value in limits.items()}.get(raw), raw
+
+
+def _bounds(limits, range_name):
+    if range_name in limits:
+        return limits[range_name]
+    return min(lower for lower, _ in limits.values()), max(upper for _, upper in limits.values())
 
 
 def _fixed(session, function):
@@ -66,10 +77,11 @@ def _fixed(session, function):
         settings["range_auto"] = c._flag(session, "VOLT:RANG:AUTO?") == "ON"
     field = FIXED_FIELDS[function]
     query = f"{c.TRANSIENT_FUNCTIONS[function]}?"
-    value = c._number(session, query)
-    if not 0 <= value <= MAX_SETPOINT[function]:
+    value = c._decimal_readback(session, query)
+    minimum, maximum = _bounds(SETPOINT_LIMITS[function], settings["range"])
+    if not minimum <= value <= maximum:
         raise LoadError("invalid_response", "Fixed setpoint is outside model limits.", 3, query=query)
-    return {**settings, field: value}
+    return {**settings, field: float(value)}
 
 
 def fixed_slew_status(session):
@@ -93,43 +105,50 @@ def transient_mode(session, prefix):
     return TRANSIENT_MODES[token]
 
 
-def transient_values(session, prefix, mode):
-    queries = (TRANSIENT_LEVEL_QUERIES if prefix == "CURR" else
+def transient_values(session, prefix, mode, *, summary=False):
+    queries = (TRANSIENT_LEVEL_QUERIES if prefix == "CURR" and not summary else
                {"level_a": f"{prefix}:TRAN:ALEV", "level_b": f"{prefix}:TRAN:BLEV"})
-    if mode == "continuous":
+    if not summary and mode == "continuous":
         queries = {**queries, "width_a": f"{prefix}:TRAN:AWID", "width_b": f"{prefix}:TRAN:BWID"}
-    elif mode == "pulse":
+    elif not summary and mode == "pulse":
         queries = {**queries, "pulse_width": f"{prefix}:TRAN:AWID"}
     return {field: c._decimal_readback(session, query + "?") for field, query in queries.items()}
 
 
-def _transient(session, selection):
+def _transient(session, selection, *, summary=False):
     if isinstance(session, ControlSimulator):
-        return session.transient_status()
+        status = session.transient_status()
+        if not summary:
+            return status
+        configuration = status["configuration"]
+        if configuration is None:
+            raise LoadError("invalid_response", "Enabled Transient has no simulated configuration.", 3)
+        return {key: value for key, value in configuration.items()
+                if key in {"transient_mode", "range"} or key.startswith(("level_a_", "level_b_"))}
     function = selection["function"]
     prefix = c.TRANSIENT_FUNCTIONS[function]
     mode = transient_mode(session, prefix)
-    settings = {"transient_mode": mode}
-    if function != "CW":
-        range_name, raw = _range(session, function)
-        settings["range"] = range_name
-    else:
-        range_name = raw = None
-    values = transient_values(session, prefix, mode)
+    range_name, raw = _range(session, function) if function != "CW" else (None, None)
+    values = transient_values(session, prefix, mode, summary=summary)
+    level_bounds = _bounds(SETPOINT_LIMITS[function], range_name)
     for field, value in values.items():
         if field in {"level_a", "level_b"}:
-            minimum, maximum = 0, MAX_SETPOINT[function]
+            minimum, maximum = level_bounds
         elif field in SLEW_QUERIES:
-            minimum, maximum = c.SLEW_LIMITS["low"][0], c.SLEW_LIMITS["high"][1]
+            minimum, maximum = _bounds(c.SLEW_LIMITS, range_name)
         else:
             minimum, maximum = Decimal("0.00002"), Decimal("3600")
         if not minimum <= value <= maximum:
             raise LoadError("invalid_response", "Transient readback is outside model limits.", 3,
                             field=field)
+    configuration = transient_settings(function, {"transient_mode": mode, "range": range_name, **values})
+    range_readback = float(raw) if raw is not None else None
+    if summary:
+        return {**configuration, "range_readback": range_readback}
     return {"configured": True, "function": function, "mode": mode, "range": range_name,
-            "range_readback": float(raw) if raw is not None else None,
+            "range_readback": range_readback,
             "enabled": selection["transient_enabled"], "last_trigger": None,
-            "configuration": transient_settings(function, {**settings, **values})}
+            "configuration": configuration}
 
 
 def _list_integer(session, query, minimum, maximum):
@@ -151,14 +170,18 @@ def _list_configuration(session, *, summary=False):
                 "repeat_count": repeat, "step_count": count}
     if summary:
         return metadata
+    range_name = metadata["range"]
+    # Native widths above 16383 s hold until the next trigger. The offline
+    # setup ceiling does not apply to values already on the instrument.
+    fields = (
+        ("current_a", "LIST:LEV", _bounds(SETPOINT_LIMITS["CC"], range_name)),
+        ("slew_a_per_us", "LIST:SLEW", _bounds(c.SLEW_LIMITS, range_name)),
+        ("width_s", "LIST:WID", (Decimal("0.00002"), Decimal("Infinity"))),
+    )
     steps = []
     for index in range(1, count + 1):
         step = {}
-        for field, stem, minimum, maximum in (
-            ("current_a", "LIST:LEV", 0, c.RANGE_LIMITS["high"]),
-            ("slew_a_per_us", "LIST:SLEW", c.SLEW_LIMITS["low"][0], c.SLEW_LIMITS["high"][1]),
-            ("width_s", "LIST:WID", Decimal("0.00002"), Decimal("3600")),
-        ):
+        for field, stem, (minimum, maximum) in fields:
             query = f"{stem}? {index}"
             value = c._decimal_readback(session, query)
             if not minimum <= value <= maximum:
@@ -225,7 +248,7 @@ def snapshot(session, command):
     if active == "list":
         settings = _list_status(session, selection, summary=True)
     elif active == "transient":
-        settings = _transient(session, selection)
+        settings = _transient(session, selection, summary=True)
     else:
         settings = _fixed(session, function)
         if function == "CR":

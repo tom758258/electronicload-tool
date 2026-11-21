@@ -60,6 +60,32 @@ def test_transient_complete_cycle_and_trigger_record(mode, function):
     run(sim, 'input-off')
 
 
+@pytest.mark.parametrize('command', ['set-transient-cc', 'transient-enable', 'transient-disable'])
+def test_configuration_readback_simulated_transient_write_detects_a_mismatch(command):
+    class DifferentReadback(ControlSimulator):
+        def transient_status(self):
+            status = super().transient_status()
+            if command == 'set-transient-cc':
+                status['configuration']['level_a_a'] = 3
+            elif self.enabled_mismatch:
+                status['enabled'] = not status['enabled']
+            return status
+
+    sim = DifferentReadback()
+    sim.enabled_mismatch = False
+    if command == 'set-transient-cc':
+        arguments = {'transient': config()}
+    else:
+        run(sim, 'set-transient-cc', transient=config())
+        if command == 'transient-disable':
+            run(sim, 'transient-enable')
+        sim.enabled_mismatch = True
+        arguments = {}
+    with pytest.raises(LoadError) as failure:
+        run(sim, command, **arguments)
+    assert failure.value.code == 'readback_mismatch'
+
+
 @pytest.mark.parametrize('values,selected', [
     ({}, 'low'),
     ({'level_a': '0', 'level_b': '6', 'rise_slew': '.0001', 'fall_slew': '.25'}, 'low'),

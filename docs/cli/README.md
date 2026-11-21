@@ -187,10 +187,9 @@ electronicload-tool scpi-version --resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" 
 ## Offline Measurement Extensions
 
 `measure-min-max`, `measure-discharge`, `set-average` and `average-status`
-support only `--simulate` and `--dry-run`. All four refuse LIVE before opening
-VISA, including with the legacy contributor override. No hardware-validation
-option opens these commands. Simulation and dry-run do not establish physical
-SCPI support or measurement accuracy.
+support `--simulate` and `--dry-run`. All four refuse Product and Worker LIVE
+before opening VISA. The standalone CLI `average-status` also supports the
+contributor scope described in [Configuration readback](#configuration-readback).
 
 ```powershell
 .\.venv\Scripts\electronicload-tool.exe measure-min-max --simulate --json
@@ -502,9 +501,11 @@ Controlled physical trials require the separate hardware-validation path.
 Use `readback` for the selected Fixed, Transient, or LIST mode, Input and
 Short state. Results include `active_mode`, `function_mode`, the regulation
 `function` (CC/CV/CR/CW), `transient_enabled`, and `configuration`. The Core
-uses the function selector and the Transient enable flag together. The LIST
-summary includes Range, repeat count, and step count. Use `list-status` for
-the step settings.
+uses the function selector and the Transient enable flag together. A disabled
+Transient leaves the active mode Fixed unless LIST is selected. The Transient
+summary gives the waveform mode, applicable Range and levels A/B. Use
+`transient-status` for widths and slew. The LIST summary gives Range, repeat
+count, and step count. Use `list-status` for the step settings.
 
 | Command | Settings returned |
 | --- | --- |
@@ -525,8 +526,10 @@ the step settings.
 ```
 
 Each standalone simulation starts with fresh state. Use the same simulated
-Worker for configuration and subsequent status jobs. Simulated Transient
-setup selects its internal `TRAN` mode and reports enable separately.
+Worker for configuration and subsequent status jobs. `configured: true` in
+Transient and LIST status means configuration values are available. The
+instrument can return factory or previously stored settings. The simulator
+returns `false` until configuration is available in that session.
 New status results identify simulation as `state_source: "simulate"`. Dry-run
 validates the request without opening VISA or reading configuration values.
 
@@ -539,6 +542,12 @@ Input Timer, Trigger, and Protection use their existing scopes. These requests
 require the exact IT8812C identity and an explicit USB INSTR Resource with
 System VISA. The new contributor readbacks identify their source as
 `instrument_readback`. Query failures and invalid replies return errors.
+For CV, CR and LIST, a valid numeric Range selector without a known label is
+returned as its raw readback with `range: null`. The IT8812C has a single 250 W
+CW range, so CW reports `range: null` and reads the power setpoint without a
+range query. Native LIST widths above 16,383 seconds are reported as received
+and indicate a hold until the next trigger. The CLI's limits for setting up a
+LIST apply to writes. [ITECH IT8800 User Manual, IT8812C specifications](https://media.digikey.com/pdf/Data%20Sheets/ITech%20Elect%20PDFs/IT8800%20User%20Manual.pdf) [ITECH IT8800 Programming Guide, pp. 57 and 60–61](https://assets.testequity.com/te1/Documents/pdf/itech/ITECH_IT8800-Programming-Guide-EN.pdf#page=67)
 
 ```powershell
 .\.venv\Scripts\electronicload-tool.exe readback --hardware-validation readback --resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" --json
@@ -1128,10 +1137,16 @@ physical Input OFF and V/I/P prechecks. Invalid or empty mode
 names are rejected.
 
 Select `-Modes readback` on its own and start in Fixed CC with Input OFF.
-The script records the observed settings. This selection can run when the
-operator has already configured the instrument from its front panel. The
-Fixed, Transient, Trigger and TRACE selections compare independent status
-queries with the settings of their existing trials.
+Supply known front-panel settings for the cases you want to verify. Use
+`-ExpectedRiseSlew` and `-ExpectedFallSlew` together (A/µs),
+`-ExpectedVonThreshold` (V) and `-ExpectedVonLatch` (`on` or `off`) together,
+`-ExpectedShort` (`on` or `off`), and `-ExpectedAverageCount` (2–16).
+The report records expected and observed values. A comparison passes when
+they match. Without a complete baseline for a command, its comparison is
+`NOT RUN` and the report retains the observed values. A successful run with
+any observation-only case has overall status `OBSERVED ONLY`. Fixed,
+Transient, Trigger and TRACE selections compare independent status queries
+with the settings of their existing trials.
 
 ### Script parameters
 

@@ -588,7 +588,7 @@ def test_configuration_readback_transient_without_setup_or_trigger_assumptions(
                 f"{function}:TRAN:BLEV?": "2", **extras}
     fake_visa.responses.update({"FUNC:MODE?": "FIX", "FUNC?": function, "TRAN?": "0", **readings})
     result = control.execute("transient-status", resource=RESOURCE, hardware_validation="readback")
-    assert result["function"] == name and result["enabled"] is False
+    assert result["configured"] and result["function"] == name and result["enabled"] is False
     assert expected.items() <= result["configuration"].items()
     assert result["input_state"] == "ON" and result["last_trigger"] is None
     assert {call for call in fake_visa.calls if isinstance(call, str) and "?" in call} == {
@@ -596,18 +596,37 @@ def test_configuration_readback_transient_without_setup_or_trigger_assumptions(
     }
 
 
+def test_configuration_readback_transient_summary_and_range_guard(fake_visa):
+    fake_visa.responses.update({"FUNC:MODE?": "FIX", "FUNC?": "CURR", "TRAN?": "1",
+                                "INP:SHOR:STAT?": "0", "CURR:RANG?": "6",
+                                "CURR:TRAN:MODE?": "CONT", "CURR:TRAN:ALEV?": "1",
+                                "CURR:TRAN:BLEV?": "2"})
+    summary = readonly.execute("readback", resource=RESOURCE, hardware_validation="readback")
+    assert summary["active_mode"] == "transient" and summary["transient_enabled"]
+    assert summary["configuration"] == {"transient_mode": "continuous", "range": "low",
+                                        "range_readback": 6, "level_a_a": 1, "level_b_a": 2}
+    assert not any("AWID?" in str(call) or "BWID?" in str(call) or "SLEW" in str(call)
+                   for call in fake_visa.calls)
+    fake_visa.responses["CURR:TRAN:ALEV?"] = "60"
+    with pytest.raises(LoadError) as failure:
+        readonly.execute("readback", resource=RESOURCE, hardware_validation="readback")
+    assert failure.value.code == "invalid_response" and failure.value.details["field"] == "level_a"
+
+
 def test_configuration_readback_list_reads_observed_steps_and_rejects_bad_count(fake_visa):
     readings = {"LIST:RANG?": "15", "LIST:STEP?": "3", "LIST:COUN?": "65536"}
     for index in range(1, 4):
         readings.update({f"LIST:LEV? {index}": str(index), f"LIST:SLEW? {index}": "0.1",
                          f"LIST:WID? {index}": "0.01234567890123456789"})
+    readings["LIST:WID? 1"] = "16384"
     fake_visa.responses.update({"FUNC:MODE?": "LIST", "FUNC?": "CURR", "TRAN?": "0", **readings})
     result = control.execute("list-status", resource=RESOURCE, hardware_validation="readback")
     actual = result["configuration"]
-    assert result["selected"] is True and result["slot"] is None
+    assert result["configured"] and result["selected"] is True and result["slot"] is None
     assert actual["range_readback_a"] == 15 and actual["range"] is None
     assert actual["step_count"] == 3 and actual["repeat_count"] == 65536
     assert [step["current_a"] for step in actual["steps"]] == [1, 2, 3]
+    assert actual["steps"][0]["width_s"] == "16384"
     assert actual["steps"][2]["width_s"] == "0.01234567890123456789"
     assert {call for call in fake_visa.calls if isinstance(call, str) and "?" in call} == {
         "*IDN?", "FUNC:MODE?", "FUNC?", "TRAN?", "INP:STAT?", *readings,
@@ -618,6 +637,11 @@ def test_configuration_readback_list_reads_observed_steps_and_rejects_bad_count(
     summary = readonly.execute("readback", resource=RESOURCE, hardware_validation="readback")
     assert summary["active_mode"] == "list" and summary["configuration"]["step_count"] == 3
     assert "steps" not in summary["configuration"] and "LIST:LEV? 1" not in fake_visa.calls
+
+    fake_visa.responses.update({"LIST:RANG?": "6", "LIST:SLEW? 1": "2"})
+    with pytest.raises(LoadError) as failure:
+        control.execute("list-status", resource=RESOURCE, hardware_validation="readback")
+    assert failure.value.code == "invalid_response" and failure.value.details["query"] == "LIST:SLEW? 1"
 
     fake_visa.calls.clear()
     fake_visa.responses["LIST:STEP?"] = "85"
