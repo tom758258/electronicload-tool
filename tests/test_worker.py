@@ -284,7 +284,18 @@ def test_measurement_worker_admission_results_and_average_state(worker, capsys):
     assert run('set-average', {'count': 8}) == {'average_count': 8}
 
 
-def test_offline_measurement_trace_and_protection_live_jobs_fail_before_visa(fake_visa):
+@pytest.mark.parametrize('commands', [
+    (
+        ('measure-min-max', {}), ('measure-discharge', {}), ('set-average', {'count': 8}),
+        ('average-status', {}), ('trace-start', {}),
+        ('trace-configure', {'source': 'TWO', 'points': 4, 'interval_s': 0.001}),
+        ('protection-status', {'events': True}),
+        ('protection-set', {'confirm': True, 'hardware_power_limit': 0.5}),
+        ('protection-clear', {'confirm': True}),
+    ),
+    (('scpi-error-next', {'all': True}), ('scpi-version', {}), ('display-mode', {})),
+], ids=['measurement_trace_protection', 'system_query'])
+def test_offline_live_jobs_fail_before_visa(fake_visa, commands):
     from http.server import ThreadingHTTPServer
     from electronicload_tool_cli import worker as worker_module
     runtime = worker_module.Runtime(mode='live',
@@ -295,15 +306,7 @@ def test_offline_measurement_trace_and_protection_live_jobs_fail_before_visa(fak
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            for command, arguments in (
-                ('measure-min-max', {}), ('measure-discharge', {}), ('set-average', {'count': 8}),
-                ('average-status', {}), ('trace-start', {}),
-                ('trace-configure', {'source': 'TWO', 'points': 4, 'interval_s': 0.001}),
-                ('protection-status', {'events': True}),
-                ('protection-set', {'confirm': True, 'hardware_power_limit': 0.5}),
-                ('protection-clear', {'confirm': True}),
-                ('measure', {}),
-            ):
+            for command, arguments in (*commands, ('measure', {})):
                 payload = {'schema_version': 3, 'command': command, 'context': {'mode': 'live'},
                            'arguments': arguments}
                 code, accepted = http(runtime.urls()['command_url'], payload)
@@ -326,6 +329,58 @@ def test_offline_measurement_trace_and_protection_live_jobs_fail_before_visa(fak
                     assert terminal['state'] == 'failed' and terminal['result'] is None
                     assert terminal['error']['code'] == 'unsupported_live_scope'
                     assert fake_visa.calls == []
+        finally:
+            server.shutdown()
+            thread.join(timeout=3)
+
+
+def test_system_query_worker_keeps_fifo_across_http_jobs(capsys):
+    from http.server import ThreadingHTTPServer
+    from electronicload_tool_cli import worker as worker_module
+
+    commands = ('scpi-error-next', 'scpi-version', 'display-mode')
+    manifest = worker_module.manifest('0.1.0')
+    assert manifest['schema_version'] == 2 and manifest['worker_protocol']['schema_versions'] == [3]
+    assert all(manifest['commands'][name] == {'kind': 'async_job'} for name in commands)
+
+    runtime = worker_module.Runtime(mode='simulate')
+    runtime.system_query_simulator.error_queue.extend([(-222, 'Data out of range'), (120, 'Overflow')])
+    with ThreadingHTTPServer(('127.0.0.1', 0), worker_module._handler(runtime)) as server:
+        runtime.server, runtime.port = server, server.server_port
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        url = runtime.urls()['command_url']
+
+        def job(command, arguments=None, *, mode='simulate'):
+            payload = request(command, arguments)
+            payload['context']['mode'] = mode
+            code, accepted = http(url, payload)
+            assert code == 202 and accepted['kind'] == 'async_job'
+            runtime.job_thread.join(timeout=3)
+            terminal = json.loads(capsys.readouterr().out.splitlines()[-1])
+            assert terminal['event'] == 'job_finished' and terminal['ok'] is True, terminal['error']
+            assert terminal['worker_job_id'] == accepted['worker_job_id']
+            return terminal['result']
+
+        try:
+            for command, arguments in [
+                ('scpi-error-next', {'all': 1}), ('scpi-error-next', {'all': None}),
+                ('scpi-error-next', {'all': 'true'}), ('scpi-error-next', {'max_reads': 21}),
+                ('scpi-version', {'all': False}), ('display-mode', {'hardware_validation': 'system-query'}),
+            ]:
+                code, refused = http(url, request(command, arguments))
+                assert code == 400 and refused['worker_job_id'] is None
+            plan = job('scpi-error-next', {'all': True}, mode='dry_run')
+            assert plan['queries'] == ['*IDN?', 'SYST:ERR?'] and plan['max_reads'] == 20
+            assert job('scpi-version') == {'scpi_version': '1999.0'}
+            assert job('display-mode') == {'display_mode': 'NORMAL'}
+            job('trace-configure', {'source': 'TWO', 'points': 4, 'interval_s': 0.001})
+            assert job('scpi-error-next') == {'error_code': -222, 'message': 'Data out of range'}
+            assert job('scpi-error-next', {'all': True}) == {
+                'errors': [{'error_code': 120, 'message': 'Overflow'}], 'read_count': 2,
+                'max_reads': 20, 'empty_confirmed': True, 'limit_reached': False,
+            }
+            assert job('scpi-error-next', {'all': False}) == {'error_code': 0, 'message': 'No error'}
         finally:
             server.shutdown()
             thread.join(timeout=3)

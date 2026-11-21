@@ -48,6 +48,9 @@ Common contracts remain authoritative for the HTTP and JSONL envelopes.
 | `measure` | `{}` | `voltage_v`, `current_a`, `power_w` |
 | `measure-min-max` | `{}` or `{"metric":"voltage-min"\|"voltage-max"\|"current-min"\|"current-max"}` | All four native extrema, or only the selected field; offline only |
 | `measure-discharge` | `{}` or `{"metric":"capacity"\|"time"}` | `capacity_ah`, `discharge_time_s`, or only the selected field; offline only |
+| `scpi-version` | `{}` | `scpi_version`, a `YYYY.V` string; offline only |
+| `display-mode` | `{}` | `display_mode`, `NORMAL` or `TEXT`; offline only |
+| `scpi-error-next` | `{}` or `{"all":<boolean>}` | One Error Queue entry or a bounded read summary; offline only |
 | `set-average` | `{"count":<integer 2–16>}` | Integer `average_count`; confirmed Input OFF required; offline only |
 | `average-status` | `{}` | Integer `average_count`, including with Input ON; offline only |
 | `trace-configure` | `{"source":"VOLT"\|"CURR"\|"TWO","points":<integer>,"interval_s":<number>}` | Validated TRACE settings and sample count; offline only |
@@ -102,6 +105,23 @@ A live request uses `context: {"mode": "live"}` with optional matching
 `expected_model_id`. Simulation/dry-run uses the canonical
 `planning_model_id: "itech-it8812c"`; the Worker startup mode constrains the
 request mode. Worker does **not** allow the contributor-validation override.
+
+## Offline System Queries
+
+The three commands are async jobs. Simulation retains the Error Queue across
+jobs in the same Worker and each Error Queue read consumes one FIFO entry.
+`scpi-error-next` with omitted or false `all` returns one integer `error_code`
+and string `message`. A zero code represents an empty queue. With `all: true`,
+it returns `errors` (nonzero entries in order), `read_count` (including any zero
+reply), `max_reads: 20`, `empty_confirmed` and `limit_reached`. A zero on any
+read, including the 20th, confirms empty. A nonzero 20th read reaches the limit
+with the remaining queue state unknown. Nonzero instrument codes are successful
+query data. Dry-run returns the query plan with no queue consumption.
+
+Malformed arguments receive HTTP 400. Valid LIVE requests on a live Worker
+receive HTTP 202 and finish with `unsupported_live_scope` before opening VISA.
+The contributor System Query scope is only available through the standalone CLI.
+[CLI queries and contributor procedure](../cli/README.md#system-queries)
 
 ## Offline Protection
 

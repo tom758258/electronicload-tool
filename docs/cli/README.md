@@ -146,6 +146,44 @@ status is rejected without PyVISA's automatic device-clear recovery. Read-only q
 not require input OFF. Closing the session and resource manager does not turn
 input OFF. A failed query never proves OFF or produces a substitute zero value.
 
+## System Queries
+
+| CLI command | SCPI query after `*IDN?` | Result |
+| --- | --- | --- |
+| `scpi-version` | `SYST:VERS?` | `scpi_version`, a `YYYY.V` string for the SCPI specification |
+| `display-mode` | `DISP:MODE?` | `display_mode`, normalized to `NORMAL` or `TEXT` |
+| `scpi-error-next` | `SYST:ERR?` | One integer `error_code` and string `message` |
+
+Each Error Queue read removes the returned entry. `scpi-error-next --all`
+reads in the same session until it receives code `0` or reaches 20 reads.
+`errors` contains only nonzero entries. `read_count` includes the zero reply
+when present and `max_reads` is 20. A zero reply, including on the 20th read,
+sets `empty_confirmed: true` and `limit_reached: false`. A nonzero 20th reply
+sets `empty_confirmed: false` and `limit_reached: true`. A nonzero instrument
+error code is successful query data. Communication and invalid-response
+failures use the standard CLI error envelope and exit code 3. If a queue read
+fails during `--all`, `error.details.errors` and `error.details.read_count`
+contain the entries parsed before the failure and their count. Whether the
+failed read consumed another entry is unknown. The System Query commands send
+no configuration writes or queue-clear commands.
+
+All three support `--simulate` and `--dry-run`. Dry-run lists `*IDN?` and the
+selected query, with `max_reads` for `--all`. Product LIVE and Worker LIVE
+are blocked.
+
+For separately approved hardware validation, run each query manually using
+the contributor CLI scope, an operator-supplied USB INSTR resource, and
+System VISA. Confirm physical Input OFF before querying. The CLI verifies
+the exact IT8812C identity before sending the query. Use `scpi-error-next`
+only when removing the returned queue entry is intended, and choose `--all`
+explicitly for a bounded read of the queue.
+
+```powershell
+electronicload-tool scpi-version --resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" --backend system --hardware-validation system-query --json
+```
+
+[ITECH IT8800 Programming Guide V2.1, printed pp. 31–33](https://assets.testequity.com/te1/Documents/pdf/itech/ITECH_IT8800-Programming-Guide-EN.pdf#page=41)
+
 ## Offline Measurement Extensions
 
 `measure-min-max`, `measure-discharge`, `set-average` and `average-status`
