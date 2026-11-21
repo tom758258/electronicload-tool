@@ -10,7 +10,14 @@ from pathlib import Path
 from electronicload_tool_core.discovery import discover_resources
 from electronicload_tool_core.errors import LoadError
 from electronicload_tool_core.identity import MODEL_ID
-from electronicload_tool_core.readonly import COMMANDS, NATIVE_MEASUREMENTS, execute as read_execute
+from electronicload_tool_core.protection import (ARGUMENTS as PROTECTION_ARGUMENTS,
+                                                COMMANDS as PROTECTION_COMMANDS,
+                                                DEFAULTS as PROTECTION_DEFAULTS,
+                                                LIMITS as PROTECTION_LIMITS, TRIALS as PROTECTION_TRIALS,
+                                                execute as protection_execute)
+from electronicload_tool_core.readonly import (COMMANDS, ERROR_QUEUE_COMMAND, MAX_ERROR_READS,
+                                               NATIVE_MEASUREMENTS, SYSTEM_QUERIES,
+                                               execute as read_execute)
 from electronicload_tool_core.control import (CONTROL_COMMANDS, execute as control_execute,
                                               validate_power, TRANSIENT_FIELDS, LIST_COMMANDS,
                                               FIXED_RANGE_COMMANDS, FIXED_RANGE_CHOICES,
@@ -54,7 +61,8 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     json_output = "--json" in argv
     mode = "dry-run" if "--dry-run" in argv else "simulate" if "--simulate" in argv else "live"
-    command_names = (*COMMANDS, *CONTROL_COMMANDS, *TRACE_COMMANDS, "list-resources", "manifest", "worker",
+    command_names = (*COMMANDS, *CONTROL_COMMANDS, *TRACE_COMMANDS, *PROTECTION_COMMANDS,
+                     "list-resources", "manifest", "worker",
                      "send-command", "status", "stop", "wait-ready")
     command = argv[0] if argv and argv[0] in command_names else None
     parser = _Parser(
@@ -67,7 +75,9 @@ def main(argv: list[str] | None = None) -> int:
                         version=f"%(prog)s {version('electronicload-tool')}")
     subparsers = parser.add_subparsers(dest="command")
     for name in command_names:
-        sub = subparsers.add_parser(name, allow_abbrev=False)
+        description = ("Read and remove the next entry from the instrument's SCPI Error Queue."
+                       if name == ERROR_QUEUE_COMMAND else None)
+        sub = subparsers.add_parser(name, allow_abbrev=False, description=description)
         sub.json_errors = json_output
         if name == "list-resources":
             sub.add_argument("--live-only", action="store_true", help="Probe USB INSTR via *IDN?.")
@@ -105,11 +115,18 @@ def main(argv: list[str] | None = None) -> int:
                          help=argparse.SUPPRESS)
         if name in NATIVE_MEASUREMENTS:
             sub.add_argument("--metric", choices=tuple(NATIVE_MEASUREMENTS[name]))
+        if name in SYSTEM_QUERIES:
+            sub.add_argument("--hardware-validation", choices=("system-query",),
+                             help="Explicit CLI-only IT8812C contributor validation.")
+        if name == ERROR_QUEUE_COMMAND:
+            sub.add_argument("--all", action="store_true",
+                             help=f"Remove entries until empty is confirmed or {MAX_ERROR_READS} reads are made.")
         if name in CONTROL_COMMANDS and name not in (*LIST_COMMANDS, *AUXILIARY_COMMANDS,
                                                      *AVERAGE_COMMANDS):
             sub.add_argument("--hardware-validation", choices=("input-timer", "cv", "cr", "cw", "transient-cc",
                                                                "transient-cv", "transient-cr", "transient-cw",
-                                                               "cr-led", "current-slow-rise", "trigger"),
+                                                               "cr-led", "current-slow-rise", "trigger",
+                                                               *(("protection",) if name == "input-on" else ())),
                              help="Explicit contributor hardware-validation scope; not Product LIVE.")
             sub.add_argument("--validation-settings-json",
                              help="Expected complete setup for validation enable, ON and trigger.")
@@ -121,6 +138,27 @@ def main(argv: list[str] | None = None) -> int:
         if name in TRACE_COMMANDS:
             sub.add_argument("--hardware-validation", choices=("trace",),
                              help="Explicit CLI-only IT8812C TRACE hardware validation; not Product LIVE.")
+        if name in PROTECTION_COMMANDS:
+            sub.add_argument("--hardware-validation", choices=("protection",),
+                             help="Explicit CLI-only IT8812C contributor validation.")
+        if name == "protection-status":
+            sub.add_argument("--events", action="store_true", default=argparse.SUPPRESS,
+                             help="Read and consume the Questionable Event register.")
+            sub.add_argument("--validation-snapshot", action="store_true",
+                             help="Verify Fixed CC readiness and include its settings for restoration.")
+        elif name == "protection-set":
+            sub.add_argument("--software-current-enabled", choices=("on", "off"), default=argparse.SUPPRESS)
+            for field in PROTECTION_LIMITS:
+                sub.add_argument("--" + field.replace("_", "-"), default=argparse.SUPPRESS,
+                                 help="Seconds" if field.endswith("delay") else
+                                 "Amperes" if "current" in field else "Watts")
+            sub.add_argument("--restore-defaults", choices=tuple(PROTECTION_DEFAULTS),
+                             default=argparse.SUPPRESS)
+        if name in {"protection-set", "protection-clear", "input-on"}:
+            sub.add_argument("--confirm", action="store_true")
+        if name == "input-on":
+            sub.add_argument("--protection-trial", choices=tuple(PROTECTION_TRIALS),
+                             help="Select a case for contributor Protection validation.")
         if name == "trace-configure":
             sub.add_argument("--source", required=True, choices=tuple(SAMPLE_FIELDS))
             sub.add_argument("--points", required=True, type=int)
@@ -174,8 +212,6 @@ def main(argv: list[str] | None = None) -> int:
             data.add_argument("--file", help="UTF-8 JSON file containing the same LIST configuration.")
         elif name in {"list-save", "list-recall"}:
             sub.add_argument("--slot", required=True, type=int, help="Instrument LIST slot, 1 through 7.")
-        elif name == "input-on":
-            sub.add_argument("--confirm", action="store_true")
     try:
         if json_output and any(flag in argv for flag in ("--help", "-h", "--version")):
             raise LoadError("argument_error", "Request help or version separately from --json.")
@@ -201,7 +237,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.command == "send-command":
                 try:
                     arguments = (decode_decimal_json(args.arguments_json)
-                                 if args.worker_command in (*LIST_COMMANDS, *TRACE_COMMANDS, "trigger-configure")
+                                 if args.worker_command in (*LIST_COMMANDS, *TRACE_COMMANDS,
+                                                            *PROTECTION_COMMANDS, "trigger-configure")
                                  else json.loads(args.arguments_json))
                     context = json.loads(args.context_json)
                 except (ValueError, UnicodeError, RecursionError) as exc:
@@ -216,7 +253,8 @@ def main(argv: list[str] | None = None) -> int:
                 if args.job_id is not None:
                     body["job_id"] = args.job_id
                 if args.worker_command in {*FIXED_RANGE_COMMANDS, *TRANSIENT_SETUP_COMMANDS,
-                                           *LIST_COMMANDS, *TRACE_COMMANDS, "set-von", "trigger-configure"}:
+                                           *LIST_COMMANDS, *TRACE_COMMANDS, *PROTECTION_COMMANDS,
+                                           "set-von", "trigger-configure"}:
                     # Forward original numeric tokens; Core in the Worker validates them.
                     # Parsing above already guarantees a complete JSON value.
                     del body["arguments"]
@@ -234,6 +272,20 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if 200 <= code < 300 else 2 if code in (400, 409, 429) else 3
         if args.command == "list-resources":
             result = discover_resources(live_only=args.live_only)
+        elif (args.command in PROTECTION_COMMANDS
+              or getattr(args, "hardware_validation", None) == "protection"):
+            if getattr(args, "validation_settings_json", None) is not None:
+                raise LoadError("argument_error", "Use --protection-trial for contributor Input ON.")
+            fields = PROTECTION_ARGUMENTS.get(args.command, {"confirm"})
+            arguments = {key: value for key, value in vars(args).items() if key in fields}
+            if "software_current_enabled" in arguments:
+                arguments["software_current_enabled"] = arguments["software_current_enabled"] == "on"
+            result = protection_execute(
+                args.command, mode=mode, resource=args.resource, backend=args.backend, model_id=args.model,
+                arguments=arguments, hardware_validation=args.hardware_validation == "protection",
+                snapshot=getattr(args, "validation_snapshot", False),
+                trial=getattr(args, "protection_trial", None),
+            )
         elif args.command in TRACE_COMMANDS:
             fields = CONFIG_FIELDS if args.command == "trace-configure" else CSV_FIELDS
             result = trace_execute(args.command, mode=mode, resource=args.resource,
@@ -242,6 +294,8 @@ def main(argv: list[str] | None = None) -> int:
                                    arguments={key: value for key, value in vars(args).items()
                                               if key in fields})
         elif args.command in CONTROL_COMMANDS:
+            if getattr(args, "protection_trial", None) is not None:
+                raise LoadError("argument_error", "--protection-trial requires --hardware-validation protection.")
             list_configuration = None
             if args.command == "set-list-cc":
                 try:
@@ -290,7 +344,9 @@ def main(argv: list[str] | None = None) -> int:
             result = read_execute(args.command, mode=mode, resource=args.resource,
                                   backend=args.backend, model_id=args.model,
                                   validation=args.validation_allow_pending_live_support,
-                                  metric=getattr(args, "metric", None))
+                                  metric=getattr(args, "metric", None),
+                                  all_errors=getattr(args, "all", False),
+                                  hardware_validation=getattr(args, "hardware_validation", None))
     except LoadError as exc:
         return _emit_error(exc, command, mode, json_output)
     except KeyboardInterrupt:

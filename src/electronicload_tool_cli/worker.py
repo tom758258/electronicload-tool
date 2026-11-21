@@ -18,9 +18,13 @@ from electronicload_tool_core.control import (CONTROL_COMMANDS, execute as contr
                                               validate_list_cc, validate_list_slot)
 from electronicload_tool_core.errors import LoadError
 from electronicload_tool_core.identity import MODEL_ID
-from electronicload_tool_core.readonly import (COMMANDS as READ_COMMANDS, NATIVE_MEASUREMENTS,
-                                               validate_metric, execute as read_execute)
-from electronicload_tool_core.simulator import ControlSimulator
+from electronicload_tool_core.protection import (COMMANDS as PROTECTION_COMMANDS,
+                                                execute as protection_execute,
+                                                validate_arguments as validate_protection_arguments)
+from electronicload_tool_core.readonly import (COMMANDS as READ_COMMANDS, ERROR_QUEUE_COMMAND,
+                                               NATIVE_MEASUREMENTS, SYSTEM_QUERIES, execute as read_execute,
+                                               validate_error_queue_all, validate_metric)
+from electronicload_tool_core.simulator import ControlSimulator, Simulator
 from electronicload_tool_core.trace import (CONFIG_FIELDS, CSV_FIELDS, TRACE_COMMANDS,
                                            execute as trace_execute,
                                            validate_configuration, validate_csv)
@@ -29,7 +33,7 @@ from electronicload_tool_core.visa import TraceSessionLost, mark_session_untrust
 from .json_input import decode_decimal_json
 
 SCHEMA = 3
-COMMANDS = READ_COMMANDS + CONTROL_COMMANDS + TRACE_COMMANDS
+COMMANDS = READ_COMMANDS + CONTROL_COMMANDS + TRACE_COMMANDS + PROTECTION_COMMANDS
 FEATURES = {"common.async_jobs": {"contract_version": 1},
             "common.job_cancel": {"contract_version": 1, "commands": ["trace-start"]}}
 TRACE_RECOVERY_COMMANDS = {"input-state", "input-off", "trace-configure"}
@@ -72,6 +76,8 @@ class Runtime:
         self.last_job = None
         self.job_thread = None
         self.simulator = ControlSimulator()
+        # TRACE checks its own SCPI status without consuming the diagnostic FIFO.
+        self.system_query_simulator = Simulator()
         self.server = None
         self.port = port
         self.host = "127.0.0.1"
@@ -105,6 +111,10 @@ class Runtime:
     def _execute(self, command, arguments, context):
         # Common v3 uses dry_run; Core uses dry-run.
         core_mode = "dry-run" if context["mode"] == "dry_run" else context["mode"]
+        if command in PROTECTION_COMMANDS:
+            return protection_execute(command, mode=core_mode, resource=self.resource,
+                                      backend=self.backend, arguments=arguments,
+                                      simulator=self.simulator, stop=self.stop)
         if command in TRACE_COMMANDS:
             return trace_execute(
                 command, mode=core_mode, resource=self.resource, backend=self.backend,
@@ -135,9 +145,11 @@ class Runtime:
                 trigger_source=arguments.get("source"),
                 trigger_interval=arguments.get("interval_s"),
             )
+        simulator = self.system_query_simulator if command in SYSTEM_QUERIES else self.simulator
         return read_execute(command, mode=core_mode, resource=self.resource,
                             backend=self.backend, model_id=MODEL_ID,
-                            metric=arguments.get("metric"), simulator=self.simulator)
+                            metric=arguments.get("metric"), simulator=simulator,
+                            all_errors=arguments.get("all", False))
 
     def _shutdown_after_stop_reply(self):
         self.stop_reply_sent.wait()
@@ -245,6 +257,9 @@ def _context(request, mode):
 def _arguments(command, raw, runtime):
     if not isinstance(raw, dict):
         raise LoadError("argument_error", "Arguments must be an object.")
+    if command in PROTECTION_COMMANDS:
+        validate_protection_arguments(command, raw, json_numbers=True)
+        return raw
     permitted = ({"current", "range", "rise_slew", "fall_slew"} if command == "set-cc" else
                  {"voltage", "range"} if command == "set-cv" else
                  {"resistance", "range"} if command == "set-cr" else
@@ -257,6 +272,7 @@ def _arguments(command, raw, runtime):
                  CONFIG_FIELDS if command == "trace-configure" else
                  CSV_FIELDS if command == "trace-start" else
                  {"metric"} if command in NATIVE_MEASUREMENTS else
+                 {"all"} if command == ERROR_QUEUE_COMMAND else
                  TRANSIENT_FIELDS if command in TRANSIENT_SETUP_COMMANDS else
                  LIST_FIELDS if command == "set-list-cc" else
                  {"slot"} if command in {"list-save", "list-recall"} else
@@ -273,6 +289,8 @@ def _arguments(command, raw, runtime):
         if not isinstance(raw["metric"], str):
             raise LoadError("argument_error", "Metric must be a string when supplied.")
         validate_metric(command, raw["metric"])
+    if command == ERROR_QUEUE_COMMAND:
+        validate_error_queue_all(raw.get("all", False))
     if command == "set-average":
         validate_average(raw.get("count"))
     if command == "trigger-configure":
@@ -360,7 +378,8 @@ def _handler(runtime):
                         and isinstance(value.get("arguments"), dict)):
                     # Core must validate the original decimal tokens.
                     value["arguments"] = json.loads(body, parse_float=Decimal)["arguments"]
-                if value.get("command") in (*LIST_COMMANDS, *TRACE_COMMANDS, "trigger-configure"):
+                if value.get("command") in (*LIST_COMMANDS, *TRACE_COMMANDS, *PROTECTION_COMMANDS,
+                                            "trigger-configure"):
                     # Preserve nested numeric tokens; reject duplicate fields/nonfinite JSON.
                     value = decode_decimal_json(body)
                 return value

@@ -9,6 +9,52 @@ from electronicload_tool_cli.cli import main
 RESOURCE = "USB0::0xFFFF::0x0001::SYNTHETIC::INSTR"
 
 
+@pytest.mark.parametrize("command,arguments,expected", [
+    ("scpi-version", [], {"scpi_version": "1999.0"}),
+    ("display-mode", [], {"display_mode": "NORMAL"}),
+    ("scpi-error-next", [], {"error_code": 0, "message": "No error"}),
+    ("scpi-error-next", ["--all"], {"errors": [], "read_count": 1, "max_reads": 20,
+                                    "empty_confirmed": True, "limit_reached": False}),
+])
+def test_system_query_cli_simulation_and_live_refusal(capsys, fake_visa, command, arguments, expected):
+    assert main([command, "--simulate", "--json", *arguments]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] and payload["result"] == expected
+    for flags in ([], ["--validation-allow-pending-live-support"]):
+        assert main([command, "--resource", RESOURCE, "--json", *arguments, *flags]) == 2
+        assert json.loads(capsys.readouterr().out)["error"]["code"] == "unsupported_live_scope"
+    assert fake_visa.calls == []
+
+
+def test_system_query_cli_error_code_is_data_and_malformed_reply_fails(fake_visa, capsys):
+    args = ["scpi-error-next", "--resource", RESOURCE, "--hardware-validation", "system-query", "--json"]
+    fake_visa.responses["SYST:ERR?"] = '-222,"Data, out of range"'
+    assert main(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] and payload["result"]["error_code"] == -222
+    fake_visa.responses["SYST:ERR?"] = "bad response"
+    assert main(args) == 3
+    failure = json.loads(capsys.readouterr().out)
+    assert failure["ok"] is False and failure["error"]["code"] == "invalid_response"
+
+
+def test_system_query_cli_all_preview_and_argument_boundaries(fake_visa, capsys):
+    assert main(["scpi-error-next", "--all", "--dry-run", "--json"]) == 0
+    plan = json.loads(capsys.readouterr().out)["result"]
+    assert plan["queries"] == ["*IDN?", "SYST:ERR?"] and plan["max_reads"] == 20
+    for command, options in (("scpi-version", ["--all"]), ("display-mode", ["--all"]),
+                             ("scpi-error-next", ["--all=true"]),
+                             ("identify", ["--hardware-validation", "system-query"])):
+        assert main([command, "--dry-run", "--json", *options]) == 2
+        assert json.loads(capsys.readouterr().out)["error"]["code"] == "argument_error"
+    with pytest.raises(SystemExit) as help_exit:
+        main(["scpi-error-next", "--help"])
+    assert help_exit.value.code == 0
+    output = capsys.readouterr().out
+    assert "--all" in output and "remove" in output.lower()
+    assert fake_visa.calls == []
+
+
 @pytest.mark.parametrize("command,metric,fields", [
     ("measure-min-max", None, {"voltage_min_v", "voltage_max_v", "current_min_a", "current_max_a"}),
     ("measure-min-max", "voltage-min", {"voltage_min_v"}),

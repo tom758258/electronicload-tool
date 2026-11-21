@@ -48,6 +48,9 @@ Common contracts remain authoritative for the HTTP and JSONL envelopes.
 | `measure` | `{}` | `voltage_v`, `current_a`, `power_w` |
 | `measure-min-max` | `{}` or `{"metric":"voltage-min"\|"voltage-max"\|"current-min"\|"current-max"}` | All four native extrema, or only the selected field; offline only |
 | `measure-discharge` | `{}` or `{"metric":"capacity"\|"time"}` | `capacity_ah`, `discharge_time_s`, or only the selected field; offline only |
+| `scpi-version` | `{}` | `scpi_version`, a `YYYY.V` string; offline only |
+| `display-mode` | `{}` | `display_mode`, `NORMAL` or `TEXT`; offline only |
+| `scpi-error-next` | `{}` or `{"all":<boolean>}` | One Error Queue entry or a bounded read summary; offline only |
 | `set-average` | `{"count":<integer 2–16>}` | Integer `average_count`; confirmed Input OFF required; offline only |
 | `average-status` | `{}` | Integer `average_count`, including with Input ON; offline only |
 | `trace-configure` | `{"source":"VOLT"\|"CURR"\|"TWO","points":<integer>,"interval_s":<number>}` | Validated TRACE settings and sample count; offline only |
@@ -86,6 +89,9 @@ Common contracts remain authoritative for the HTTP and JSONL envelopes.
 | `list-exit` | `{}` | Confirmed Input OFF required; select FIXED, retain LIST data |
 | `trigger-configure` | `{"source":<source>}` or `{"source":"TIMER","interval_s":<number>}` | Offline Trigger Setup |
 | `trigger-status` | `{}` | Stored Trigger Source and Timer interval |
+| `protection-status` | `{}` or `{"events":true}` | Input, settings, condition register, optional read-and-clear event register |
+| `protection-set` | `{"confirm":true,...}` | Verify and apply only the requested settings or one power defaults group |
+| `protection-clear` | `{"confirm":true}` | Clear simulated latched faults with Input OFF |
 | `input-on` | `{"confirm_input_on": true}` | Confirmed `input_state: "ON"` or failure/UNKNOWN |
 | `input-off` | `{}` | Confirmed `input_state: "OFF"` or failure/UNKNOWN |
 
@@ -99,6 +105,46 @@ A live request uses `context: {"mode": "live"}` with optional matching
 `expected_model_id`. Simulation/dry-run uses the canonical
 `planning_model_id: "itech-it8812c"`; the Worker startup mode constrains the
 request mode. Worker does **not** allow the contributor-validation override.
+
+## Offline System Queries
+
+The three commands are async jobs. Simulation retains the Error Queue across
+jobs in the same Worker and each Error Queue read consumes one FIFO entry.
+`scpi-error-next` with omitted or false `all` returns one integer `error_code`
+and string `message`. A zero code represents an empty queue. With `all: true`,
+it returns `errors` (nonzero entries in order), `read_count` (including any zero
+reply), `max_reads: 20`, `empty_confirmed` and `limit_reached`. A zero on any
+read, including the 20th, confirms empty. A nonzero 20th read reaches the limit
+with the remaining queue state unknown. Nonzero instrument codes are successful
+query data. Dry-run returns the query plan with no queue consumption.
+
+Malformed arguments receive HTTP 400. Valid LIVE requests on a live Worker
+receive HTTP 202 and finish with `unsupported_live_scope` before opening VISA.
+The contributor System Query scope is only available through the standalone CLI.
+[CLI queries and contributor procedure](../cli/README.md#system-queries)
+
+## Offline Protection
+
+The three Protection commands are async jobs. Status accepts an optional
+boolean `events`, default false. It returns `input_state`, `settings`,
+`condition` and, if requested, `events`. Each register has `raw` (integer)
+and `flags` (array of known mnemonics). Explicit event reads consume the
+simulated event register. Dry-run previews the request without changing state.
+
+Set accepts `confirm: true` and one or more of `software_current_enabled`
+(boolean), `software_current_limit` (A), `software_current_delay` (s),
+`software_power_limit` (W), `software_power_delay` (s) and
+`hardware_power_limit` (W). Limits and delays are JSON numbers. Alternatively,
+use `restore_defaults: "software-power"` or `"hardware-power"` with
+`confirm: true`. Individual settings and defaults are mutually exclusive.
+Status and Set preserve decimals as strings in `settings` and `applied`,
+respectively. Set and Clear require Input OFF and fail without changing state
+if Input is ON. Clear returns `input_state` and the resulting `condition`.
+
+Malformed arguments return HTTP 400. Missing confirmation follows the existing
+HTTP 409 confirmation rejection. Legal LIVE requests on a live Worker receive
+HTTP 202 and finish with `unsupported_live_scope` before opening VISA.
+Stop, Cancel and `GET /status` retain their Common v3 behavior.
 
 ## Offline CR-LED and Current Slow Rise
 

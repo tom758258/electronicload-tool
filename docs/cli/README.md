@@ -146,6 +146,44 @@ status is rejected without PyVISA's automatic device-clear recovery. Read-only q
 not require input OFF. Closing the session and resource manager does not turn
 input OFF. A failed query never proves OFF or produces a substitute zero value.
 
+## System Queries
+
+| CLI command | SCPI query after `*IDN?` | Result |
+| --- | --- | --- |
+| `scpi-version` | `SYST:VERS?` | `scpi_version`, a `YYYY.V` string for the SCPI specification |
+| `display-mode` | `DISP:MODE?` | `display_mode`, normalized to `NORMAL` or `TEXT` |
+| `scpi-error-next` | `SYST:ERR?` | One integer `error_code` and string `message` |
+
+Each Error Queue read removes the returned entry. `scpi-error-next --all`
+reads in the same session until it receives code `0` or reaches 20 reads.
+`errors` contains only nonzero entries. `read_count` includes the zero reply
+when present and `max_reads` is 20. A zero reply, including on the 20th read,
+sets `empty_confirmed: true` and `limit_reached: false`. A nonzero 20th reply
+sets `empty_confirmed: false` and `limit_reached: true`. A nonzero instrument
+error code is successful query data. Communication and invalid-response
+failures use the standard CLI error envelope and exit code 3. If a queue read
+fails during `--all`, `error.details.errors` and `error.details.read_count`
+contain the entries parsed before the failure and their count. Whether the
+failed read consumed another entry is unknown. The System Query commands send
+no configuration writes or queue-clear commands.
+
+All three support `--simulate` and `--dry-run`. Dry-run lists `*IDN?` and the
+selected query, with `max_reads` for `--all`. Product LIVE and Worker LIVE
+are blocked.
+
+For separately approved hardware validation, run each query manually using
+the contributor CLI scope, an operator-supplied USB INSTR resource, and
+System VISA. Confirm physical Input OFF before querying. The CLI verifies
+the exact IT8812C identity before sending the query. Use `scpi-error-next`
+only when removing the returned queue entry is intended, and choose `--all`
+explicitly for a bounded read of the queue.
+
+```powershell
+electronicload-tool scpi-version --resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" --backend system --hardware-validation system-query --json
+```
+
+[ITECH IT8800 Programming Guide V2.1, printed pp. 31–33](https://assets.testequity.com/te1/Documents/pdf/itech/ITECH_IT8800-Programming-Guide-EN.pdf#page=41)
+
 ## Offline Measurement Extensions
 
 `measure-min-max`, `measure-discharge`, `set-average` and `average-status`
@@ -285,7 +323,7 @@ the bounded source/DUT, manual OFF contingency and interactive confirmation:
 # For a separately authorized interactive physical run, remove -PlanOnly.
 ```
 
-`-Modes trace` selects only TRACE; omitting `-Modes` selects all supported validation modes, including TRACE.
+`-Modes trace` selects only TRACE. Omitting `-Modes` selects the default validation modes, including TRACE.
 TRACE-only runs use `preflight-cli.ps1 -TraceOnly` for focused, no-hardware
 preflight. `-PlanOnly` produces cases marked NOT RUN, not physical PASS.
 The existing redacted `shareable/report.json` records TRACE case settings,
@@ -920,6 +958,54 @@ Worker Stop preserves the stored Trigger Setup.
 Source syntax, native trigger routing and the Timer range come from printed
 pp.40–41 of the [IT8800 Programming Guide V2.1](https://assets.testequity.com/te1/Documents/pdf/itech/ITECH_IT8800-Programming-Guide-EN.pdf).
 
+## Offline Protection
+
+Use `protection-status` to read Input, settings and the live Questionable
+Condition register. Add `--events` to read and consume the Questionable Event
+register. Both register objects have integer `raw` and an array of known
+`flags`. The event register depends on the instrument's existing transition
+masks. An empty event register can coexist with an observed trip.
+
+Use `protection-set --confirm` with one or more of these options:
+
+| Option | Value |
+| --- | --- |
+| `--software-current-enabled` | `on` or `off` |
+| `--software-current-limit` | Amperes, 0 through 60 |
+| `--software-current-delay` | Seconds, 0 through 60 |
+| `--software-power-limit` | Watts, 0 through 260 |
+| `--software-power-delay` | Seconds, 0 through 60 |
+| `--hardware-power-limit` | Watts, 0 through 250 |
+| `--restore-defaults` | `software-power` (instrument maximum and 0 s) or `hardware-power` (instrument maximum), each used on its own |
+
+The IT8812C profile uses separate Software Power and Hardware Power bounds.
+For each power default, the contributor command reads that setting's own
+instrument maximum and verifies the value after applying it. The software
+current limit uses a conservative 60 A application bound. The programming
+guide specifies 0 through MAX for this setting without a model-specific
+software current maximum.
+
+Status returns settings with decimal values as strings and the software current
+enable field as a boolean. Set reports the requested and verified fields in
+`applied`. A partial write reports `confirmed`, `unconfirmed` and
+`not_attempted` and stops the sequence. Input OFF is required before each write.
+Use `protection-clear --confirm` to clear latched protection with Input OFF
+after removing the cause. The load may briefly restore Input ON after Clear.
+If the readback shows ON, the operation fails and attempts one bounded OFF
+while communication is trusted. Check the returned Input state.
+
+```powershell
+electronicload-tool protection-status --simulate --events --json
+electronicload-tool protection-set --dry-run --software-power-limit 200 --confirm --json
+electronicload-tool protection-set --dry-run --restore-defaults hardware-power --confirm --json
+electronicload-tool protection-clear --simulate --confirm --json
+```
+
+Use a single simulated Worker to retain settings between commands. Simulation
+stores settings and register state. Physical trip timing and power limiting
+require the [contributor procedure](#contributor-protection-validation).
+Ordinary CLI and Worker requests support simulation and dry-run only.
+
 ## Worker and Automation
 
 Standalone simulation commands each start with fresh state. To exercise a CV/CR/CW
@@ -944,14 +1030,14 @@ does not authorize physical instrument operation.
 
 | Script | Purpose | Real hardware |
 | --- | --- | --- |
-| `scripts/preflight-cli.ps1` | Offline CLI, simulator, refusal and Manifest checks; focused switches: `-TransientOnly`, `-FixedAutoOnly`, `-FixedSlewVonShortOnly`, `-InputTimerOnly`, `-TraceOnly`, `-CrLedSlowRiseOnly`, `-TriggerOnly` | Never |
+| `scripts/preflight-cli.ps1` | Offline CLI, simulator, refusal and Manifest checks; focused switches: `-TransientOnly`, `-FixedAutoOnly`, `-FixedSlewVonShortOnly`, `-InputTimerOnly`, `-TraceOnly`, `-CrLedSlowRiseOnly`, `-TriggerOnly`, `-ProtectionOnly` | Never |
 | `scripts/live-cli-check.ps1 -PlanOnly` | Validate command plans; reported physical cases remain `NOT RUN` | Never |
 | `scripts/live-cli-check.ps1` | Separately approved interactive IT8812C validation, including deliberate Input ON/OFF | With operator approval |
 
 ### Available validation modes
 
 `-Modes` accepts one mode or a comma-separated list. If omitted, it executes
-**every supported mode** once in the established order. Unselected modes
+every default mode once in the established order. Unselected modes
 produce no test cases or PASS counts. The normal default includes the
 formerly separate Input Timer trial; `-Modes trigger` remains available
 for focused verification.
@@ -971,6 +1057,7 @@ for focused verification.
 | `current-slow-rise` | Fixed CC enable, retention after explicit OFF and CC setup, disable and readback | Yes |
 | `trigger` | Four physical sources (HOLD, TIMER, BUS, EXTERNAL), using Transient CC Pulse and finite LIST CC with observation and Trigger Setup restoration; MANUAL powered validation is excluded | Yes |
 | `input-timer` | Bounded Fixed CC Input Timer, expiry and explicit disable | Yes |
+| `protection` | Software current trip, software power trip, hardware power limiting and separate defaults | Explicit selection only |
 
 `-InputTimerOnly` remains a compatible shortcut for the single
 `-Modes input-timer` trial and **cannot** be combined with `-Modes`.
@@ -988,7 +1075,7 @@ names are rejected.
 | `-Resource` | Required | Explicit USB INSTR VISA Resource, also for PlanOnly; never guessed |
 | `-Connection` | `usb` | USB only |
 | `-Backend` | `system` | System VISA (`@ivi`) only |
-| `-Modes` | All supported modes | Single or comma-separated selection from above |
+| `-Modes` | All default modes | Single or comma-separated selection from above. Select Protection separately. |
 | `-InputTimerOnly` | Off | Backward-compatible Timer-only shortcut, incompatible with `-Modes` |
 | `-SourceVoltageLimitV` | **5 V** | Operator-declared external source voltage, override >0 to 18 V |
 | `-SourceCurrentLimitA` | **0.8 A** | Operator-declared external source current limit, override >0 to 2 A |
@@ -1038,7 +1125,7 @@ only uses the explicit `-Resource` argument.
 ```powershell
 $env:ELECTRONICLOAD_TOOL_RESOURCE = "USB0::...::INSTR"
 
-# Preview all supported modes, without opening VISA.
+# Preview the default modes without opening VISA.
 .\scripts\live-cli-check.ps1 -Target itech-it8812c -Resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" -PlanOnly
 
 # Preview selected modes.
@@ -1101,12 +1188,58 @@ error-queue read or reconnect is added. VISA Close alone does not imply OFF.
 | Any other mode total I/O | 900 s |
 | Cleanup commands | Separate 30 s allowance |
 
-The default plan now includes all supported modes. It retains the existing
+The default plan includes the modes listed as default above. It retains the existing
 900-second total deadline; slow hardware or operator observations may exhaust
 that budget. Select a smaller `-Modes` set if necessary. V/I/P are separate queries, with no guarantee
 of power freshness, synchronization, waveform timing or accuracy. This
 contributor-only CLI validation **does not** enable Worker LIVE or expand
 Product LIVE support.
+
+### Contributor Protection validation
+
+Use the separately approved `live-cli-check.ps1 -Modes protection` procedure
+with the exact IT8812C model, an operator-supplied USB INSTR resource and System
+VISA. Add `-PlanOnly` for the offline command plan. Start in Fixed CC with
+Input OFF, a dedicated source set at the source to 5 V with a 0.8 A current
+limit, and an independent manual cutoff. The script checks current mode and
+interlocks, saves and restores the original Fixed CC and protection settings,
+and stops at the first failed trial. The temporary Fixed CC setpoint is 0.20 A.
+The operator confirms each Input ON with a fresh Enter.
+
+| Trial | Temporary setting | Physical acceptance |
+| --- | --- | --- |
+| Software current | Enabled, 0.10 A, 1 s | OC and PS with Input OFF |
+| Software power | 0.50 W, 1 s | OP and PS with Input OFF, after exposure above 0.50 W |
+| Hardware power | 0.50 W | With Input ON and no PS, compare the baseline at approximately 0.20 A with V×I at 0.45–0.55 W under the limit. Both observations require 4.75–5.25 V and explicit OFF. |
+
+For Hardware Power, first measure the baseline with the saved protection settings.
+The script requires 0.18–0.22 A at the load during the baseline to establish that
+the source and wiring sustain the intended current. After confirming Input OFF,
+the script applies the temporary 0.50 W limit. Keep the same source settings and
+wiring, and press Enter again for the limited observation. The report records
+V×I for each observation and includes the stored `FETC:POW?` reading for
+reference. The stored reading does not trigger a fresh power measurement and
+the load's power readback accuracy does not support the narrow window at 0.50 W.
+
+For each software trip, verify the physical trip and Input OFF, isolate the
+external source, and confirm again before Clear. The load can momentarily
+re-enable Input during Clear. If its state or communication becomes uncertain,
+use the independent manual cutoff. Restoration requires confirmed Input OFF
+and trusted communication. The script separately checks
+software and hardware power defaults and restores their saved values without
+resetting the instrument. The shareable report records trip, register,
+measurement, OFF and restoration results without the VISA resource string.
+When the CLI returns partial write progress, the report's
+`protection_write_progress` records confirmed setting values, unconfirmed
+writes, and settings that were never attempted.
+The contributor scope does not open Product or Worker LIVE.
+
+The register meanings, Clear behavior and configuration syntax are in the
+[IT8800 Programming Guide V2.1](https://assets.testequity.com/te1/Documents/pdf/itech/ITECH_IT8800-Programming-Guide-EN.pdf),
+printed pp.15–16, 47, 49–50 and 58–59.
+See also p.36 for stored power readback and the
+[IT8800 User's Manual](https://www.itechate.com/uploadfiles/2019/10/20191015163409349.pdf)
+for the IT8812C measurement specifications.
 
 ### Contributor Trigger validation
 

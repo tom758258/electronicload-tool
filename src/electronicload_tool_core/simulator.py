@@ -1,5 +1,6 @@
 """Deterministic responses for the single registered profile; no VISA access."""
 
+from collections import deque
 from decimal import Decimal
 
 from .trigger import DEFAULT_INTERVAL
@@ -15,13 +16,22 @@ NATIVE_MEASUREMENTS = {
 
 
 class Simulator:
+    def __init__(self):
+        self.error_queue: deque[tuple[int, str]] = deque()
+
     def query(self, command: str) -> str:
+        if command == "SYST:ERR?":
+            code, message = self.error_queue.popleft() if self.error_queue else (0, "No error")
+            quoted = message.replace('"', '""')
+            return f'{code},"{quoted}"'
         return {
             "*IDN?": "ITECH Ltd,IT8812C,SIMULATED,1.0",
             "INP:STAT?": "1",
             "MEAS:VOLT?": "12.0",
             "MEAS:CURR?": "0.5",
             "FETC:POW?": "6.0",
+            "SYST:VERS?": "1999.0",
+            "DISP:MODE?": "NORMAL",
             **NATIVE_MEASUREMENTS,
         }[command]
 
@@ -70,6 +80,9 @@ class ControlSimulator:
         self.trace_feed = "NEVER"
         self.trace_capturing = False
         self.trace_data = ""
+        self.protection_settings = {}
+        self.protection_condition = 0
+        self.protection_events = 0
 
     def list_settings(self) -> dict:
         configuration = self.list_configuration
@@ -154,7 +167,8 @@ class ControlSimulator:
             "TRAC:FILT?": self.trace_filter,
             "TRAC:FEED:CONT?": self.trace_feed,
             "TRAC:DATA?": self.trace_data,
-            "STAT:QUES:COND?": str(TRACE_BUFFER_FULL if self.trace_data else 0),
+            "STAT:QUES:COND?": str(self.protection_condition
+                                   | (TRACE_BUFFER_FULL if self.trace_data else 0)),
             "SYST:ERR?": '0,"No error"',
             **NATIVE_MEASUREMENTS,
         }[command]

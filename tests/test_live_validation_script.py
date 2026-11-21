@@ -157,6 +157,66 @@ def test_fixed_auto_offline_preflight(run_script):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_protection_preflight_and_explicit_mode_report_without_visa(run_script):
+    preflight = run_script(['-ProtectionOnly'], preflight=True)
+    assert preflight.returncode == 0 and 'PASS: Protection preflight' in preflight.stdout
+    for args, expected in [(['-PlanOnly'], 'PLAN ONLY'), ([], 'BLOCKED')]:
+        result = run_script(['-Modes', 'protection', *args])
+        assert result.returncode == (0 if args else 2), result.stdout + result.stderr
+        paths = re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)
+        assert len(paths) == 1, result.stdout + result.stderr
+        path = Path(paths[0])
+        text = path.read_text(encoding='utf-8-sig')
+        report = json.loads(text)
+        assert report['overall_status'] == expected and report['prechecks']['plan'] == 'PASS'
+        assert report['hardware_touched'] is False and RESOURCE not in text
+        assert not (path.parents[1] / 'private').exists()
+        assert report['declared_source_limits']['voltage_v'] == 5
+        assert report['declared_source_limits']['current_a'] == 0.8
+        assert report['protection_trials'] == {
+            trial: 'NOT RUN' for trial in ('software-current', 'software-power', 'hardware-power')
+        }
+        cases = {case['name']: case for case in report['cases']}
+        assert list(cases)[:2] == ['input-state', 'measure-off']
+        assert all(name.startswith('protection-') for name in list(cases)[2:])
+        assert all(case['status'] == 'NOT RUN' for case in cases.values())
+        assert report['summary_counts']['total'] == report['summary_counts']['not_run'] == len(cases)
+        for trial in ('software-current', 'software-power', 'hardware-power'):
+            prefix = f'protection-{trial}'
+            assert cases[f'{prefix}-cc']['arguments'][:2] == ['--current', '0.20']
+            assert cases[f'{prefix}-on']['command'] == 'operator-observation'
+            assert cases[f'{prefix}-trial']['arguments'] == [
+                '--hardware-validation', 'protection', '--confirm', '--protection-trial', trial,
+            ]
+            assert cases[f'{prefix}-off']['command'] == 'input-off'
+            assert '--events' in cases[f'{prefix}-events']['arguments']
+            assert cases[f'{prefix}-final']['command'] == 'protection-status'
+            if trial.startswith('software-'):
+                assert cases[f'{prefix}-source-off']['command'] == 'operator-observation'
+                assert list(cases).index(f'{prefix}-source-off') < list(cases).index(f'{prefix}-clear')
+            else:
+                assert f'{prefix}-clear' not in cases
+                assert cases[f'{prefix}-baseline-on']['command'] == 'operator-observation'
+                assert cases[f'{prefix}-baseline-trial']['arguments'] == [
+                    '--hardware-validation', 'protection', '--confirm', '--protection-trial',
+                    'hardware-power-baseline',
+                ]
+                assert cases[f'{prefix}-baseline-off']['command'] == 'input-off'
+                baseline_start = list(cases).index(f'{prefix}-cc') + 1
+                assert list(cases)[baseline_start:baseline_start + 5] == [
+                    f'{prefix}-{step}' for step in ('baseline-on', 'baseline-trial', 'baseline-off', 'set', 'on')
+                ]
+        for group in ('software-power', 'hardware-power'):
+            assert cases[f'protection-default-{group}-set']['arguments'][-2:] == ['--restore-defaults', group]
+
+
+@pytest.mark.parametrize('extra', [['-SourceCurrentLimitA', '1'], ['-SourceVoltageLimitV', '6']])
+def test_protection_precheck_rejects_overrides(run_script, extra):
+    result = run_script(['-Modes', 'protection', '-PlanOnly', *extra])
+    assert result.returncode == 2
+    assert 'Select Protection alone with a dedicated 5 V / 0.8 A source.' in result.stdout
+
+
 def test_cr_led_slow_rise_offline_preflight(run_script):
     result = run_script(['-CrLedSlowRiseOnly'], preflight=True)
     assert result.returncode == 0, result.stdout + result.stderr

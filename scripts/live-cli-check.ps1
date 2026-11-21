@@ -1,8 +1,9 @@
 <#
 Single, bounded IT8812C CLI hardware validation.
-Default: every supported validation mode, with common read-only safety prechecks.
+Default: the established validation modes, with common read-only safety prechecks.
 -Modes selects any supported validation mode, including trace, cr-led, current-slow-rise,
-trigger and input-timer. Omitted -Modes selects all supported modes.
+trigger and input-timer. Omitted -Modes selects all default modes.
+-Modes protection selects the separate Protection validation procedure.
 -InputTimerOnly is a backward-compatible shortcut for the input-timer-only trial.
 Requires approved source/DUT limits and interactive confirmation before hardware access.
 -PlanOnly validates every planned CLI request without VISA or hardware access.
@@ -57,6 +58,7 @@ if ($InputTimerOnly) {
 } elseif (-not $PSBoundParameters.ContainsKey('Modes')) {
     $Modes = $supportedModes
 }
+$supportedModes += 'protection'
 $requestedModes = @($Modes | ForEach-Object { $_ -split ',' } |
     ForEach-Object { $_.Trim().ToLowerInvariant() })
 # Keep the established trial order and run each selected mode only once.
@@ -65,6 +67,7 @@ $hasValidationModes = @($selectedModes | Where-Object { $_ -ne 'cc' }).Count -gt
 $traceSelected = 'trace' -in $selectedModes
 $triggerSelected = 'trigger' -in $selectedModes
 $timerSelected = 'input-timer' -in $selectedModes
+$protectionSelected = 'protection' -in $selectedModes
 $featureSelected = @($selectedModes | Where-Object { $_ -in $featureModes }).Count -gt 0
 $featureOnly = $featureSelected -and @($selectedModes | Where-Object { $_ -notin $featureModes }).Count -eq 0
 $traceCommunicationUntrusted = $false
@@ -107,6 +110,16 @@ $triggerOffConfirmed = $true
 $triggerPowered = $false
 $triggerProcessStillRunning = $false
 $triggerArtifacts = @()
+$protectionScope = @('--hardware-validation', 'protection')
+$protectionPlans = @()
+$protectionTrusted = $true
+$protectionPowered = $false
+$protectionArtifacts = @()
+$protectionTrials = @(
+    @{name='software-current'; settings=[ordered]@{software_current_enabled='on';software_current_limit='0.10';software_current_delay='1'}; flags=@('OC','PS')},
+    @{name='software-power'; settings=[ordered]@{software_power_limit='0.50';software_power_delay='1'}; flags=@('OP','PS')},
+    @{name='hardware-power'; settings=[ordered]@{hardware_power_limit='0.50'}; flags=@()}
+)
 $commandIndex = 0
 $report = [ordered]@{
     status = 'NOT RUN'
@@ -144,6 +157,12 @@ if ($triggerSelected) {
     $report['trigger_restore_status'] = 'NOT RUN'
     $report['trigger_input_off_unconfirmed'] = $false
 }
+if ($protectionSelected) {
+    $report['protection_input_off_unconfirmed'] = $false
+    $report['protection_restore_unconfirmed'] = $false
+    $report['protection_trials'] = [ordered]@{}
+    foreach ($trial in $protectionTrials) { $report.protection_trials[$trial.name] = 'NOT RUN' }
+}
 
 function Save-Report {
     if ($null -eq $script:reportDirectory) { return }
@@ -178,6 +197,11 @@ function Save-Report {
             if ($entry.Contains($field)) { $case[$field] = $entry[$field] }
         }
         if ($entry.Contains('confirmed_input_state')) { $case.input_state = $entry.confirmed_input_state }
+        foreach ($field in @('protection_state','protection_condition','protection_events',
+                             'protection_settings','protection_fixed_cc','protection_measurements',
+                             'protection_write_progress')) {
+            if ($entry.Contains($field)) { $case[$field] = $entry[$field] }
+        }
         if ($entry.status -eq 'PASS') {
             if ($entry.command -in @('input-state','input-on','input-off','input-timer-status',
                                      'trigger-configure','trigger-status')) {
@@ -250,6 +274,11 @@ function Save-Report {
         $public['trigger_observation_seconds'] = $script:TriggerObservationSeconds
         $public['trigger_max_on_seconds'] = $script:TriggerMaxOnSeconds
     }
+    if ($script:protectionSelected) {
+        $public['protection_input_off_unconfirmed'] = $script:report.protection_input_off_unconfirmed
+        $public['protection_restore_unconfirmed'] = $script:report.protection_restore_unconfirmed
+        $public['protection_trials'] = $script:report.protection_trials
+    }
     [IO.File]::WriteAllText((Join-Path $shareable 'report.json'),
         ($public | ConvertTo-Json -Depth 12), [Text.UTF8Encoding]::new($false))
     $lines = @(
@@ -266,6 +295,17 @@ function Save-Report {
     }
     if ($public.trigger_input_off_unconfirmed) {
         $lines += 'Trigger Input OFF was not confirmed. Use the independent manual OFF procedure immediately.'
+    }
+    if ($public.protection_input_off_unconfirmed) {
+        $lines += 'Protection Input OFF is unconfirmed. Use the independent manual OFF procedure immediately.'
+    }
+    if ($public.protection_restore_unconfirmed) {
+        $lines += 'Protection restoration is unconfirmed. Verify the original settings manually after confirming Input OFF.'
+    }
+    if ($script:protectionSelected) {
+        foreach ($trial in $public.protection_trials.Keys) {
+            $lines += "Protection ${trial}: $($public.protection_trials[$trial])"
+        }
     }
     foreach ($case in $cases) { $lines += "$($case.name): $($case.status)" }
     $lines += "Cases: $($counts.passed) PASS, $($counts.failed) FAIL, $($counts.skipped) SKIP, $($counts.not_run) NOT RUN"
@@ -332,6 +372,28 @@ function Save-CommandArtifacts($Artifact) {
         $Artifact.diagnostic, [Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText((Join-Path $privateDir "$($Artifact.prefix).exit.txt"),
         $Artifact.exitStatus, [Text.UTF8Encoding]::new($false))
+}
+
+function Get-ProtectionWriteProgress($Details) {
+    if ($Details.confirmed -isnot [pscustomobject] -or
+        $Details.unconfirmed -isnot [array] -or $Details.not_attempted -isnot [array]) { return }
+
+    # Keep only setting names and typed readbacks in the shareable report.
+    $settings = @('software_current_enabled','software_current_limit','software_current_delay',
+                  'software_power_limit','software_power_delay','hardware_power_limit')
+    $confirmed = [ordered]@{}
+    foreach ($field in $settings) {
+        $value = $Details.confirmed.$field
+        $valid = if ($field -ceq 'software_current_enabled') { $value -is [bool] } else {
+            $value -is [string] -and $value -cmatch '\A[+-]?[0-9]+(?:\.[0-9]+)?(?:[Ee][+-]?[0-9]+)?\z'
+        }
+        if ($valid) { $confirmed[$field] = $value }
+    }
+    return [ordered]@{
+        confirmed = $confirmed
+        unconfirmed = @($Details.unconfirmed | Where-Object { $_ -is [string] -and $_ -cin $settings })
+        not_attempted = @($Details.not_attempted | Where-Object { $_ -is [string] -and $_ -cin $settings })
+    }
 }
 
 function Invoke-LiveCommand([string]$Command, [string]$CaseName,
@@ -407,6 +469,26 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
             $code = [string]$result.error.code
             $details = $result.error.details
             $entry['error_code'] = $(if ($code -cmatch '^[a-z_]+$') { $code } else { 'execution_failed' })
+            if ($Command -ceq 'protection-set' -and $result.ok -eq $false) {
+                $progress = Get-ProtectionWriteProgress $details
+                if ($null -ne $progress) { $entry['protection_write_progress'] = $progress }
+            }
+            if ($CaseName.StartsWith('protection-') -and $result.ok -eq $false -and
+                $null -eq $details.cleanup_errors) {
+                if ($details.input_state -cin @('ON','OFF')) {
+                    $entry['protection_state'] = $details.input_state
+                } elseif ($code -in @('already_on','input_not_off')) {
+                    $entry['protection_state'] = 'ON'
+                }
+                if (-not $details.operator_action_required -and
+                    $code -in @('readback_mismatch','protection_trial_interlock','protection_still_active',
+                                'protection_clear_unexpected_on')) {
+                    $entry['protection_exchange_confirmed'] = $true
+                    if ($Command -ceq 'input-on' -and -not $details.input_on_attempted) {
+                        $entry['protection_on_refused'] = $true
+                    }
+                }
+            }
             if ($script:triggerSelected -and ($code -in @('query_failed','write_failed',
                     'visa_open_failed','visa_configure_failed','cleanup_failed','trace_session_untrusted') -or
                     $null -ne $details.cleanup_errors)) {
@@ -503,9 +585,10 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
             $artifact = @{prefix=('{0:D2}-{1}' -f $sequence, $CaseName); output=$output;
                           diagnostic=$diagnostic; exitStatus=$exitStatus}
             if ($script:triggerPowered) { $script:triggerArtifacts += $artifact }
+            elseif ($script:protectionPowered) { $script:protectionArtifacts += $artifact }
             else { Save-CommandArtifacts $artifact }
         }
-        if (-not $script:triggerPowered) { Save-Report }
+        if (-not ($script:triggerPowered -or $script:protectionPowered)) { Save-Report }
     }
 }
 
@@ -639,7 +722,7 @@ function Assert-TriggerOff($Response, [string]$Name) {
     Assert-InputOff $Response $Name
 }
 
-function Read-TriggerAnswer([string]$Prompt, [string]$CaseName, [switch]$DiscardPendingKeys) {
+function Read-ValidationAnswer([string]$Prompt, [string]$CaseName, [switch]$DiscardPendingKeys) {
     if ($DiscardPendingKeys) {
         while ($script:watch.ElapsedMilliseconds -lt $script:totalDeadlineMs -and [Console]::KeyAvailable) {
             $null = [Console]::ReadKey($true)
@@ -669,6 +752,231 @@ function Read-TriggerAnswer([string]$Prompt, [string]$CaseName, [switch]$Discard
         }
     }
     Fail-Case $CaseName 'deadline_expired' 'The total CLI validation deadline expired while waiting for the operator.'
+}
+
+function Get-ProtectionSetArgs($Settings) {
+    foreach ($field in $Settings.Keys) {
+        '--' + $field.Replace('_', '-')
+        if ($Settings[$field] -is [bool]) {
+            if ($Settings[$field]) { 'on' } else { 'off' }
+        } else { [string]$Settings[$field] }
+    }
+}
+
+function New-ProtectionPlan {
+    $set = $script:protectionScope + @('--confirm')
+    $status = $script:protectionScope + @('--validation-snapshot')
+    foreach ($trial in $script:protectionTrials) {
+        $prefix = "protection-$($trial.name)"
+        $trialArgs = @(Get-ProtectionSetArgs $trial.settings)
+        $script:protectionPlans += @(
+            @{name="$prefix-original";command='protection-status';args=$status},
+            @{name="$prefix-cc";command='set-cc';args=@('--current','0.20','--range','low')}
+        )
+        if ($trial.name -ceq 'hardware-power') {
+            $script:protectionPlans += @(
+                @{name="$prefix-baseline-on";command='operator-observation';args=@()},
+                @{name="$prefix-baseline-trial";command='input-on';args=$set + @('--protection-trial','hardware-power-baseline')},
+                @{name="$prefix-baseline-off";command='input-off';args=@()}
+            )
+        }
+        $script:protectionPlans += @(
+            @{name="$prefix-set";command='protection-set';args=$set + $trialArgs},
+            @{name="$prefix-on";command='operator-observation';args=@()},
+            @{name="$prefix-trial";command='input-on';args=$set + @('--protection-trial',$trial.name)}
+        )
+        $off = @{name="$prefix-off";command='input-off';args=@()}
+        if ($trial.flags.Count -gt 0) {
+            $off.condition = 'cleanup if software protection did not turn Input OFF'
+        }
+        $script:protectionPlans += $off
+        $script:protectionPlans += @{name="$prefix-events";command='protection-status';args=$script:protectionScope + @('--events')}
+        if ($trial.flags.Count -gt 0) {
+            $script:protectionPlans += @(
+                @{name="$prefix-source-off";command='operator-observation';args=@()},
+                @{name="$prefix-clear";command='protection-clear';args=$set}
+            )
+        }
+        $script:protectionPlans += @(
+            @{name="$prefix-restore-guard";command='input-state';args=@()},
+            @{name="$prefix-restore-settings";command='protection-set';args=$set + $trialArgs;
+              condition='use the original values read before the trial'},
+            @{name="$prefix-restore-cc";command='set-cc';args=@('--current','0.20','--range','low');
+              condition='use the original Fixed CC settings'},
+            @{name="$prefix-final";command='protection-status';args=$status}
+        )
+    }
+    foreach ($group in @('software-power', 'hardware-power')) {
+        $prefix = "protection-default-$group"
+        $example = @('--hardware-power-limit','0.50')
+        if ($group -eq 'software-power') { $example = @('--software-power-limit','0.50','--software-power-delay','1') }
+        $script:protectionPlans += @(
+            @{name="$prefix-original";command='protection-status';args=$status},
+            @{name="$prefix-set";command='protection-set';args=$set + @('--restore-defaults',$group)},
+            @{name="$prefix-restore-guard";command='input-state';args=@()},
+            @{name="$prefix-restore-settings";command='protection-set';args=$set + $example;
+              condition='use the original values read before restoring defaults'},
+            @{name="$prefix-final";command='protection-status';args=$status}
+        )
+    }
+}
+
+function Invoke-ProtectionStep([string]$Name, [string[]]$ArgsOverride, [switch]$Cleanup) {
+    $step = $script:protectionPlans | Where-Object { $_.name -ceq $Name }
+    $entry = $script:report.results | Where-Object { $_.name -ceq $Name }
+    $extra = $step.args
+    if ($PSBoundParameters.ContainsKey('ArgsOverride')) {
+        $extra = $ArgsOverride
+        $entry.arguments = $extra
+    }
+    $confirmed = $false
+    $entry['protection_state'] = 'UNKNOWN'
+    $script:report.protection_input_off_unconfirmed = $true
+    try {
+        $response = Invoke-LiveCommand -Command $step.command -CaseName $Name -ExtraArgs $extra -Cleanup:$Cleanup
+        Assert-Runtime $response $Name
+        $confirmed = $true
+        $fields = @{input_state='protection_state';condition='protection_condition';events='protection_events';
+                    settings='protection_settings';applied='protection_settings';fixed_cc='protection_fixed_cc'}
+        foreach ($field in $fields.Keys) {
+            if ($null -ne $response.result.$field) { $entry[$fields[$field]] = $response.result.$field }
+        }
+        if ($null -ne $response.result.power_w) {
+            $entry['protection_measurements'] = [ordered]@{
+                voltage_v=$response.result.voltage_v;current_a=$response.result.current_a;power_w=$response.result.power_w
+            }
+            if ($null -ne $response.result.calculated_power_w) {
+                $entry.protection_measurements['calculated_power_w'] = $response.result.calculated_power_w
+            }
+        }
+        if ($step.command -cne 'input-on') { Assert-InputOff $response $Name }
+        return $response
+    } finally {
+        $script:report.protection_input_off_unconfirmed = $entry.protection_state -cne 'OFF'
+        $script:protectionTrusted = $script:protectionTrusted -and
+            ($confirmed -or $entry.Contains('protection_exchange_confirmed'))
+    }
+}
+
+function Confirm-ProtectionOperator([string]$Name, [string]$Prompt) {
+    $answer = Read-ValidationAnswer $Prompt $Name -DiscardPendingKeys
+    if ($null -eq $answer -or $answer -cne '') {
+        Fail-Case $Name 'confirmation_required' 'The operator did not confirm the Protection step.'
+    }
+    ($script:report.results | Where-Object { $_.name -ceq $Name }).status = 'PASS'
+}
+
+function Invoke-PoweredProtectionTrial([string]$Prefix, [string]$Trial, [switch]$ExplicitOff) {
+    Confirm-ProtectionOperator "$Prefix-on" "Confirm the same dedicated source is ON at 5 V / 0.8 A, Input is OFF and manual cutoff is ready. Press Enter for $Trial at 0.20 A (Ctrl+C to cancel)."
+    $script:protectionPowered = $true
+    try {
+        return (Invoke-ProtectionStep "$Prefix-trial").result
+    } finally {
+        try {
+            $entry = $script:report.results | Where-Object { $_.name -ceq "$Prefix-trial" }
+            if ($script:protectionTrusted -and -not $entry.protection_on_refused -and
+                ($ExplicitOff -or $script:report.protection_input_off_unconfirmed)) {
+                $null = Invoke-ProtectionStep "$Prefix-off" -Cleanup
+            }
+        } finally {
+            $script:protectionPowered = $false
+        }
+    }
+}
+
+function Restore-Protection([string]$Prefix, $Original, $Fields, [bool]$RestoreCc) {
+    $script:report.protection_restore_unconfirmed = $true
+    if (-not $script:protectionTrusted -or $script:report.protection_input_off_unconfirmed) {
+        Write-Host 'Protection restoration needs trusted VISA and confirmed Input OFF. Verify manually.'
+        return
+    }
+    $null = Invoke-ProtectionStep "$Prefix-restore-guard"
+    if ($Fields.Count -gt 0) {
+        $settings = [ordered]@{}
+        foreach ($field in $Fields) { $settings[$field] = $Original.settings.$field }
+        $arguments = $script:protectionScope + @('--confirm') + @(Get-ProtectionSetArgs $settings)
+        $null = Invoke-ProtectionStep "$Prefix-restore-settings" -ArgsOverride $arguments
+    }
+    if ($RestoreCc) {
+        $arguments = @('--current',$Original.fixed_cc.current_a,'--range',$Original.fixed_cc.range)
+        $null = Invoke-ProtectionStep "$Prefix-restore-cc" -ArgsOverride $arguments
+    }
+    $final = Invoke-ProtectionStep "$Prefix-final"
+    if ($final.result.fixed_cc.range -cne $Original.fixed_cc.range -or
+        [decimal]$final.result.fixed_cc.current_a -ne [decimal]$Original.fixed_cc.current_a) {
+        Fail-Case "$Prefix-final" 'readback_mismatch' 'Fixed CC restoration did not match its original settings.'
+    }
+    foreach ($field in $Original.settings.PSObject.Properties.Name) {
+        $matches = if ($Original.settings.$field -is [bool]) {
+            $final.result.settings.$field -is [bool] -and $final.result.settings.$field -eq $Original.settings.$field
+        } else { [decimal]$final.result.settings.$field -eq [decimal]$Original.settings.$field }
+        if (-not $matches) {
+            Fail-Case "$Prefix-final" 'readback_mismatch' 'Protection restoration did not match its original settings.'
+        }
+    }
+    $script:report.protection_restore_unconfirmed = $false
+}
+
+function Invoke-ProtectionValidation {
+    foreach ($trial in $script:protectionTrials) {
+        $prefix = "protection-$($trial.name)"
+        $script:report.protection_trials[$trial.name] = 'FAIL'
+        $original = Invoke-ProtectionStep "$prefix-original"
+        $fields = @()
+        try {
+            $script:report.protection_restore_unconfirmed = $true
+            $null = Invoke-ProtectionStep "$prefix-cc"
+            if ($trial.name -ceq 'hardware-power') {
+                $baseline = Invoke-PoweredProtectionTrial "$prefix-baseline" 'hardware-power-baseline' -ExplicitOff
+                if ($baseline.input_state -cne 'ON' -or 'PS' -cin $baseline.condition.flags -or
+                    $baseline.voltage_v -lt 4.75 -or $baseline.voltage_v -gt 5.25 -or
+                    $baseline.current_a -lt 0.18 -or $baseline.current_a -gt 0.22) {
+                    Fail-Case "$prefix-baseline-trial" 'power_baseline_unconfirmed' 'The source did not sustain approximately 0.20 A at 5 V before limiting.'
+                }
+            }
+            $fields = @($trial.settings.Keys)
+            $null = Invoke-ProtectionStep "$prefix-set"
+            $observed = Invoke-PoweredProtectionTrial $prefix $trial.name -ExplicitOff:($trial.flags.Count -eq 0)
+            if ($trial.flags.Count -gt 0) {
+                if ($observed.input_state -cne 'OFF' -or
+                    @($trial.flags | Where-Object { $_ -cnotin $observed.condition.flags }).Count -gt 0) {
+                    if (($trial.name -eq 'software-current' -and $observed.current_a -le 0.10) -or
+                        ($trial.name -eq 'software-power' -and $observed.power_w -le 0.50)) {
+                        Fail-Case "$prefix-trial" 'protection_exposure_not_proven' 'Measurements did not establish exposure above the software threshold.'
+                    }
+                    Fail-Case "$prefix-trial" 'protection_trip_unconfirmed' 'Software trip and Input OFF were not both confirmed.'
+                }
+                ($script:report.results | Where-Object { $_.name -ceq "$prefix-off" }).status = 'SKIP'
+            } else {
+                $calculated = $observed.calculated_power_w
+                if ($observed.input_state -cne 'ON' -or 'PS' -cin $observed.condition.flags -or
+                    $observed.voltage_v -lt 4.75 -or $observed.voltage_v -gt 5.25 -or
+                    $calculated -lt 0.45 -or $calculated -gt 0.55 -or
+                    $calculated -ge $baseline.calculated_power_w) {
+                    Fail-Case "$prefix-trial" 'power_limit_unconfirmed' 'Measurements did not confirm the 0.50 W hardware limit.'
+                }
+            }
+            $null = Invoke-ProtectionStep "$prefix-events"
+            if ($trial.flags.Count -gt 0) {
+                Confirm-ProtectionOperator "$prefix-source-off" 'Verify the trip on the load, turn OFF and isolate the external source, and press Enter only after confirming the fault condition is removed (Ctrl+C to cancel).'
+                $null = Invoke-ProtectionStep "$prefix-clear"
+            }
+        } finally {
+            Restore-Protection $prefix $original.result $fields $true
+        }
+        $script:report.protection_trials[$trial.name] = 'PASS'
+    }
+    foreach ($group in @('software-power', 'hardware-power')) {
+        $prefix = "protection-default-$group"
+        $original = Invoke-ProtectionStep "$prefix-original"
+        $fields = @('hardware_power_limit')
+        if ($group -eq 'software-power') { $fields = @('software_power_limit','software_power_delay') }
+        try {
+            $null = Invoke-ProtectionStep "$prefix-set"
+        } finally {
+            Restore-Protection $prefix $original.result $fields $false
+        }
+    }
 }
 
 function Invoke-TriggerTrial($Trial) {
@@ -707,7 +1015,7 @@ function Invoke-TriggerTrial($Trial) {
         }
         $awaitingObservation = $true
         $entry['operator_observed'] = 'Unconfirmed'
-        $ack = Read-TriggerAnswer 'With Input OFF and capture ready, press Enter to start the bounded observation (Ctrl+C to cancel)' "$prefix-observed"
+        $ack = Read-ValidationAnswer 'With Input OFF and capture ready, press Enter to start the bounded observation (Ctrl+C to cancel)' "$prefix-observed"
         if ($null -eq $ack -or $ack -cne '') {
             Fail-Case "$prefix-observed" 'operator_cancelled' 'Operator did not confirm readiness.'
         }
@@ -769,7 +1077,7 @@ function Invoke-TriggerTrial($Trial) {
                 Save-Report
             }
         }
-        $answer = Read-TriggerAnswer "Input OFF confirmed. Did you observe the expected $($Trial.source) result? (Yes/No)" `
+        $answer = Read-ValidationAnswer "Input OFF confirmed. Did you observe the expected $($Trial.source) result? (Yes/No)" `
             "$prefix-observed" -DiscardPendingKeys
         $entry['operator_observed'] = if ($answer -ieq 'Yes') { 'Yes' } elseif ($answer -ieq 'No') { 'No' } else { 'Unconfirmed' }
         if ($answer -ine 'Yes') {
@@ -924,6 +1232,10 @@ try {
     if ($requestedModes.Count -eq 0 -or @($requestedModes | Where-Object { $_ -notin $supportedModes }).Count -gt 0) {
         throw "Modes must contain one or more of: $($supportedModes -join ', ')."
     }
+    if ($protectionSelected -and ($selectedModes.Count -ne 1 -or
+        $SourceVoltageLimitV -ne 5 -or $SourceCurrentLimitA -ne 0.8)) {
+        throw 'Select Protection alone with a dedicated 5 V / 0.8 A source.'
+    }
     if (-not $Target -or -not $Resource) {
         Write-Host 'BLOCKED: explicit -Target and -Resource are required.'
         exit 2
@@ -939,7 +1251,7 @@ try {
         }
         $report.prechecks.current = 'PASS'
     }
-    $report.script_current_ceiling_a = $scriptCurrentCeilingA
+    $report.script_current_ceiling_a = if ($protectionSelected) { 0.20 } else { $scriptCurrentCeilingA }
     if ($timerSelected) {
         & $python -c 'import sys; from electronicload_tool_core.control import validate_input_timer; value=validate_input_timer(int(sys.argv[1])); sys.exit(0 if 3 <= value <= 10 else 2)' $TimerSeconds
         if ($LASTEXITCODE -ne 0) { throw 'Timer validation seconds must be an integer from 3 through 10.' }
@@ -1172,11 +1484,12 @@ try {
         )
     }
     if ($triggerSelected) { New-TriggerPlan }
+    if ($protectionSelected) { New-ProtectionPlan }
     foreach ($step in ($planned | Where-Object { $_.ContainsKey('cr_handoff_after') })) {
         $step.condition = "$($step.cr_handoff_after) refused a resistance origin before remote"
     }
     # Preserve the original Source/Timer before any legacy Transient can write HOLD.
-    $allSteps = $planned + $slowRiseCleanup
+    $allSteps = $planned + $slowRiseCleanup + $protectionPlans
     if ($triggerSelected) {
         $allSteps = @($planned | Select-Object -First 3) + @($triggerPlans | Select-Object -First 1) +
             @($planned | Select-Object -Skip 3) + $slowRiseCleanup +
@@ -1213,6 +1526,10 @@ try {
     Write-Host "Mode: $(if ($PlanOnly) { 'PLAN ONLY' } else { 'LIVE' })"
     Write-Host "Selected modes: $($selectedModes -join ', ')."
     Write-Host "Plan: Identify, Input State, Measure."
+    if ($protectionSelected) {
+        Write-Host 'Protection: independent software current trip, software power trip and hardware power limit trials at 0.20 A.'
+        Write-Host 'Start in Fixed CC. Each trial requires Enter before Input ON. Software Clear also requires source isolation and a second Enter.'
+    }
     if ($traceSelected) {
         Write-Host 'TRACE: four Input OFF batches and one bounded Fixed CC ON batch with explicit OFF.'
         Write-Host "TRACE Start process deadline: $traceStartDeadlineMs ms. No auto reconnect."
@@ -1220,7 +1537,8 @@ try {
     if ('cc' -in $selectedModes -or $traceSelected) {
         Write-Host 'CC setup from CR: conditional contributor handoff with Input OFF and the Core LED OFF interlock.'
     }
-    if (@($selectedModes | Where-Object { $_ -ne 'trace' -and $_ -notin $featureModes }).Count -gt 0) {
+    if (-not $protectionSelected -and
+        @($selectedModes | Where-Object { $_ -ne 'trace' -and $_ -notin $featureModes }).Count -gt 0) {
         Write-Host 'Other selected modes retain explicit ON/OFF and independent OFF confirmation.'
     }
     if ($featureSelected) {
@@ -1234,7 +1552,9 @@ try {
         Write-Host 'Slow Rise requires a non-resistance starting function and expects Fixed CV setup to be refused while enabled.'
         Write-Host 'If the Slow Rise trial stops before confirmed Disable, cleanup requires trusted communication and confirmed Input OFF.'
     }
-    Write-Host 'Fixed Auto adds Input OFF setup/readback with the existing values; no extra ON/OFF cycles.'
+    if (-not $protectionSelected) {
+        Write-Host 'Fixed Auto adds Input OFF setup/readback with the existing values; no extra ON/OFF cycles.'
+    }
     if (@($selectedModes | Where-Object { $_.StartsWith('transient-') }).Count -gt 0) {
         Write-Host 'Transient: Continuous/Pulse/Toggle, Low/High/Auto, repeated triggers, control status and separate disable.'
         Write-Host 'Trigger/status/measure do not establish waveform shape, timing or completion.'
@@ -1267,7 +1587,9 @@ try {
     # Focused selections keep their preflight; mixed/all-mode runs check
     # the original base and only the chosen feature-specific offline scopes.
     $preflightScript = Join-Path $PSScriptRoot 'preflight-cli.ps1'
-    if ($selectedModes.Count -eq 1 -and $timerSelected) {
+    if ($protectionSelected) {
+        & $preflightScript -ProtectionOnly
+    } elseif ($selectedModes.Count -eq 1 -and $timerSelected) {
         & $preflightScript -InputTimerOnly
     } elseif ($selectedModes.Count -eq 1 -and $traceSelected) {
         & $preflightScript -TraceOnly
@@ -1309,8 +1631,13 @@ try {
         Write-Host '- Confirm external On/Off and analog programming are disabled and external trigger wiring was reviewed while de-energized.'
     }
     Write-Host '- Selected trials may deliberately turn Input ON; the script explicitly commands and verifies OFF, but cannot guarantee OFF after communication failures.'
-    $ack = Read-Host 'After completing these checks, press Enter to run selected CLI cases (Ctrl+C to cancel)'
-    if ($ack -cne '' -or ($triggerSelected -and $null -eq $ack)) {
+    $ack = if ($protectionSelected) {
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        Read-ValidationAnswer 'Confirm a dedicated source and no important DUT. Press Enter to start (Ctrl+C to cancel)' 'identify' -DiscardPendingKeys
+    } else {
+        Read-Host 'After completing these checks, press Enter to run selected CLI cases (Ctrl+C to cancel)'
+    }
+    if ($ack -cne '' -or (($triggerSelected -or $protectionSelected) -and $null -eq $ack)) {
         $report.status = 'BLOCKED'
         Save-Report
         Show-Summary
@@ -1323,7 +1650,7 @@ try {
         [IO.File]::WriteAllText((Join-Path $privateDir 'resource.txt'),
             $Resource, [Text.UTF8Encoding]::new($false))
     }
-    $watch = [Diagnostics.Stopwatch]::StartNew()
+    if ($null -eq $watch) { $watch = [Diagnostics.Stopwatch]::StartNew() }
     $phase = 'identify'
     Write-Host 'Running Identify precheck...'
     $identity = Invoke-LiveCommand -Command 'identify' -CaseName 'identify'
@@ -1374,6 +1701,9 @@ try {
             # Legacy validation writes TRIG:SOUR HOLD; mark before a possibly partial write.
             $script:triggerSourceMayHaveChanged = $true
         }
+        if ($protectionSelected -and $step.name -ceq 'input-state') {
+            $report.protection_input_off_unconfirmed = $true
+        }
         $result = Invoke-LiveCommand -Command $step.command -CaseName $step.name `
             -ExtraArgs $step.args -DeadlineMs $commandDeadline -ExpectedError $step.expected_error `
             -AllowCrHandoff:($step.allow_cr_handoff -eq $true)
@@ -1383,6 +1713,9 @@ try {
             continue
         }
         Assert-Runtime $result $step.name
+        if ($protectionSelected -and $step.name -ceq 'input-state') {
+            $report.protection_input_off_unconfirmed = $result.result.input_state -cne 'OFF'
+        }
         if ($step.ContainsKey('trace_expected')) { Assert-TraceResult $result $step }
         if ($step.ContainsKey('led') -and
             ($result.result.led_enabled -cne $step.led -or $result.result.fixed_cr -cne $step.fixed_cr -or
@@ -1449,6 +1782,7 @@ try {
         $entry.status = 'SKIP'
     }
     if ($triggerSelected) { Invoke-TriggerValidation }
+    if ($protectionSelected) { Invoke-ProtectionValidation }
     $report.status = 'PASS'
     Save-Report
     Show-Summary
@@ -1467,8 +1801,9 @@ try {
     Write-Host "Validation did not complete: $($_.Exception.Message)"
 } finally {
     # PowerShell pipeline interruption can bypass catch and the exit after finally.
-    $triggerInterrupted = $triggerSelected -and $phase -in @('identify','cases') -and $report.status -eq 'NOT RUN'
-    if ($triggerInterrupted) { $report.status = 'FAIL' }
+    $validationInterrupted = ($triggerSelected -or $protectionSelected) -and
+        $phase -in @('identify','cases') -and $report.status -eq 'NOT RUN'
+    if ($validationInterrupted) { $report.status = 'FAIL' }
     if ($inputOnAttempted) {
         $report.results += [ordered]@{
             name = 'cleanup-input-off'; command = 'input-off'; status = 'NOT RUN'
@@ -1599,13 +1934,17 @@ try {
             Write-Host 'WARNING: Trigger Source and Timer Interval restoration blocked by uncertain safety state; operator action required.'
         }
     }
+    foreach ($artifact in $protectionArtifacts) { Save-CommandArtifacts $artifact }
+    if ($protectionSelected -and $report.protection_input_off_unconfirmed) {
+        Write-Host 'Protection Input OFF is unconfirmed. Use the independent manual OFF procedure immediately.'
+    }
     Save-Report
     if ($null -ne $reportDirectory) {
         if ($report.status -ne 'PASS' -and $report.status -ne 'PLAN ONLY') { Show-Summary }
         Write-Host "Report: $reportDirectory/shareable/report.json"
         if ($DebugArtifacts) { Write-Host "Private debug logs: $reportDirectory/private (review before sharing)" }
     }
-    if ($triggerInterrupted) {
+    if ($validationInterrupted) {
         # A stopped -File pipeline can discard a script-level exit. Exit only
         # the dedicated file host, and only after cleanup and report writes.
         if ([string]::IsNullOrEmpty($MyInvocation.Line) -and $MyInvocation.InvocationName -eq $PSCommandPath) {
