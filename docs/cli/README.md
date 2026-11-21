@@ -542,12 +542,13 @@ Input Timer, Trigger, and Protection use their existing scopes. These requests
 require the exact IT8812C identity and an explicit USB INSTR Resource with
 System VISA. The new contributor readbacks identify their source as
 `instrument_readback`. Query failures and invalid replies return errors.
+`fixed-slew-status` checks both rates against the current CC Range.
 For CV, CR and LIST, a valid numeric Range selector without a known label is
 returned as its raw readback with `range: null`. The IT8812C has a single 250 W
 CW range, so CW reports `range: null` and reads the power setpoint without a
-range query. Native LIST widths above 16,383 seconds are reported as received
-and indicate a hold until the next trigger. The CLI's limits for setting up a
-LIST apply to writes. [ITECH IT8800 User Manual, IT8812C specifications](https://media.digikey.com/pdf/Data%20Sheets/ITech%20Elect%20PDFs/IT8800%20User%20Manual.pdf) [ITECH IT8800 Programming Guide, pp. 57 and 60–61](https://assets.testequity.com/te1/Documents/pdf/itech/ITECH_IT8800-Programming-Guide-EN.pdf#page=67)
+range query. `list-status` checks each width against the IT8812C range of
+0.00002–3600 seconds. An out-of-range slew or LIST step value is included in
+the error details. [ITECH IT8811/12/12B/12C User Manual, §3.18 and IT8812C specifications](https://media.digikey.com/pdf/Data%20Sheets/ITech%20Elect%20PDFs/IT8800%20User%20Manual.pdf)
 
 ```powershell
 .\.venv\Scripts\electronicload-tool.exe readback --hardware-validation readback --resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" --json

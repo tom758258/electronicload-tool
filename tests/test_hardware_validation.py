@@ -618,7 +618,7 @@ def test_configuration_readback_list_reads_observed_steps_and_rejects_bad_count(
     for index in range(1, 4):
         readings.update({f"LIST:LEV? {index}": str(index), f"LIST:SLEW? {index}": "0.1",
                          f"LIST:WID? {index}": "0.01234567890123456789"})
-    readings["LIST:WID? 1"] = "16384"
+    readings["LIST:WID? 1"] = "3600"
     fake_visa.responses.update({"FUNC:MODE?": "LIST", "FUNC?": "CURR", "TRAN?": "0", **readings})
     result = control.execute("list-status", resource=RESOURCE, hardware_validation="readback")
     actual = result["configuration"]
@@ -626,7 +626,7 @@ def test_configuration_readback_list_reads_observed_steps_and_rejects_bad_count(
     assert actual["range_readback_a"] == 15 and actual["range"] is None
     assert actual["step_count"] == 3 and actual["repeat_count"] == 65536
     assert [step["current_a"] for step in actual["steps"]] == [1, 2, 3]
-    assert actual["steps"][0]["width_s"] == "16384"
+    assert actual["steps"][0]["width_s"] == "3600"
     assert actual["steps"][2]["width_s"] == "0.01234567890123456789"
     assert {call for call in fake_visa.calls if isinstance(call, str) and "?" in call} == {
         "*IDN?", "FUNC:MODE?", "FUNC?", "TRAN?", "INP:STAT?", *readings,
@@ -638,6 +638,13 @@ def test_configuration_readback_list_reads_observed_steps_and_rejects_bad_count(
     assert summary["active_mode"] == "list" and summary["configuration"]["step_count"] == 3
     assert "steps" not in summary["configuration"] and "LIST:LEV? 1" not in fake_visa.calls
 
+    fake_visa.responses["LIST:WID? 1"] = "1E+40"
+    with pytest.raises(LoadError) as failure:
+        control.execute("list-status", resource=RESOURCE, hardware_validation="readback")
+    assert failure.value.code == "invalid_response" and failure.value.exit_code == 3
+    assert failure.value.details == {"query": "LIST:WID? 1", "step": 1, "observed": "1E+40"}
+
+    fake_visa.responses["LIST:WID? 1"] = readings["LIST:WID? 1"]
     fake_visa.responses.update({"LIST:RANG?": "6", "LIST:SLEW? 1": "2"})
     with pytest.raises(LoadError) as failure:
         control.execute("list-status", resource=RESOURCE, hardware_validation="readback")

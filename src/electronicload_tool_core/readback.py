@@ -85,14 +85,21 @@ def _fixed(session, function):
 
 
 def fixed_slew_status(session):
-    if isinstance(session, ControlSimulator) and not session.fixed_cc_slew:
-        return {"configured": False, "rise_slew_a_per_us": None, "fall_slew_a_per_us": None}
+    range_name = None
+    if isinstance(session, ControlSimulator):
+        # The simulator retains the last configured pair across CC range changes.
+        if not session.fixed_cc_slew:
+            return {"configured": False, "rise_slew_a_per_us": None, "fall_slew_a_per_us": None}
+    else:
+        range_name, _ = _range(session, "CC")
+    minimum, maximum = _bounds(c.SLEW_LIMITS, range_name)
     readings = {"configured": True}
     for field, stem in SLEW_QUERIES.items():
         query = stem + "?"
         value = c._decimal_readback(session, query)
-        if not c.SLEW_LIMITS["low"][0] <= value <= c.SLEW_LIMITS["high"][1]:
-            raise LoadError("invalid_response", "Current slew is outside model limits.", 3, query=query)
+        if not minimum <= value <= maximum:
+            raise LoadError("invalid_response", "Current slew is outside model limits.", 3,
+                            query=query, range=range_name, observed=str(value))
         readings[f"{field}_a_per_us"] = str(value)
     return readings
 
@@ -171,12 +178,10 @@ def _list_configuration(session, *, summary=False):
     if summary:
         return metadata
     range_name = metadata["range"]
-    # Native widths above 16383 s hold until the next trigger. The offline
-    # setup ceiling does not apply to values already on the instrument.
     fields = (
         ("current_a", "LIST:LEV", _bounds(SETPOINT_LIMITS["CC"], range_name)),
         ("slew_a_per_us", "LIST:SLEW", _bounds(c.SLEW_LIMITS, range_name)),
-        ("width_s", "LIST:WID", (Decimal("0.00002"), Decimal("Infinity"))),
+        ("width_s", "LIST:WID", c.LIST_WIDTH_LIMITS),
     )
     steps = []
     for index in range(1, count + 1):
@@ -186,7 +191,7 @@ def _list_configuration(session, *, summary=False):
             value = c._decimal_readback(session, query)
             if not minimum <= value <= maximum:
                 raise LoadError("invalid_response", "LIST step readback is outside model limits.", 3,
-                                query=query, step=index)
+                                query=query, step=index, observed=str(value))
             step[field] = value
         steps.append(step)
     return {**metadata, "steps": steps}

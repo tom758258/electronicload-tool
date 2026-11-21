@@ -423,15 +423,15 @@ Use the selected Protection mode by itself.
 Run the affected Core, CLI and Worker cases from the repository root.
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q tests/test_readonly_core.py tests/test_hardware_validation.py tests/test_trace.py tests/test_readonly_cli.py tests/test_worker.py -k configuration_readback
+.\.venv\Scripts\python.exe -m pytest -q tests/test_readonly_core.py tests/test_hardware_validation.py tests/test_trace.py tests/test_readonly_cli.py tests/test_worker.py tests/test_list_core.py tests/test_transient_core.py -k configuration_readback
 .\scripts\preflight-cli.ps1 -ReadbackOnly
 ```
 
 Use recording Fake VISA for mode selection, the bounded LIST step count, and
 status replies. Check the compact Transient summary, known Range conflicts,
-and native LIST width readback. Verify query-only operation, session closure
-on errors, and LIVE refusal before VISA. Use simulated status mismatches for
-LIST and Transient write verification.
+and the model-specific LIST width limits. Verify query-only operation, session
+closure on errors, and LIVE refusal before VISA. Use simulated status
+mismatches for LIST and Transient write verification.
 Select existing help/version tests when changing CLI arguments. Exercise
 `-Modes readback -PlanOnly` and noninteractive refusal, and the directly
 affected Fixed, Transient, TRACE and Trigger script plans. Verify that the

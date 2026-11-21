@@ -445,9 +445,16 @@ def test_configuration_readback_fixed_refuses_list_and_enabled_transient(fake_vi
 
 def test_configuration_readback_fixed_slew_uses_instrument_values(fake_visa):
     fake_visa.responses.update({"FUNC:MODE?": "FIX", "FUNC?": "CURR", "TRAN?": "0",
+                                "CURR:RANG?": "60",
                                 "CURR:SLEW:POS?": "0.1234567890123456789",
-                                "CURR:SLEW:NEG?": "0.28"})
+                                "CURR:SLEW:NEG?": "2"})
     result = execute("fixed-slew-status", resource=RESOURCE, hardware_validation="readback")
     assert result["rise_slew_a_per_us"] == "0.1234567890123456789"
-    assert result["fall_slew_a_per_us"] == "0.28"
+    assert result["fall_slew_a_per_us"] == "2"
     assert "CURR?" not in fake_visa.calls
+
+    fake_visa.responses["CURR:RANG?"] = "6"
+    with pytest.raises(LoadError) as failure:
+        execute("fixed-slew-status", resource=RESOURCE, hardware_validation="readback")
+    assert failure.value.code == "invalid_response" and failure.value.exit_code == 3
+    assert failure.value.details == {"query": "CURR:SLEW:NEG?", "range": "low", "observed": "2"}

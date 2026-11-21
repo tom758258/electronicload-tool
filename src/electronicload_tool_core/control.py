@@ -47,6 +47,8 @@ TRANSIENT_FIELDS = frozenset({"transient_mode", "range", "level_a", "level_b", "
 # not a documented decimal step. Programming Guide V2.1 pp.48,50-51.
 SLEW_LIMITS = {"low": (Decimal("0.0001"), Decimal("0.25")),
                "high": (Decimal("0.001"), Decimal("2.5"))}
+# IT8811/12/12B/12C User Manual V2.7, section 3.18.
+LIST_WIDTH_LIMITS = (Decimal("0.00002"), Decimal("3600"))
 # Exact IT8812C Product LIVE control commands; the model, USB/System VISA,
 # Explicit Input ON authorization remains enforced.
 PRODUCT_LIVE_COMMANDS = frozenset({"set-cc", "input-on", "input-off"})
@@ -217,6 +219,7 @@ def validate_list_cc(arguments: dict) -> dict:
         raise LoadError("invalid_list_steps", "LIST requires 2 through 84 steps.")
     fields = {"current_a", "slew_a_per_us", "width_s"}
     steps = []
+    minimum_width, maximum_width = LIST_WIDTH_LIMITS
     for index, raw in enumerate(raw_steps, 1):
         if not isinstance(raw, dict) or set(raw) != fields:
             raise LoadError("argument_error", "Each LIST step requires current_a, slew_a_per_us, width_s.",
@@ -232,7 +235,7 @@ def validate_list_cc(arguments: dict) -> dict:
             except LoadError as exc:
                 raise LoadError("invalid_list_value", "LIST step values must be finite JSON numbers.",
                                 step=index, field=field) from exc
-        if not Decimal("0.00002") <= step["width_s"] <= Decimal("3600"):
+        if not minimum_width <= step["width_s"] <= maximum_width:
             raise LoadError("width_out_of_range", "LIST width must be 0.00002 through 3600 seconds.",
                             step=index)
         steps.append(step)
