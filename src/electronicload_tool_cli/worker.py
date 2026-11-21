@@ -22,9 +22,9 @@ from electronicload_tool_core.protection import (COMMANDS as PROTECTION_COMMANDS
                                                 execute as protection_execute,
                                                 validate_arguments as validate_protection_arguments)
 from electronicload_tool_core.readonly import (COMMANDS as READ_COMMANDS, ERROR_QUEUE_COMMAND,
-                                               NATIVE_MEASUREMENTS, execute as read_execute,
+                                               NATIVE_MEASUREMENTS, SYSTEM_QUERIES, execute as read_execute,
                                                validate_error_queue_all, validate_metric)
-from electronicload_tool_core.simulator import ControlSimulator
+from electronicload_tool_core.simulator import ControlSimulator, Simulator
 from electronicload_tool_core.trace import (CONFIG_FIELDS, CSV_FIELDS, TRACE_COMMANDS,
                                            execute as trace_execute,
                                            validate_configuration, validate_csv)
@@ -76,6 +76,8 @@ class Runtime:
         self.last_job = None
         self.job_thread = None
         self.simulator = ControlSimulator()
+        # TRACE checks its own SCPI status without consuming the diagnostic FIFO.
+        self.system_query_simulator = Simulator()
         self.server = None
         self.port = port
         self.host = "127.0.0.1"
@@ -143,9 +145,10 @@ class Runtime:
                 trigger_source=arguments.get("source"),
                 trigger_interval=arguments.get("interval_s"),
             )
+        simulator = self.system_query_simulator if command in SYSTEM_QUERIES else self.simulator
         return read_execute(command, mode=core_mode, resource=self.resource,
                             backend=self.backend, model_id=MODEL_ID,
-                            metric=arguments.get("metric"), simulator=self.simulator,
+                            metric=arguments.get("metric"), simulator=simulator,
                             all_errors=arguments.get("all", False))
 
     def _shutdown_after_stop_reply(self):

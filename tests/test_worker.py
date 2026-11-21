@@ -344,7 +344,7 @@ def test_system_query_worker_keeps_fifo_across_http_jobs(capsys):
     assert all(manifest['commands'][name] == {'kind': 'async_job'} for name in commands)
 
     runtime = worker_module.Runtime(mode='simulate')
-    runtime.simulator.error_queue.extend([(-222, 'Data out of range'), (120, 'Overflow')])
+    runtime.system_query_simulator.error_queue.extend([(-222, 'Data out of range'), (120, 'Overflow')])
     with ThreadingHTTPServer(('127.0.0.1', 0), worker_module._handler(runtime)) as server:
         runtime.server, runtime.port = server, server.server_port
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -358,7 +358,7 @@ def test_system_query_worker_keeps_fifo_across_http_jobs(capsys):
             assert code == 202 and accepted['kind'] == 'async_job'
             runtime.job_thread.join(timeout=3)
             terminal = json.loads(capsys.readouterr().out.splitlines()[-1])
-            assert terminal['event'] == 'job_finished' and terminal['ok'] is True
+            assert terminal['event'] == 'job_finished' and terminal['ok'] is True, terminal['error']
             assert terminal['worker_job_id'] == accepted['worker_job_id']
             return terminal['result']
 
@@ -374,6 +374,7 @@ def test_system_query_worker_keeps_fifo_across_http_jobs(capsys):
             assert plan['queries'] == ['*IDN?', 'SYST:ERR?'] and plan['max_reads'] == 20
             assert job('scpi-version') == {'scpi_version': '1999.0'}
             assert job('display-mode') == {'display_mode': 'NORMAL'}
+            job('trace-configure', {'source': 'TWO', 'points': 4, 'interval_s': 0.001})
             assert job('scpi-error-next') == {'error_code': -222, 'message': 'Data out of range'}
             assert job('scpi-error-next', {'all': True}) == {
                 'errors': [{'error_code': 120, 'message': 'Overflow'}], 'read_count': 2,

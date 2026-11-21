@@ -36,11 +36,10 @@ class Simulator:
         }[command]
 
 
-class ControlSimulator(Simulator):
+class ControlSimulator:
     """Minimal control state for Fixed modes, offline Transient and LIST CC."""
 
     def __init__(self):
-        super().__init__()
         self.input_on = False
         self.function = "CURR"
         self.mode = "FIX"
@@ -132,8 +131,6 @@ class ControlSimulator(Simulator):
                 for key, value in self.transient_configuration.items()}
 
     def query(self, command: str) -> str:
-        if command in ("SYST:ERR?", "SYST:VERS?", "DISP:MODE?"):
-            return super().query(command)
         if command == "TRAC:FEED:CONT?" and self.trace_capturing:
             voltage, current = "12.0", str(self.current_a if self.input_on else 0)
             sample = {"VOLT": (voltage,), "CURR": (current,), "TWO": (voltage, current)}
@@ -172,6 +169,7 @@ class ControlSimulator(Simulator):
             "TRAC:DATA?": self.trace_data,
             "STAT:QUES:COND?": str(self.protection_condition
                                    | (TRACE_BUFFER_FULL if self.trace_data else 0)),
+            "SYST:ERR?": '0,"No error"',
             **NATIVE_MEASUREMENTS,
         }[command]
 
