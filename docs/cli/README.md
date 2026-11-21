@@ -497,6 +497,65 @@ Controlled physical trials require the separate hardware-validation path.
 .\.venv\Scripts\electronicload-tool.exe worker --mode simulate --control-port 0
 ```
 
+## Configuration readback
+
+Use `readback` for the selected Fixed, Transient, or LIST mode, Input and
+Short state. Results include `active_mode`, `function_mode`, the regulation
+`function` (CC/CV/CR/CW), `transient_enabled`, and `configuration`. The Core
+uses the function selector and the Transient enable flag together. The LIST
+summary includes Range, repeat count, and step count. Use `list-status` for
+the step settings.
+
+| Command | Settings returned |
+| --- | --- |
+| `fixed-status` | Fixed CC/CV/CR/CW setpoint and applicable Range. Returns `mode_not_fixed` for LIST or enabled Transient. |
+| `fixed-slew-status` | Fixed CC positive and negative slew in A/µs as decimal strings. A fresh simulator reports `configured: false` with null rates. |
+| `cr-led-status` / `current-slow-rise-status` | CR-LED, Vdrop, resistance and Range / Current Slow Rise enable. |
+| `von-status` / `short-status` / `average-status` | VON threshold and Latch / Short state / averaging count. |
+| `input-timer-status` / `trigger-status` | Timer seconds and enable / Trigger Source and Timer interval. |
+| `transient-status` | Settings for the current CC, CV, CR or CW function, even with Transient disabled. Includes waveform mode, levels A/B, applicable widths and Range, CC slew, and the enable flag. |
+| `list-status` | Current LIST working configuration, including each indexed level, slew and width. Physical slot identity and last trigger are null. Reading a stored slot requires an explicit Recall. |
+| `trace-status` | Source, points, interval and delay in seconds, filter enable, and Feed. The query observes the current buffer configuration while capture is idle or active. |
+| `protection-status` / `input-state` | Protection settings and condition / Input state. The read-and-clear Protection Event register requires the separate `--events` option. |
+
+```powershell
+.\.venv\Scripts\electronicload-tool.exe readback --simulate --json
+.\.venv\Scripts\electronicload-tool.exe fixed-status --simulate --json
+.\.venv\Scripts\electronicload-tool.exe trace-status --simulate --json
+```
+
+Each standalone simulation starts with fresh state. Use the same simulated
+Worker for configuration and subsequent status jobs. Simulated Transient
+setup selects its internal `TRAN` mode and reports enable separately.
+New status results identify simulation as `state_source: "simulate"`. Dry-run
+validates the request without opening VISA or reading configuration values.
+
+Physical configuration readback is available in the separately approved
+standalone CLI contributor scopes. Use `--hardware-validation readback` for
+`readback`, `fixed-status`, `fixed-slew-status`, `von-status`, `short-status`,
+`average-status`, `transient-status`, and `list-status`. Use
+`--hardware-validation trace` for `trace-status`. CR-LED, Current Slow Rise,
+Input Timer, Trigger, and Protection use their existing scopes. These requests
+require the exact IT8812C identity and an explicit USB INSTR Resource with
+System VISA. The new contributor readbacks identify their source as
+`instrument_readback`. Query failures and invalid replies return errors.
+
+```powershell
+.\.venv\Scripts\electronicload-tool.exe readback --hardware-validation readback --resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" --json
+```
+
+These snapshots use query-only operations. Diagnostics with destructive reads,
+mode selection, Input control, LIST Recall and TRACE capture each require their
+own explicit commands. Range replies include the observed numeric selector
+where applicable. CV, CR and LIST report a null Range label when the numeric
+selector does not identify a known range endpoint. LIST status describes the
+working buffer, and Transient status describes configuration and enable state.
+Waveform timing and completion require independent observation. TRACE status
+can display native settings outside the Tool's capture limits.
+
+[ITECH IT8800 Programming Guide V2.1](https://assets.testequity.com/te1/Documents/pdf/itech/ITECH_IT8800-Programming-Guide-EN.pdf),
+printed pp. 42–46, 47–59, and 60–62.
+
 ## Fixed Software Auto Range
 
 Fixed CC, CV and CR accept a required `auto`, `low` or `high` Range. CW has
@@ -1030,7 +1089,7 @@ does not authorize physical instrument operation.
 
 | Script | Purpose | Real hardware |
 | --- | --- | --- |
-| `scripts/preflight-cli.ps1` | Offline CLI, simulator, refusal and Manifest checks; focused switches: `-TransientOnly`, `-FixedAutoOnly`, `-FixedSlewVonShortOnly`, `-InputTimerOnly`, `-TraceOnly`, `-CrLedSlowRiseOnly`, `-TriggerOnly`, `-ProtectionOnly` | Never |
+| `scripts/preflight-cli.ps1` | Offline CLI, simulator, refusal and Manifest checks; focused switches: `-TransientOnly`, `-FixedAutoOnly`, `-FixedSlewVonShortOnly`, `-InputTimerOnly`, `-TraceOnly`, `-CrLedSlowRiseOnly`, `-TriggerOnly`, `-ProtectionOnly`, `-ReadbackOnly` | Never |
 | `scripts/live-cli-check.ps1 -PlanOnly` | Validate command plans; reported physical cases remain `NOT RUN` | Never |
 | `scripts/live-cli-check.ps1` | Separately approved interactive IT8812C validation, including deliberate Input ON/OFF | With operator approval |
 
@@ -1058,6 +1117,7 @@ for focused verification.
 | `trigger` | Four physical sources (HOLD, TIMER, BUS, EXTERNAL), using Transient CC Pulse and finite LIST CC with observation and Trigger Setup restoration; MANUAL powered validation is excluded | Yes |
 | `input-timer` | Bounded Fixed CC Input Timer, expiry and explicit disable | Yes |
 | `protection` | Software current trip, software power trip, hardware power limiting and separate defaults | Explicit selection only |
+| `readback` | Fixed CC, Slew, VON, Short and Average with Input OFF and existing settings | Explicit selection only |
 
 `-InputTimerOnly` remains a compatible shortcut for the single
 `-Modes input-timer` trial and **cannot** be combined with `-Modes`.
@@ -1066,6 +1126,12 @@ Source and Timer Interval are captured before any mutating mode command and
 restored after Trigger validation where safe. All selections keep Identify,
 physical Input OFF and V/I/P prechecks. Invalid or empty mode
 names are rejected.
+
+Select `-Modes readback` on its own and start in Fixed CC with Input OFF.
+The script records the observed settings. This selection can run when the
+operator has already configured the instrument from its front panel. The
+Fixed, Transient, Trigger and TRACE selections compare independent status
+queries with the settings of their existing trials.
 
 ### Script parameters
 

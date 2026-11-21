@@ -5,6 +5,7 @@ import re
 
 from .errors import LoadError, communication_error
 from .identity import MODEL_ID, parse_identity
+from .readback import COMMANDS as READBACK_COMMANDS, execute as execute_readback
 from .simulator import Simulator
 from .visa import TERMINATION, TIMEOUT_MS, open_session, require_trusted_session, validate_connection
 
@@ -36,7 +37,7 @@ SYSTEM_QUERIES = {
 }
 MAX_ERROR_READS = 20
 QUERIES.update({command: ("*IDN?", query) for command, query in SYSTEM_QUERIES.items()})
-COMMANDS = tuple(QUERIES)
+COMMANDS = (*QUERIES, *READBACK_COMMANDS)
 # Exact Product LIVE command allowlist; model, USB and backend checks remain mandatory.
 PRODUCT_LIVE_COMMANDS = frozenset({"identify", "input-state", "measure"})
 
@@ -153,6 +154,10 @@ def execute(
     validate_error_queue_all(all_errors)
     if all_errors and command != ERROR_QUEUE_COMMAND:
         raise LoadError("argument_error", "Only scpi-error-next accepts all.")
+    if command in READBACK_COMMANDS:
+        return execute_readback(command, mode=mode, resource=resource, backend=backend,
+                                model_id=model_id, simulator=simulator,
+                                hardware_validation=hardware_validation)
     if hardware_validation is not None and (
             hardware_validation != "system-query" or command not in SYSTEM_QUERIES or mode == "simulate"):
         raise LoadError("argument_error", "System Query contributor validation requires live or dry-run.")

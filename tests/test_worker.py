@@ -1762,3 +1762,45 @@ def test_trace_worker_failed_configure_feed_stop_limits_admission_and_reports_sh
     assert summary["event"] == "summary" and summary["ok"] and summary["exit_code"] == 0
     assert summary["trace_safety"] == {**status["trace_safety"], "safe_shutdown_unconfirmed": True}
     assert operations == prior_io
+
+
+def test_configuration_readback_worker_uses_session_and_async_contract(worker, capsys):
+    from electronicload_tool_cli.cli import main
+    from electronicload_tool_cli.worker import Runtime
+
+    _, out, ready = worker
+    url = ready["command_url"]
+    status_fields = http(ready["status_url"])[1].keys()
+
+    def job(command, arguments=None, *, mode="simulate"):
+        payload = request(command, arguments)
+        payload["context"]["mode"] = mode
+        status, accepted = http(url, payload)
+        assert status == 202 and accepted["kind"] == "async_job"
+        return wait_finished(out, accepted["worker_job_id"])
+
+    status, refused = http(url, request("fixed-status", {"hardware_validation": "readback"}))
+    assert status == 400 and refused["worker_job_id"] is None
+
+    job("set-cc", {"current": 0.25, "range": "low", "rise_slew": 0.1, "fall_slew": 0.2})
+    assert job("readback")["result"]["configuration"]["current_a"] == 0.25
+    assert job("fixed-slew-status")["result"]["fall_slew_a_per_us"] == "0.2"
+    assert job("fixed-status", mode="dry_run")["result"]["planned_writes"] == []
+    job("trace-configure", {"source": "VOLT", "points": 8, "interval_s": 0.125})
+    assert job("trace-status")["result"]["points"] == 8
+    job("set-list-cc", {"range": "low", "repeat_count": 1, "steps": [
+        {"current_a": 0.25, "slew_a_per_us": 0.1, "width_s": 0.001},
+        {"current_a": 0.5, "slew_a_per_us": 0.1, "width_s": 0.001},
+    ]})
+    assert job("readback")["result"]["configuration"]["step_count"] == 2
+    assert job("fixed-status")["error"]["code"] == "mode_not_fixed"
+    assert http(ready["status_url"])[1].keys() == status_fields
+
+    assert main(["manifest", "--json"]) == 0
+    manifest = json.loads(capsys.readouterr().out)
+    runtime = Runtime(mode="live", resource="USB0::0xFFFF::0x0001::SYNTHETIC::INSTR")
+    for command in ("readback", "fixed-status", "fixed-slew-status", "trace-status"):
+        assert manifest["commands"][command] == {"kind": "async_job"}
+        runtime.run_job({"worker_job_id": command, "job_id": None, "command": command}, {}, {"mode": "live"})
+        result = json.loads(capsys.readouterr().out.splitlines()[-1])
+        assert result["error"]["code"] == "unsupported_live_scope"

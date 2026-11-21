@@ -678,13 +678,18 @@ def _fixed_cr_mode(session):
     return {"function_mode": mode, "function": function, "fixed_cr": fixed_cr}
 
 
-def _cr_status(session, *, expected=None):
-    mode = _fixed_cr_mode(session)
+def _cr_vdrop(session):
     vdrop = _decimal_readback(session, VDROP_QUERY)
     if vdrop < 0:
         raise LoadError("invalid_response", "Instrument returned a negative Vdrop.", 3,
                         query=VDROP_QUERY)
-    return {**mode, "led_enabled": _flag(session, LED_QUERY) == "ON", "vdrop_v": str(vdrop),
+    return str(vdrop)
+
+
+def _cr_status(session, *, expected=None):
+    mode = _fixed_cr_mode(session)
+    vdrop = _cr_vdrop(session)
+    return {**mode, "led_enabled": _flag(session, LED_QUERY) == "ON", "vdrop_v": vdrop,
             **_cr_settings(session, expected=expected)}
 
 
@@ -801,6 +806,14 @@ def _average(session, command, count, stop):
         except LoadError as exc:
             exc.details["command"] = action
             raise
+    observed = _average_count(session)
+    if command == "set-average" and observed != count:
+        raise LoadError("readback_mismatch", "Average count did not match readback.", 3,
+                        requested_average_count=count, observed_average_count=observed)
+    return {"average_count": observed}
+
+
+def _average_count(session):
     query = "SENS:AVER:COUN?"
     try:
         response = _query(session, query)
@@ -815,10 +828,7 @@ def _average(session, command, count, stop):
             or observed != observed.to_integral_value()):
         raise LoadError("invalid_response", "Average readback must be an integer from 2 through 16.",
                         3, query=query)
-    if command == "set-average" and observed != count:
-        raise LoadError("readback_mismatch", "Average count did not match readback.", 3,
-                        requested_average_count=count, observed_average_count=int(observed))
-    return {"average_count": int(observed)}
+    return int(observed)
 
 
 def _short_simulation(session: ControlSimulator, command: str, stop: Event | None) -> dict:
@@ -1146,6 +1156,16 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
     validate_connection(resource, backend, required=mode == "live")
     if mode == "simulate":
         require_trusted_session(simulator)
+    if hardware_validation == "readback":
+        from .readback import CONTROL_STATUS_COMMANDS, execute as execute_readback
+
+        if (command not in CONTROL_STATUS_COMMANDS or confirmed
+                or any(value is not None for value in (current, voltage, resistance, power,
+                    range_name, validation_settings, transient, list_configuration, slot, rise_slew,
+                    fall_slew, latch, seconds, count, vdrop, trigger_source, trigger_interval))):
+            raise LoadError("argument_error", "Readback validation accepts only status commands without arguments.")
+        return execute_readback(command, mode=mode, resource=resource,
+                                hardware_validation=hardware_validation)
     if command in TRIGGER_COMMANDS or hardware_validation == "trigger":
         if any(value is not None for value in (current, voltage, resistance, power,
                 range_name, slot, rise_slew, fall_slew, latch, seconds, count, vdrop)):
@@ -1267,8 +1287,13 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
             _input_off(simulated)
             simulated.von_settings = (threshold, latch)
         if command in {"set-von", "von-status"}:
-            voltage, latch = simulated.von_settings
-            return {"threshold_v": str(voltage), "latch": latch}
+            from .readback import von_status
+
+            result = von_status(simulated)
+            if threshold is not None and (Decimal(result["threshold_v"]), result["latch"]) != (
+                    threshold, latch):
+                raise LoadError("readback_mismatch", "VON settings did not match readback.", 3)
+            return result
         return _short_simulation(simulated, command, stop)
     if command in LIST_COMMANDS:
         if (any(value is not None for value in (current, voltage, resistance, power, range_name,
@@ -1383,8 +1408,14 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
                         confirmed=confirmed, stop=stop, allow_cv=True, allow_cr=True, allow_cw=True,
                         vdrop=vdrop)
         if slew:
+            from .readback import fixed_slew_status
+
             simulated.fixed_cc_slew = slew
-            result.update(simulated.fixed_cc_slew)
+            observed = fixed_slew_status(simulated)
+            if (not observed["configured"]
+                    or any(Decimal(observed[key]) != Decimal(value) for key, value in slew.items())):
+                raise LoadError("readback_mismatch", "Fixed CC slew did not match readback.", 3)
+            result.update({key: observed[key] for key in slew})
         if fixed_setup:
             simulated.transient_configuration = None
             simulated.last_trigger = None

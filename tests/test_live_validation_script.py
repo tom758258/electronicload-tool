@@ -73,8 +73,9 @@ def assert_report(result, expected, modes):
     assert all(case['status'] == 'NOT RUN' for case in cases.values())
     expected_names = ['input-state', 'measure-off']
     if 'cc' in modes:
-        expected_names += ['set-cc-high', 'cc-handoff-from-cr', 'set-cc-auto', 'set-cc-low', 'input-on', 'measure-on',
-                           'input-off', 'final-input-state']
+        expected_names += ['set-cc-high', 'cc-handoff-from-cr', 'set-cc-high-readback',
+                           'set-cc-auto', 'set-cc-low', 'set-cc-low-readback', 'input-on',
+                           'measure-on', 'input-off', 'final-input-state']
         assert cases['set-cc-high']['arguments'][-1] == 'high'
         assert cases['cc-handoff-from-cr']['arguments'] == [
             *cases['set-cc-high']['arguments'], '--hardware-validation', 'cr-led',
@@ -94,7 +95,7 @@ def assert_report(result, expected, modes):
     for mode, trials in prefixes.items():
         if mode not in modes:
             continue
-        steps = ['setup', 'on', 'measure', 'off', 'final-state']
+        steps = ['setup', 'readback', 'on', 'measure', 'off', 'final-state']
         if mode.startswith('transient-'):
             steps = ['setup', 'enable', 'on', 'trigger-1', 'trigger-2', 'status-on',
                      'measure', 'off', 'disable', 'status-off', 'final-state']
@@ -115,6 +116,9 @@ def assert_report(result, expected, modes):
                 for step in ('trigger-1', 'trigger-2'):
                     assert cases[f'{prefix}-{step}']['command'] == 'transient-trigger'
                 assert cases[f'{prefix}-disable']['command'] == 'transient-disable'
+                assert cases[f'{prefix}-status-off']['arguments'] == ['--hardware-validation', 'readback']
+            else:
+                assert cases[f'{prefix}-readback']['command'] == 'fixed-status'
     if 'cr-led' in modes:
         expected_names += ['cr-led-set', 'cr-led-status-on', 'cr-led-plain-cr', 'cr-led-status-off',
                            'cr-led-set-again', 'cr-led-leave-for-cc', 'cr-led-status-after-cc',
@@ -500,10 +504,13 @@ def test_trace_validation_script_plan_only_and_noninteractive_refusal(run_script
     assert report['hardware_touched'] is False
     assert report['trace_start_deadline_ms'] == 120000
     cases = {case['name']: case for case in report['cases']}
-    assert len(cases) == 17
+    assert len(cases) == 22
     assert all(case['status'] == 'NOT RUN' for case in cases.values())
     assert sum(case['command'] == 'trace-configure' for case in cases.values()) == 5
     assert sum(case['command'] == 'trace-start' for case in cases.values()) == 5
+    assert sum(case['command'] == 'trace-status' for case in cases.values()) == 5
+    ordered = list(cases)
+    assert ordered.index('trace-powered-configure') < ordered.index('trace-powered-status') < ordered.index('trace-powered-on')
     assert 'trace-powered-on' in cases and 'trace-powered-off' in cases
     assert cases['trace-powered-cc-handoff-from-cr']['arguments'] == [
         *cases['trace-powered-setup-cc']['arguments'], '--hardware-validation', 'cr-led',
@@ -537,11 +544,15 @@ def test_trigger_validation_script_plan_preflight_and_noninteractive_refusal(run
     assert not any(name.startswith('trigger-manual-') for name in cases)
     for source in ('hold', 'timer', 'bus', 'external'):
         assert cases[f'trigger-{source}-configure']['command'] == 'trigger-configure'
+        assert cases[f'trigger-{source}-source-status']['command'] == 'trigger-status'
         assert '--confirm' in cases[f'trigger-{source}-on']['arguments']
         assert cases[f'trigger-{source}-off']['command'] == 'input-off'
         assert cases[f'trigger-{source}-observed']['command'] == 'operator-observation'
         assert (f'trigger-{source}-dispatch' in cases) == (source in ('hold', 'bus'))
     assert cases['trigger-bus-setup']['command'] == 'set-list-cc'
+    for source in ('bus', 'external'):
+        assert cases[f'trigger-{source}-readback']['command'] == 'list-status'
+        assert list(cases).index(f'trigger-{source}-readback') < list(cases).index(f'trigger-{source}-on')
     assert cases['trigger-hold-setup']['command'] == 'set-transient-cc'
     pulse_args = cases['trigger-hold-setup']['arguments']
     assert pulse_args[pulse_args.index('--pulse-width') + 1] == '2'
@@ -562,3 +573,23 @@ def test_trigger_validation_script_plan_preflight_and_noninteractive_refusal(run
     assert mixed_names.index('trigger-snapshot') < mixed_names.index('transient-continuous-auto-setup')
     preflight = run_script(['-TriggerOnly'], preflight=True)
     assert preflight.returncode == 0, preflight.stdout + preflight.stderr
+
+
+def test_configuration_readback_script_plan_preflight_and_noninteractive_refusal(run_script):
+    preflight = run_script(['-ReadbackOnly'], preflight=True)
+    assert preflight.returncode == 0, preflight.stdout + preflight.stderr
+    assert 'PASS: Readback preflight' in preflight.stdout
+
+    expected = ['input-state', 'measure-off', 'readback', 'fixed-status',
+                'fixed-slew-status', 'von-status', 'short-status', 'average-status']
+    for options, status in [(['-PlanOnly'], 'PLAN ONLY'), ([], 'BLOCKED')]:
+        result = run_script(['-Modes', 'readback', *options])
+        assert result.returncode == (0 if options else 2), result.stdout + result.stderr
+        path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)[-1])
+        report = json.loads(path.read_text(encoding='utf-8-sig'))
+        assert report['overall_status'] == status and report['hardware_touched'] is False
+        assert [case['command'] for case in report['cases'][:1]] == ['input-state']
+        assert [case['name'] for case in report['cases']] == expected
+        assert all(case['status'] == 'NOT RUN' for case in report['cases'])
+        if not options:
+            assert 'requires an interactive console' in result.stdout

@@ -387,3 +387,44 @@ def test_offline_modes_do_not_open_visa(command):
     assert plan["live_access"] == "product"
     assert "voltage_v" not in plan and "input_state" not in plan
     assert execute(command, mode="simulate") == execute(command, mode="simulate")
+
+
+@pytest.mark.parametrize("function,readings,expected", [
+    ("CURRENT", {"CURR:RANG?": "0", "CURR?": "1.25e-1"}, {"range": "low", "current_a": 0.125}),
+    ("VOLT", {"VOLT:RANG?": "18", "VOLT:RANG:AUTO?": "1", "VOLT?": "3.25"},
+     {"range": "low", "range_auto": True, "voltage_v": 3.25}),
+    ("RESISTANCE", {"RES:RANG?": "7500", "RES?": "50"}, {"range": "high", "resistance_ohm": 50}),
+    ("POW", {"POW?": "2.5"}, {"range": None, "power_w": 2.5}),
+])
+def test_configuration_readback_fixed_queries_only_current_function(fake_visa, function, readings, expected):
+    fake_visa.responses.update({"FUNC:MODE?": "FIXED", "FUNC?": function, "TRAN?": "0",
+                                "INP:SHOR:STAT?": "1", "RES:LED:STAT?": "0", **readings})
+    result = execute("readback", resource=RESOURCE, hardware_validation="readback")
+    assert result["active_mode"] == "fixed" and result["input_state"] == "ON"
+    assert result["short_state"] == "ON" and result["state_source"] == "instrument_readback"
+    assert expected.items() <= result["configuration"].items()
+    assert result["validation_only"] is True
+    assert {call for call in fake_visa.calls if isinstance(call, str) and "?" in call} == {
+        "*IDN?", "FUNC:MODE?", "FUNC?", "TRAN?", "INP:STAT?", "INP:SHOR:STAT?", *readings,
+        *({"RES:LED:STAT?"} if function == "RESISTANCE" else set()),
+    }
+    assert fake_visa.calls[-2:] == ["session_close", "manager_close"]
+
+
+@pytest.mark.parametrize("mode,enabled", [("FIX", "1"), ("LIST", "0"), ("LIST", "1")])
+def test_configuration_readback_fixed_refuses_list_and_enabled_transient(fake_visa, mode, enabled):
+    fake_visa.responses.update({"FUNC:MODE?": mode, "FUNC?": "CURR", "TRAN?": enabled})
+    with pytest.raises(LoadError, match="not in a Fixed mode") as failure:
+        execute("fixed-status", resource=RESOURCE, hardware_validation="readback")
+    assert failure.value.code == "mode_not_fixed"
+    assert "CURR?" not in fake_visa.calls and "INP:STAT?" not in fake_visa.calls
+
+
+def test_configuration_readback_fixed_slew_uses_instrument_values(fake_visa):
+    fake_visa.responses.update({"FUNC:MODE?": "FIX", "FUNC?": "CURR", "TRAN?": "0",
+                                "CURR:SLEW:POS?": "0.1234567890123456789",
+                                "CURR:SLEW:NEG?": "0.28"})
+    result = execute("fixed-slew-status", resource=RESOURCE, hardware_validation="readback")
+    assert result["rise_slew_a_per_us"] == "0.1234567890123456789"
+    assert result["fall_slew_a_per_us"] == "0.28"
+    assert "CURR?" not in fake_visa.calls

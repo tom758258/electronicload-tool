@@ -13,6 +13,7 @@ from decimal import Decimal, localcontext
 from . import control as c
 from .errors import LoadError
 from .identity import parse_identity
+from .readback import TRANSIENT_LEVEL_QUERIES, transient_mode, transient_values
 from .trigger import (SOURCE_TOKENS, TRIGGER_COMMANDS, TRIGGER_INTERVAL_QUERY,
                       TRIGGER_SOURCE_QUERY, read_source, software_trigger, validate_interval,
                       validate_setup)
@@ -23,8 +24,6 @@ FUNCTIONS = {"cv": ("VOLT", "VOLTAGE"), "cr": ("RES", "RESISTANCE"),
              "transient-cv": ("VOLT", "VOLTAGE"), "transient-cr": ("RES", "RESISTANCE"),
              "transient-cw": ("POW", "POWER")}
 MODES = {"continuous": "CONT", "pulse": "PULS", "toggle": "TOGG"}
-TRANSIENT_QUERIES = {"level_a": "CURR:TRAN:ALEV", "level_b": "CURR:TRAN:BLEV",
-                     "rise_slew": "CURR:SLEW:POS", "fall_slew": "CURR:SLEW:NEG"}
 
 
 def _input_timer_snapshot(session):
@@ -188,12 +187,7 @@ def _snapshot(session, scope, *, require_hold=True):
         settings = {"power": _number(session, "POW?")}
     else:
         prefix = FUNCTIONS[scope][0]
-        raw_mode = c._query(session, f"{prefix}:TRAN:MODE?").upper()
-        names = {"CONT": "continuous", "CONTINUOUS": "continuous",
-                 "PULS": "pulse", "PULSE": "pulse", "TOGG": "toggle", "TOGGLE": "toggle"}
-        if raw_mode not in names:
-            raise LoadError("invalid_response", "Unknown physical Transient mode.", 3)
-        settings = {"transient_mode": names[raw_mode]}
+        settings = {"transient_mode": transient_mode(session, prefix)}
         if scope == "transient-cc":
             settings["range"] = c._range_name(c._number(session, "CURR:RANG?"))
         elif scope in {"transient-cv", "transient-cr"}:
@@ -204,14 +198,7 @@ def _snapshot(session, scope, *, require_hold=True):
             settings["range"] = "low" if raw_range == low else "high"
             if scope == "transient-cv" and c._flag(session, "VOLT:RANG:AUTO?") != "OFF":
                 raise LoadError("readback_mismatch", "CV automatic range must be disabled.", 3)
-        queries = (TRANSIENT_QUERIES if scope == "transient-cc" else
-                   {"level_a": f"{prefix}:TRAN:ALEV", "level_b": f"{prefix}:TRAN:BLEV"})
-        settings.update({field: _number(session, query + "?") for field, query in queries.items()})
-        if settings["transient_mode"] == "continuous":
-            settings.update(width_a=_number(session, f"{prefix}:TRAN:AWID?"),
-                            width_b=_number(session, f"{prefix}:TRAN:BWID?"))
-        elif settings["transient_mode"] == "pulse":
-            settings["pulse_width"] = _number(session, f"{prefix}:TRAN:AWID?")
+        settings.update(transient_values(session, prefix, settings["transient_mode"]))
         if require_hold and c._query(session, TRIGGER_SOURCE_QUERY).upper() != "HOLD":
             raise LoadError("unsafe_trigger_source", "Validation requires software-only HOLD source.")
     validated = _configuration(scope, settings)
@@ -261,7 +248,7 @@ def _sequence(scope, settings, *, set_hold=True):
         elif scope == "transient-cr":
             sequence += [f"RES:RANG {c.CR_RANGE_LIMITS[settings['range']][1]}"]
         sequence += [f"{prefix}:TRAN:MODE {MODES[settings['transient_mode']]}"]
-        queries = (TRANSIENT_QUERIES if scope == "transient-cc" else
+        queries = (TRANSIENT_LEVEL_QUERIES if scope == "transient-cc" else
                    {"level_a": f"{prefix}:TRAN:ALEV", "level_b": f"{prefix}:TRAN:BLEV"})
         sequence += [f"{query} {settings[field]:f}" for field, query in queries.items()]
         if settings["transient_mode"] == "continuous":

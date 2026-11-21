@@ -45,6 +45,9 @@ Common contracts remain authoritative for the HTTP and JSONL envelopes.
 | --- | --- | --- |
 | `identify` | `{}` | Physical/simulated identity |
 | `input-state` | `{}` | `input_state` |
+| `readback` | `{}` | Active mode, Input, Short and active configuration summary; offline only |
+| `fixed-status` | `{}` | Fixed setpoint and applicable Range; offline only |
+| `fixed-slew-status` | `{}` | Fixed CC rising and falling slew; offline only |
 | `measure` | `{}` | `voltage_v`, `current_a`, `power_w` |
 | `measure-min-max` | `{}` or `{"metric":"voltage-min"\|"voltage-max"\|"current-min"\|"current-max"}` | All four native extrema, or only the selected field; offline only |
 | `measure-discharge` | `{}` or `{"metric":"capacity"\|"time"}` | `capacity_ah`, `discharge_time_s`, or only the selected field; offline only |
@@ -54,6 +57,7 @@ Common contracts remain authoritative for the HTTP and JSONL envelopes.
 | `set-average` | `{"count":<integer 2–16>}` | Integer `average_count`; confirmed Input OFF required; offline only |
 | `average-status` | `{}` | Integer `average_count`, including with Input ON; offline only |
 | `trace-configure` | `{"source":"VOLT"\|"CURR"\|"TWO","points":<integer>,"interval_s":<number>}` | Validated TRACE settings and sample count; offline only |
+| `trace-status` | `{}` | Source, points, interval, delay, filter and Feed; offline only |
 | `trace-start` | `{}` or `{"csv":"PATH","csv_format":"data"\|"full","csv_time_columns":"elapsed,delta"}` | Complete TRACE batch; offline only |
 | `set-cc` | `{"current": <number>, "range": "auto"\|"low"\|"high"}`, with optional paired `rise_slew` and `fall_slew` (numbers, offline only) | Fixed CC settings with Input OFF, plus Slew fields when supplied |
 | `set-cv` | `{"voltage": <number>, "range": "auto"\|"low"\|"high"}` | Offline-only CV setpoint simulation; LIVE refused |
@@ -105,6 +109,34 @@ A live request uses `context: {"mode": "live"}` with optional matching
 `expected_model_id`. Simulation/dry-run uses the canonical
 `planning_model_id: "itech-it8812c"`; the Worker startup mode constrains the
 request mode. Worker does **not** allow the contributor-validation override.
+
+## Configuration readback
+
+`readback`, `fixed-status`, `fixed-slew-status` and `trace-status` are
+`async_job` commands with empty arguments. They read the current simulated
+Worker session state and return `state_source: "simulate"`. Use
+`context.mode: "dry_run"` for a preview with `hardware_access: false` and
+an empty `planned_writes` array. The new commands decline LIVE requests
+with `unsupported_live_scope` before opening VISA.
+
+`readback` returns `active_mode` (`fixed`, `transient`, or `list`),
+`function_mode`, `function`, `transient_enabled`, `input_state`,
+`short_state`, and mode-specific `configuration`. LIST configuration in
+this summary contains the Range, repeat count and step count. `fixed-status`
+returns the Fixed setpoint in its unit-specific field and the applicable
+Range. `fixed-slew-status` requires Fixed CC and reports `configured` and
+the two slew rates as decimal strings or null before simulated configuration.
+An incompatible mode fails the job with `mode_not_fixed`.
+
+`trace-status` returns `source`, `points`, `interval_s`, `delay_s`,
+`filter_enabled`, and `feed`. Interval and delay are decimal strings, and
+Feed is `NEXT` or `NEVER`. The job only observes TRACE configuration. Use
+`trace-start` for acquisition and its separate cancellation contract.
+
+Existing dedicated status commands retain their simulated result shapes.
+The standalone CLI contributor scopes are described in the
+[CLI readback reference](../cli/README.md#configuration-readback).
+`GET /status` continues to expose Worker and job lifecycle data.
 
 ## Offline System Queries
 

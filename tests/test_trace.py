@@ -465,3 +465,32 @@ def test_trace_hardware_validation_live_failed_session_cannot_reuse_same_object(
     assert caught.value.code == "trace_session_untrusted"
     assert session.calls == previous
     assert opened == [RESOURCE, RESOURCE]
+
+
+def test_configuration_readback_trace_status_is_query_only(fake_visa):
+    fake_visa.responses.update({"TRAC:FEED?": "CURRENT", "TRAC:POIN?": "2000",
+                                "TRAC:TIM?": "0.000020000000001", "TRAC:DEL?": "0.5",
+                                "TRAC:FILT?": "1", "TRAC:FEED:CONT?": "NEXT"})
+    actual = trace.execute("trace-status", resource=RESOURCE, hardware_validation="trace")
+    assert actual["state_source"] == "instrument_readback" and actual["feed"] == "NEXT"
+    assert actual["source"] == "CURR" and actual["points"] == 2000
+    assert actual["delay_s"] == "0.5" and actual["filter_enabled"] is True
+    assert actual["interval_s"] == "0.000020000000001"
+    assert {call for call in fake_visa.calls if isinstance(call, str) and "?" in call} == {
+        "*IDN?", "TRAC:FEED?", "TRAC:POIN?", "TRAC:TIM?", "TRAC:DEL?", "TRAC:FILT?", "TRAC:FEED:CONT?",
+    }
+
+    fake_visa.responses["TRAC:FILT?"] = "2"
+    with pytest.raises(LoadError) as failure:
+        trace.execute("trace-status", resource=RESOURCE, hardware_validation="trace")
+    assert failure.value.code == "invalid_response" and failure.value.exit_code == 3
+
+
+def test_configuration_readback_trace_status_does_not_progress_simulated_capture():
+    simulator = ControlSimulator()
+    simulator.trace_feed = "NEXT"
+    simulator.trace_capturing = True
+    before = simulator.__dict__.copy()
+    status = trace.execute("trace-status", mode="simulate", simulator=simulator)
+    assert status["state_source"] == "simulate" and status["feed"] == "NEXT"
+    assert simulator.__dict__ == before

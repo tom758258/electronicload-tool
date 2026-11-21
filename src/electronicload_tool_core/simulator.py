@@ -113,22 +113,7 @@ class ControlSimulator:
                 "configuration": self.transient_settings() if configuration else None}
 
     def transient_settings(self) -> dict:
-        if self.transient_function != "CC":
-            unit = {"CV": "v", "CR": "ohm", "CW": "w"}[self.transient_function]
-            units = {"level_a": f"level_a_{unit}", "level_b": f"level_b_{unit}",
-                     "width_a": "width_a_s", "width_b": "width_b_s", "pulse_width": "pulse_width_s"}
-            # Widths and CR levels have no documented decimal step. Keep every digit.
-            return {"range": self.transient_configuration.get("range"),
-                    **{units.get(key, key): (str(value) if "width" in key or unit == "ohm"
-                                            else float(value)) if isinstance(value, Decimal) else value
-                       for key, value in self.transient_configuration.items()}}
-        units = {"level_a": "level_a_a", "level_b": "level_b_a", "width_a": "width_a_s",
-                 "width_b": "width_b_s", "pulse_width": "pulse_width_s",
-                 "rise_slew": "rise_slew_a_per_us", "fall_slew": "fall_slew_a_per_us"}
-        # Slew has no documented decimal step: preserve all accepted digits in JSON.
-        return {units.get(key, key): (str(value) if "slew" in key else float(value))
-                if isinstance(value, Decimal) else value
-                for key, value in self.transient_configuration.items()}
+        return transient_settings(self.transient_function, self.transient_configuration)
 
     def query(self, command: str) -> str:
         if command == "TRAC:FEED:CONT?" and self.trace_capturing:
@@ -147,6 +132,11 @@ class ControlSimulator:
             "CURR?": str(self.current_a),
             "VOLT:RANG?": str(18.0 if self.cv_range == "low" else 120.0),
             "VOLT?": str(self.voltage_v),
+            "VOLT:RANG:AUTO?": "0",
+            "VOLT:ON?": str(self.von_settings[0]),
+            "VOLT:LATC?": "1" if self.von_settings[1] == "on" else "0",
+            "CURR:SLEW:POS?": self.fixed_cc_slew.get("rise_slew_a_per_us"),
+            "CURR:SLEW:NEG?": self.fixed_cc_slew.get("fall_slew_a_per_us"),
             "RES:RANG?": str(10.0 if self.cr_range == "low" else 7500.0),
             "RES?": str(self.resistance_ohm),
             "RES:LED:STAT?": str(int(self.cr_led_enabled)),
@@ -268,3 +258,22 @@ class ControlSimulator:
             self.trace_filter = value
         else:
             raise ValueError("Unknown or unarmed simulator TRACE command")
+
+
+def transient_settings(function, configuration) -> dict:
+    if function != "CC":
+        unit = {"CV": "v", "CR": "ohm", "CW": "w"}[function]
+        units = {"level_a": f"level_a_{unit}", "level_b": f"level_b_{unit}",
+                 "width_a": "width_a_s", "width_b": "width_b_s", "pulse_width": "pulse_width_s"}
+        # Widths and CR levels have no documented decimal step. Keep every digit.
+        return {"range": configuration.get("range"),
+                **{units.get(key, key): (str(value) if "width" in key or unit == "ohm"
+                                        else float(value)) if isinstance(value, Decimal) else value
+                   for key, value in configuration.items()}}
+    units = {"level_a": "level_a_a", "level_b": "level_b_a", "width_a": "width_a_s",
+             "width_b": "width_b_s", "pulse_width": "pulse_width_s",
+             "rise_slew": "rise_slew_a_per_us", "fall_slew": "fall_slew_a_per_us"}
+    # Slew has no documented decimal step: preserve all accepted digits in JSON.
+    return {units.get(key, key): (str(value) if "slew" in key else float(value))
+            if isinstance(value, Decimal) else value
+            for key, value in configuration.items()}

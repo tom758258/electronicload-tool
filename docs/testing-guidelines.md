@@ -418,6 +418,24 @@ Only the separately approved, operator-confirmed
 can establish physical trip, power limit, Clear, defaults and restoration.
 Use the selected Protection mode by itself.
 
+## Configuration readback focused checks
+
+Run the affected Core, CLI and Worker cases from the repository root.
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q tests/test_readonly_core.py tests/test_hardware_validation.py tests/test_trace.py tests/test_readonly_cli.py tests/test_worker.py -k configuration_readback
+.\scripts\preflight-cli.ps1 -ReadbackOnly
+```
+
+Use recording Fake VISA for mode selection, the bounded LIST step count, and
+status replies. Verify query-only operation and LIVE refusal before VISA.
+Select existing help/version tests when changing CLI arguments. Exercise
+`-Modes readback -PlanOnly` and noninteractive refusal, and the directly
+affected Fixed, Transient, TRACE and Trigger script plans. Use a fictional
+USB Resource and block VISA in child processes. Real-instrument validation
+requires the separate interactive approval and reports physical cases as
+`NOT RUN` in PlanOnly.
+
 ## Packaging checks
 
 For packaging, dependency, or entry-point changes:
