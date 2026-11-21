@@ -157,47 +157,6 @@ def test_fixed_auto_offline_preflight(run_script):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_system_query_focused_preflight(run_script):
-    result = run_script(['-SystemQueryOnly'], preflight=True)
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert 'PASS: System Query preflight' in result.stdout
-
-
-@pytest.mark.parametrize('plan_only', [True, False])
-def test_system_query_script_plan_and_noninteractive_refusal(run_script, plan_only):
-    extra = ['-PlanOnly'] if plan_only else []
-    result = run_script(['-Modes', 'system-query', *extra])
-    assert result.returncode == (0 if plan_only else 2), result.stdout + result.stderr
-    assert 'removes the returned error' in result.stdout
-    if not plan_only:
-        assert 'requires an interactive console' in result.stdout
-    path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)[-1])
-    text = path.read_text(encoding='utf-8-sig')
-    report = json.loads(text)
-    assert report['overall_status'] == ('PLAN ONLY' if plan_only else 'BLOCKED')
-    assert report['hardware_touched'] is False and report['prechecks']['plan'] == 'PASS'
-    assert RESOURCE not in text and not (path.parents[1] / 'private').exists()
-    assert [(case['name'], case['command']) for case in report['cases']] == [
-        ('input-state', 'input-state'), ('system-query-version', 'scpi-version'),
-        ('system-query-display-mode', 'display-mode'), ('system-query-error-next', 'scpi-error-next'),
-        ('system-query-error-all', 'scpi-error-next'), ('final-input-state', 'input-state'),
-    ]
-    scope = ['--hardware-validation', 'system-query']
-    assert [case['arguments'] for case in report['cases'][1:-1]] == [scope, scope, scope, [*scope, '--all']]
-    assert report['summary_counts'] == {'total': 6, 'passed': 0, 'failed': 0, 'skipped': 0, 'not_run': 6}
-    assert all(case['status'] == 'NOT RUN' for case in report['cases'])
-
-
-@pytest.mark.parametrize('selection,expected', [
-    ('protection,system-query', 'Select Protection alone'),
-    ('cc,system-query', 'Select system-query alone'),
-])
-def test_system_query_requires_an_independent_mode(run_script, selection, expected):
-    result = run_script(['-Modes', selection, '-PlanOnly'])
-    assert result.returncode == 2 and expected in result.stdout
-    assert 'Report:' not in result.stdout
-
-
 def test_protection_preflight_and_explicit_mode_report_without_visa(run_script):
     preflight = run_script(['-ProtectionOnly'], preflight=True)
     assert preflight.returncode == 0 and 'PASS: Protection preflight' in preflight.stdout

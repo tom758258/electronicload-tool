@@ -88,6 +88,24 @@ def test_system_query_invalid_response_or_query_failure_stops_and_closes(fake_vi
     assert fake_visa.calls[-4:] == ["*IDN?", query, "session_close", "manager_close"]
 
 
+def test_system_query_queue_failure_keeps_parsed_entries(fake_visa, monkeypatch):
+    replies = iter(['-222,"Data, out of range"', TimeoutError()])
+    query = type(fake_visa.session).query
+
+    def next_entry(session, command):
+        if command == "SYST:ERR?":
+            fake_visa.responses[command] = next(replies)
+        return query(session, command)
+
+    monkeypatch.setattr(type(fake_visa.session), "query", next_entry)
+    with pytest.raises(LoadError) as failure:
+        execute("scpi-error-next", all_errors=True, **SYSTEM_SCOPE)
+    assert failure.value.code == "query_failed" and failure.value.exit_code == 3
+    assert failure.value.details["read_count"] == 1
+    assert failure.value.details["errors"] == [{"error_code": -222, "message": "Data, out of range"}]
+    assert fake_visa.calls[-5:] == ["*IDN?", "SYST:ERR?", "SYST:ERR?", "session_close", "manager_close"]
+
+
 @pytest.mark.parametrize("overrides,code", [
     ({"backend": "other"}, "unsupported_backend"),
     ({"resource": None}, "missing_resource"),

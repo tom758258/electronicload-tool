@@ -85,7 +85,12 @@ def _read_system_query(session, command: str, all_errors: bool) -> dict:
             return _error_queue_entry(session, query)
         errors = []
         for read_count in range(1, MAX_ERROR_READS + 1):
-            entry = _error_queue_entry(session, query)
+            try:
+                entry = _error_queue_entry(session, query)
+            except LoadError as exc:
+                # A failed reply may have consumed an entry. Report only parsed replies.
+                exc.details.update(errors=errors, read_count=len(errors))
+                raise
             if entry["error_code"] == 0:
                 break
             errors.append(entry)

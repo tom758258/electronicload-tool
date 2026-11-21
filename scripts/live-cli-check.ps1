@@ -4,7 +4,6 @@ Default: the established validation modes, with common read-only safety precheck
 -Modes selects any supported validation mode, including trace, cr-led, current-slow-rise,
 trigger and input-timer. Omitted -Modes selects all default modes.
 -Modes protection selects the separate Protection validation procedure.
--Modes system-query independently validates System Queries with Input OFF.
 -InputTimerOnly is a backward-compatible shortcut for the input-timer-only trial.
 Requires approved source/DUT limits and interactive confirmation before hardware access.
 -PlanOnly validates every planned CLI request without VISA or hardware access.
@@ -59,7 +58,7 @@ if ($InputTimerOnly) {
 } elseif (-not $PSBoundParameters.ContainsKey('Modes')) {
     $Modes = $supportedModes
 }
-$supportedModes += @('protection', 'system-query')
+$supportedModes += 'protection'
 $requestedModes = @($Modes | ForEach-Object { $_ -split ',' } |
     ForEach-Object { $_.Trim().ToLowerInvariant() })
 # Keep the established trial order and run each selected mode only once.
@@ -69,7 +68,6 @@ $traceSelected = 'trace' -in $selectedModes
 $triggerSelected = 'trigger' -in $selectedModes
 $timerSelected = 'input-timer' -in $selectedModes
 $protectionSelected = 'protection' -in $selectedModes
-$systemQuerySelected = 'system-query' -in $selectedModes
 $featureSelected = @($selectedModes | Where-Object { $_ -in $featureModes }).Count -gt 0
 $featureOnly = $featureSelected -and @($selectedModes | Where-Object { $_ -notin $featureModes }).Count -eq 0
 $traceCommunicationUntrusted = $false
@@ -229,18 +227,6 @@ function Save-Report {
                     voltage_v = $entry.response.result.voltage_v
                     current_a = $entry.response.result.current_a
                     power_w = $entry.response.result.power_w
-                }
-            }
-            if ($script:systemQuerySelected) {
-                $result = $entry.response.result
-                foreach ($field in @('scpi_version','display_mode','read_count','max_reads',
-                                     'empty_confirmed','limit_reached')) {
-                    if ($null -ne $result.$field) { $case[$field] = $result.$field }
-                }
-                if ($entry.name -ceq 'system-query-error-next') {
-                    $case['scpi_error_code'] = $result.error_code
-                } elseif ($entry.name -ceq 'system-query-error-all') {
-                    $case['scpi_error_codes'] = @($result.errors | ForEach-Object { $_.error_code })
                 }
             }
         }
@@ -1250,9 +1236,6 @@ try {
         $SourceVoltageLimitV -ne 5 -or $SourceCurrentLimitA -ne 0.8)) {
         throw 'Select Protection alone with a dedicated 5 V / 0.8 A source.'
     }
-    if ($systemQuerySelected -and $selectedModes.Count -ne 1) {
-        throw 'Select system-query alone.'
-    }
     if (-not $Target -or -not $Resource) {
         Write-Host 'BLOCKED: explicit -Target and -Resource are required.'
         exit 2
@@ -1268,7 +1251,7 @@ try {
         }
         $report.prechecks.current = 'PASS'
     }
-    $report.script_current_ceiling_a = if ($protectionSelected) { 0.20 } elseif (-not $systemQuerySelected) { $scriptCurrentCeilingA }
+    $report.script_current_ceiling_a = if ($protectionSelected) { 0.20 } else { $scriptCurrentCeilingA }
     if ($timerSelected) {
         & $python -c 'import sys; from electronicload_tool_core.control import validate_input_timer; value=validate_input_timer(int(sys.argv[1])); sys.exit(0 if 3 <= value <= 10 else 2)' $TimerSeconds
         if ($LASTEXITCODE -ne 0) { throw 'Timer validation seconds must be an integer from 3 through 10.' }
@@ -1303,20 +1286,9 @@ try {
     $onArgs = @('--confirm')
     $planned = @(
         @{name='identify';command='identify';args=@()},
-        @{name='input-state';command='input-state';args=@()}
+        @{name='input-state';command='input-state';args=@()},
+        @{name='measure-off';command='measure';args=@()}
     )
-    if ($systemQuerySelected) {
-        $systemScope = @('--hardware-validation', 'system-query')
-        $planned += @(
-            @{name='system-query-version';command='scpi-version';args=$systemScope},
-            @{name='system-query-display-mode';command='display-mode';args=$systemScope},
-            @{name='system-query-error-next';command='scpi-error-next';args=$systemScope},
-            @{name='system-query-error-all';command='scpi-error-next';args=($systemScope + @('--all'))},
-            @{name='final-input-state';command='input-state';args=@()}
-        )
-    } else {
-        $planned += @{name='measure-off';command='measure';args=@()}
-    }
     if ('cc' -in $selectedModes) {
         $planned += @(
             @{name='set-cc-high';command='set-cc';args=$highArgs;allow_cr_handoff=$true},
@@ -1553,12 +1525,7 @@ try {
     Write-Host "Target: $Target | Connection: $Connection | Backend: $Backend | Resource: <redacted>"
     Write-Host "Mode: $(if ($PlanOnly) { 'PLAN ONLY' } else { 'LIVE' })"
     Write-Host "Selected modes: $($selectedModes -join ', ')."
-    if ($systemQuerySelected) {
-        Write-Host 'Plan: Identify, confirm Input OFF, read SCPI Version, Display Mode, Error Queue, then confirm Input OFF again.'
-        Write-Host 'Each SYST:ERR? read removes the returned error. This procedure first reads one entry, then reads up to 20 more to check for an empty queue.'
-    } else {
-        Write-Host 'Plan: Identify, Input State, Measure.'
-    }
+    Write-Host "Plan: Identify, Input State, Measure."
     if ($protectionSelected) {
         Write-Host 'Protection: independent software current trip, software power trip and hardware power limit trials at 0.20 A.'
         Write-Host 'Start in Fixed CC. Each trial requires Enter before Input ON. Software Clear also requires source isolation and a second Enter.'
@@ -1570,7 +1537,7 @@ try {
     if ('cc' -in $selectedModes -or $traceSelected) {
         Write-Host 'CC setup from CR: conditional contributor handoff with Input OFF and the Core LED OFF interlock.'
     }
-    if (-not ($protectionSelected -or $systemQuerySelected) -and
+    if (-not $protectionSelected -and
         @($selectedModes | Where-Object { $_ -ne 'trace' -and $_ -notin $featureModes }).Count -gt 0) {
         Write-Host 'Other selected modes retain explicit ON/OFF and independent OFF confirmation.'
     }
@@ -1585,7 +1552,7 @@ try {
         Write-Host 'Slow Rise requires a non-resistance starting function and expects Fixed CV setup to be refused while enabled.'
         Write-Host 'If the Slow Rise trial stops before confirmed Disable, cleanup requires trusted communication and confirmed Input OFF.'
     }
-    if (-not ($protectionSelected -or $systemQuerySelected)) {
+    if (-not $protectionSelected) {
         Write-Host 'Fixed Auto adds Input OFF setup/readback with the existing values; no extra ON/OFF cycles.'
     }
     if (@($selectedModes | Where-Object { $_.StartsWith('transient-') }).Count -gt 0) {
@@ -1599,14 +1566,10 @@ try {
         Write-Verbose ("  {0}: {1} {2}{3}" -f $step.name, $step.command, ($step.args -join ' '), $condition)
     }
     if ('cc' -in $selectedModes) { Write-Host "CC Current=$currentText A." }
-    if ($systemQuerySelected) {
-        Write-Host 'USB System VISA. The queries send no control writes or queue-clear commands.'
-    } else {
-        Write-Host "Script ceiling=$($report.script_current_ceiling_a) A; USB System VISA."
-        Write-Host 'No reset, SYST:ERR? consumption, automatic local switch, or implicit Input ON.'
-        Write-Host 'An Input ON attempt requires an explicit OFF cleanup; session close does not turn Input OFF.'
-        Write-Host 'V/I/P measure queries are separate; power freshness is not guaranteed.'
-    }
+    Write-Host "Script ceiling=$($report.script_current_ceiling_a) A; USB System VISA."
+    Write-Host 'No reset, SYST:ERR? consumption, automatic local switch, or implicit Input ON.'
+    Write-Host 'An Input ON attempt requires an explicit OFF cleanup; session close does not turn Input OFF.'
+    Write-Host 'V/I/P measure queries are separate; power freshness is not guaranteed.'
     if ($PlanOnly) {
         $report.status = 'PLAN ONLY'
         Save-Report
@@ -1626,8 +1589,6 @@ try {
     $preflightScript = Join-Path $PSScriptRoot 'preflight-cli.ps1'
     if ($protectionSelected) {
         & $preflightScript -ProtectionOnly
-    } elseif ($systemQuerySelected) {
-        & $preflightScript -SystemQueryOnly
     } elseif ($selectedModes.Count -eq 1 -and $timerSelected) {
         & $preflightScript -InputTimerOnly
     } elseif ($selectedModes.Count -eq 1 -and $traceSelected) {
@@ -1669,18 +1630,14 @@ try {
     if ($triggerSelected) {
         Write-Host '- Confirm external On/Off and analog programming are disabled and external trigger wiring was reviewed while de-energized.'
     }
-    if ($systemQuerySelected) {
-        Write-Host '- Confirm removal of each returned SCPI Error Queue entry is acceptable.'
-    } else {
-        Write-Host '- Selected trials may deliberately turn Input ON; the script explicitly commands and verifies OFF, but cannot guarantee OFF after communication failures.'
-    }
+    Write-Host '- Selected trials may deliberately turn Input ON; the script explicitly commands and verifies OFF, but cannot guarantee OFF after communication failures.'
     $ack = if ($protectionSelected) {
         $watch = [Diagnostics.Stopwatch]::StartNew()
         Read-ValidationAnswer 'Confirm a dedicated source and no important DUT. Press Enter to start (Ctrl+C to cancel)' 'identify' -DiscardPendingKeys
     } else {
         Read-Host 'After completing these checks, press Enter to run selected CLI cases (Ctrl+C to cancel)'
     }
-    if ($ack -cne '' -or (($triggerSelected -or $protectionSelected -or $systemQuerySelected) -and $null -eq $ack)) {
+    if ($ack -cne '' -or (($triggerSelected -or $protectionSelected) -and $null -eq $ack)) {
         $report.status = 'BLOCKED'
         Save-Report
         Show-Summary
@@ -1786,10 +1743,6 @@ try {
             $report.prechecks.input_off = 'BLOCKED'
             $report.status = 'BLOCKED'
         }
-        if ($systemQuerySelected -and $step.command -ceq 'input-state') {
-            $entry = $report.results | Where-Object { $_.name -ceq $step.name }
-            $entry['confirmed_input_state'] = $result.result.input_state
-        }
         if ($step.command -in @('input-state', 'input-off', 'set-cc', 'set-cv', 'set-cr', 'set-cr-led', 'set-cw',
                                'current-slow-rise-enable', 'current-slow-rise-disable',
                                'set-transient-cc', 'set-transient-cv', 'set-transient-cr', 'set-transient-cw',
@@ -1848,7 +1801,7 @@ try {
     Write-Host "Validation did not complete: $($_.Exception.Message)"
 } finally {
     # PowerShell pipeline interruption can bypass catch and the exit after finally.
-    $validationInterrupted = ($triggerSelected -or $protectionSelected -or $systemQuerySelected) -and
+    $validationInterrupted = ($triggerSelected -or $protectionSelected) -and
         $phase -in @('identify','cases') -and $report.status -eq 'NOT RUN'
     if ($validationInterrupted) { $report.status = 'FAIL' }
     if ($inputOnAttempted) {
