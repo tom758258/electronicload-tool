@@ -7,7 +7,7 @@ import pytest
 
 from electronicload_tool_cli import cli
 from electronicload_tool_cli.worker import _arguments
-from electronicload_tool_core import control
+from electronicload_tool_core import control, readonly
 from electronicload_tool_core.errors import LoadError
 from test_control_core import Fake, RESOURCE, session
 
@@ -555,3 +555,116 @@ def test_new_transient_validation_refuses_wrong_scope_before_visa(monkeypatch, s
         control.execute('set-transient-cc', hardware_validation=scope, resource=RESOURCE,
                         transient=transient())
     assert error.value.code == 'argument_error'
+
+
+@pytest.mark.parametrize("command,readings,expected", [
+    ("von-status", {"VOLT:ON?": "0.125000000000000001", "VOLT:LATC?": "0"},
+     {"threshold_v": "0.125000000000000001", "latch": "off"}),
+    ("short-status", {"INP:SHOR:STAT?": "1"}, {"short_state": "ON"}),
+    ("average-status", {"SENS:AVER:COUN?": "8e0"}, {"average_count": 8}),
+])
+def test_configuration_readback_auxiliary_independent(fake_visa, command, readings, expected):
+    fake_visa.responses.update(readings)
+    result = control.execute(command, resource=RESOURCE, hardware_validation="readback")
+    assert expected.items() <= result.items()
+    assert result["state_source"] == "instrument_readback"
+    assert {call for call in fake_visa.calls if isinstance(call, str) and "?" in call} == {
+        "*IDN?", *readings,
+    }
+
+
+@pytest.mark.parametrize("function,name,waveform,extras,expected", [
+    ("CURR", "CC", "CONT", {"CURR:RANG?": "6", "CURR:SLEW:POS?": "0.11", "CURR:SLEW:NEG?": "0.22",
+                            "CURR:TRAN:AWID?": "0.001", "CURR:TRAN:BWID?": "0.002"},
+     {"range": "low", "rise_slew_a_per_us": "0.11", "width_a_s": 0.001, "width_b_s": 0.002}),
+    ("VOLT", "CV", "PULS", {"VOLT:RANG?": "18", "VOLT:TRAN:AWID?": "0.0123456789"},
+     {"range": "low", "pulse_width_s": "0.0123456789"}),
+    ("RES", "CR", "TOGG", {"RES:RANG?": "10"}, {"range": "low", "level_a_ohm": "1"}),
+    ("POW", "CW", "TOGGLE", {}, {"range": None, "level_b_w": 2.0}),
+])
+def test_configuration_readback_transient_without_setup_or_trigger_assumptions(
+        fake_visa, function, name, waveform, extras, expected):
+    readings = {f"{function}:TRAN:MODE?": waveform, f"{function}:TRAN:ALEV?": "1",
+                f"{function}:TRAN:BLEV?": "2", **extras}
+    fake_visa.responses.update({"FUNC:MODE?": "FIX", "FUNC?": function, "TRAN?": "0", **readings})
+    result = control.execute("transient-status", resource=RESOURCE, hardware_validation="readback")
+    assert result["configured"] and result["function"] == name and result["enabled"] is False
+    assert expected.items() <= result["configuration"].items()
+    assert result["input_state"] == "ON" and result["last_trigger"] is None
+    assert {call for call in fake_visa.calls if isinstance(call, str) and "?" in call} == {
+        "*IDN?", "FUNC:MODE?", "FUNC?", "TRAN?", "INP:STAT?", *readings,
+    }
+
+
+def test_configuration_readback_transient_summary_and_range_guard(fake_visa):
+    fake_visa.responses.update({"FUNC:MODE?": "FIX", "FUNC?": "CURR", "TRAN?": "1",
+                                "INP:SHOR:STAT?": "0", "CURR:RANG?": "6",
+                                "CURR:TRAN:MODE?": "CONT", "CURR:TRAN:ALEV?": "1",
+                                "CURR:TRAN:BLEV?": "2"})
+    summary = readonly.execute("readback", resource=RESOURCE, hardware_validation="readback")
+    assert summary["active_mode"] == "transient" and summary["transient_enabled"]
+    assert summary["configuration"] == {"transient_mode": "continuous", "range": "low",
+                                        "range_readback": 6, "level_a_a": 1, "level_b_a": 2}
+    assert not any("AWID?" in str(call) or "BWID?" in str(call) or "SLEW" in str(call)
+                   for call in fake_visa.calls)
+    fake_visa.responses["CURR:TRAN:ALEV?"] = "60"
+    with pytest.raises(LoadError) as failure:
+        readonly.execute("readback", resource=RESOURCE, hardware_validation="readback")
+    assert failure.value.code == "invalid_response" and failure.value.details["field"] == "level_a"
+
+
+def test_configuration_readback_list_reads_observed_steps_and_rejects_bad_count(fake_visa):
+    readings = {"LIST:RANG?": "15", "LIST:STEP?": "3", "LIST:COUN?": "65536"}
+    for index in range(1, 4):
+        readings.update({f"LIST:LEV? {index}": str(index), f"LIST:SLEW? {index}": "0.1",
+                         f"LIST:WID? {index}": "0.01234567890123456789"})
+    readings["LIST:WID? 1"] = "3600"
+    fake_visa.responses.update({"FUNC:MODE?": "LIST", "FUNC?": "CURR", "TRAN?": "0", **readings})
+    result = control.execute("list-status", resource=RESOURCE, hardware_validation="readback")
+    actual = result["configuration"]
+    assert result["configured"] and result["selected"] is True and result["slot"] is None
+    assert actual["range_readback_a"] == 15 and actual["range"] is None
+    assert actual["step_count"] == 3 and actual["repeat_count"] == 65536
+    assert [step["current_a"] for step in actual["steps"]] == [1, 2, 3]
+    assert actual["steps"][0]["width_s"] == "3600"
+    assert actual["steps"][2]["width_s"] == "0.01234567890123456789"
+    assert {call for call in fake_visa.calls if isinstance(call, str) and "?" in call} == {
+        "*IDN?", "FUNC:MODE?", "FUNC?", "TRAN?", "INP:STAT?", *readings,
+    }
+
+    fake_visa.calls.clear()
+    fake_visa.responses["INP:SHOR:STAT?"] = "0"
+    summary = readonly.execute("readback", resource=RESOURCE, hardware_validation="readback")
+    assert summary["active_mode"] == "list" and summary["configuration"]["step_count"] == 3
+    assert "steps" not in summary["configuration"] and "LIST:LEV? 1" not in fake_visa.calls
+
+    fake_visa.responses["LIST:WID? 1"] = "1E+40"
+    with pytest.raises(LoadError) as failure:
+        control.execute("list-status", resource=RESOURCE, hardware_validation="readback")
+    assert failure.value.code == "invalid_response" and failure.value.exit_code == 3
+    assert failure.value.details == {"query": "LIST:WID? 1", "step": 1, "observed": "1E+40"}
+
+    fake_visa.responses["LIST:WID? 1"] = readings["LIST:WID? 1"]
+    fake_visa.responses.update({"LIST:RANG?": "6", "LIST:SLEW? 1": "2"})
+    with pytest.raises(LoadError) as failure:
+        control.execute("list-status", resource=RESOURCE, hardware_validation="readback")
+    assert failure.value.code == "invalid_response" and failure.value.details["query"] == "LIST:SLEW? 1"
+
+    fake_visa.calls.clear()
+    fake_visa.responses["LIST:STEP?"] = "85"
+    with pytest.raises(LoadError) as failure:
+        control.execute("list-status", resource=RESOURCE, hardware_validation="readback")
+    assert failure.value.code == "invalid_response" and failure.value.exit_code == 3
+    assert "LIST:LEV? 1" not in fake_visa.calls
+
+
+def test_configuration_readback_mismatch_in_simulated_von_write_is_reported():
+    from electronicload_tool_core.simulator import ControlSimulator
+
+    class IgnoredLatch(ControlSimulator):
+        def query(self, command):
+            return "1" if command == "VOLT:LATC?" else super().query(command)
+
+    with pytest.raises(LoadError) as failure:
+        control.execute("set-von", mode="simulate", simulator=IgnoredLatch(), voltage="2", latch="off")
+    assert failure.value.code == "readback_mismatch"

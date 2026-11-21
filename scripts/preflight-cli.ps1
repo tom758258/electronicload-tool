@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param([switch]$TransientOnly, [switch]$FixedAutoOnly, [switch]$FixedSlewVonShortOnly,
       [switch]$InputTimerOnly, [switch]$TraceOnly, [switch]$CrLedSlowRiseOnly, [switch]$TriggerOnly,
-      [switch]$ProtectionOnly)
+      [switch]$ProtectionOnly, [switch]$ReadbackOnly)
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -21,12 +21,31 @@ function Invoke-PreflightCli {
 }
 
 try {
-    if (@($TransientOnly, $FixedAutoOnly, $FixedSlewVonShortOnly, $InputTimerOnly, $TraceOnly, $CrLedSlowRiseOnly, $TriggerOnly, $ProtectionOnly |
+    if (@($TransientOnly, $FixedAutoOnly, $FixedSlewVonShortOnly, $InputTimerOnly, $TraceOnly, $CrLedSlowRiseOnly, $TriggerOnly, $ProtectionOnly, $ReadbackOnly |
             Where-Object { $_ }).Count -gt 1) {
         throw 'Select only one focused preflight switch.'
     }
     if (-not (Test-Path -LiteralPath $cli)) {
         throw 'Sync the repository .venv with uv before running preflight.'
+    }
+    if ($ReadbackOnly -or -not ($TransientOnly -or $FixedAutoOnly -or $FixedSlewVonShortOnly -or
+        $InputTimerOnly -or $TraceOnly -or $CrLedSlowRiseOnly -or $TriggerOnly -or $ProtectionOnly)) {
+        $manifest = Invoke-PreflightCli @('manifest')
+        foreach ($command in @('readback','fixed-status','fixed-slew-status','trace-status')) {
+            $scope = if ($command -eq 'trace-status') { 'trace' } else { 'readback' }
+            $plan = Invoke-PreflightCli @($command,'--dry-run','--hardware-validation',$scope)
+            $simulated = Invoke-PreflightCli @($command,'--simulate')
+            $refused = Invoke-PreflightCli @($command,'--validation-allow-pending-live-support',
+                '--resource','USB0::0xFFFF::0x0001::SYNTHETIC::INSTR') 2
+            if ($manifest.commands.$command.kind -cne 'async_job' -or
+                $plan.result.hardware_access -ne $false -or $plan.result.planned_writes.Count -ne 0 -or
+                $simulated.result.state_source -cne 'simulate' -or $simulated.command -cne $command -or
+                $refused.error.code -cne 'unsupported_live_scope') {
+                throw "Readback preflight failed: $command."
+            }
+        }
+        Write-Host 'PASS: Readback preflight'
+        if ($ReadbackOnly) { exit 0 }
     }
     if ($ProtectionOnly) {
         $manifest = Invoke-PreflightCli @('manifest')

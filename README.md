@@ -20,6 +20,7 @@ deliberate confirmation. Simulation and dry-run never grant hardware authorizati
 - Offline Fixed Input Timer setup/enable/disable/status, with Short and dynamic-mode exclusions.
 - Offline Transient CC/CV/CR/CW (Continuous, Pulse, Toggle) and native LIST CC.
 - Offline protection status, settings and clear, with separately approved contributor validation.
+- [Configuration readback](docs/cli/README.md#configuration-readback) for the active mode and dedicated status commands.
 - Hardware-free simulation and dry-run; Common v3 Worker with JSON/JSONL for automation.
 - Fail-closed model, command, transport and backend permissions; no implicit Input ON.
 

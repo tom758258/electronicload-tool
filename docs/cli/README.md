@@ -187,10 +187,9 @@ electronicload-tool scpi-version --resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" 
 ## Offline Measurement Extensions
 
 `measure-min-max`, `measure-discharge`, `set-average` and `average-status`
-support only `--simulate` and `--dry-run`. All four refuse LIVE before opening
-VISA, including with the legacy contributor override. No hardware-validation
-option opens these commands. Simulation and dry-run do not establish physical
-SCPI support or measurement accuracy.
+support `--simulate` and `--dry-run`. All four refuse Product and Worker LIVE
+before opening VISA. The standalone CLI `average-status` also supports the
+contributor scope described in [Configuration readback](#configuration-readback).
 
 ```powershell
 .\.venv\Scripts\electronicload-tool.exe measure-min-max --simulate --json
@@ -496,6 +495,76 @@ Controlled physical trials require the separate hardware-validation path.
 .\.venv\Scripts\electronicload-tool.exe manifest --json
 .\.venv\Scripts\electronicload-tool.exe worker --mode simulate --control-port 0
 ```
+
+## Configuration readback
+
+Use `readback` for the selected Fixed, Transient, or LIST mode, Input and
+Short state. Results include `active_mode`, `function_mode`, the regulation
+`function` (CC/CV/CR/CW), `transient_enabled`, and `configuration`. The Core
+uses the function selector and the Transient enable flag together. A disabled
+Transient leaves the active mode Fixed unless LIST is selected. The Transient
+summary gives the waveform mode, applicable Range and levels A/B. Use
+`transient-status` for widths and slew. The LIST summary gives Range, repeat
+count, and step count. Use `list-status` for the step settings.
+
+| Command | Settings returned |
+| --- | --- |
+| `fixed-status` | Fixed CC/CV/CR/CW setpoint and applicable Range. Returns `mode_not_fixed` for LIST or enabled Transient. |
+| `fixed-slew-status` | Fixed CC positive and negative slew in A/µs as decimal strings. A fresh simulator reports `configured: false` with null rates. |
+| `cr-led-status` / `current-slow-rise-status` | CR-LED, Vdrop, resistance and Range / Current Slow Rise enable. |
+| `von-status` / `short-status` / `average-status` | VON threshold and Latch / Short state / averaging count. |
+| `input-timer-status` / `trigger-status` | Timer seconds and enable / Trigger Source and Timer interval. |
+| `transient-status` | Settings for the current CC, CV, CR or CW function, even with Transient disabled. Includes waveform mode, levels A/B, applicable widths and Range, CC slew, and the enable flag. |
+| `list-status` | Current LIST working configuration, including each indexed level, slew and width. Physical slot identity and last trigger are null. Reading a stored slot requires an explicit Recall. |
+| `trace-status` | Source, points, interval and delay in seconds, filter enable, and Feed. The query observes the current buffer configuration while capture is idle or active. |
+| `protection-status` / `input-state` | Protection settings and condition / Input state. The read-and-clear Protection Event register requires the separate `--events` option. |
+
+```powershell
+.\.venv\Scripts\electronicload-tool.exe readback --simulate --json
+.\.venv\Scripts\electronicload-tool.exe fixed-status --simulate --json
+.\.venv\Scripts\electronicload-tool.exe trace-status --simulate --json
+```
+
+Each standalone simulation starts with fresh state. Use the same simulated
+Worker for configuration and subsequent status jobs. `configured: true` in
+Transient and LIST status means configuration values are available. The
+instrument can return factory or previously stored settings. The simulator
+returns `false` until configuration is available in that session.
+New status results identify simulation as `state_source: "simulate"`. Dry-run
+validates the request without opening VISA or reading configuration values.
+
+Physical configuration readback is available in the separately approved
+standalone CLI contributor scopes. Use `--hardware-validation readback` for
+`readback`, `fixed-status`, `fixed-slew-status`, `von-status`, `short-status`,
+`average-status`, `transient-status`, and `list-status`. Use
+`--hardware-validation trace` for `trace-status`. CR-LED, Current Slow Rise,
+Input Timer, Trigger, and Protection use their existing scopes. These requests
+require the exact IT8812C identity and an explicit USB INSTR Resource with
+System VISA. The new contributor readbacks identify their source as
+`instrument_readback`. Query failures and invalid replies return errors.
+`fixed-slew-status` checks both rates against the current CC Range.
+For CV, CR and LIST, a valid numeric Range selector without a known label is
+returned as its raw readback with `range: null`. The IT8812C has a single 250 W
+CW range, so CW reports `range: null` and reads the power setpoint without a
+range query. `list-status` checks each width against the IT8812C range of
+0.00002–3600 seconds. An out-of-range slew or LIST step value is included in
+the error details. [ITECH IT8811/12/12B/12C User Manual, §3.18 and IT8812C specifications](https://media.digikey.com/pdf/Data%20Sheets/ITech%20Elect%20PDFs/IT8800%20User%20Manual.pdf)
+
+```powershell
+.\.venv\Scripts\electronicload-tool.exe readback --hardware-validation readback --resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" --json
+```
+
+These snapshots use query-only operations. Diagnostics with destructive reads,
+mode selection, Input control, LIST Recall and TRACE capture each require their
+own explicit commands. Range replies include the observed numeric selector
+where applicable. CV, CR and LIST report a null Range label when the numeric
+selector does not identify a known range endpoint. LIST status describes the
+working buffer, and Transient status describes configuration and enable state.
+Waveform timing and completion require independent observation. TRACE status
+can display native settings outside the Tool's capture limits.
+
+[ITECH IT8800 Programming Guide V2.1](https://assets.testequity.com/te1/Documents/pdf/itech/ITECH_IT8800-Programming-Guide-EN.pdf),
+printed pp. 42–46, 47–59, and 60–62.
 
 ## Fixed Software Auto Range
 
@@ -1030,7 +1099,7 @@ does not authorize physical instrument operation.
 
 | Script | Purpose | Real hardware |
 | --- | --- | --- |
-| `scripts/preflight-cli.ps1` | Offline CLI, simulator, refusal and Manifest checks; focused switches: `-TransientOnly`, `-FixedAutoOnly`, `-FixedSlewVonShortOnly`, `-InputTimerOnly`, `-TraceOnly`, `-CrLedSlowRiseOnly`, `-TriggerOnly`, `-ProtectionOnly` | Never |
+| `scripts/preflight-cli.ps1` | Offline CLI, simulator, refusal and Manifest checks; focused switches: `-TransientOnly`, `-FixedAutoOnly`, `-FixedSlewVonShortOnly`, `-InputTimerOnly`, `-TraceOnly`, `-CrLedSlowRiseOnly`, `-TriggerOnly`, `-ProtectionOnly`, `-ReadbackOnly` | Never |
 | `scripts/live-cli-check.ps1 -PlanOnly` | Validate command plans; reported physical cases remain `NOT RUN` | Never |
 | `scripts/live-cli-check.ps1` | Separately approved interactive IT8812C validation, including deliberate Input ON/OFF | With operator approval |
 
@@ -1058,6 +1127,7 @@ for focused verification.
 | `trigger` | Four physical sources (HOLD, TIMER, BUS, EXTERNAL), using Transient CC Pulse and finite LIST CC with observation and Trigger Setup restoration; MANUAL powered validation is excluded | Yes |
 | `input-timer` | Bounded Fixed CC Input Timer, expiry and explicit disable | Yes |
 | `protection` | Software current trip, software power trip, hardware power limiting and separate defaults | Explicit selection only |
+| `readback` | Fixed CC, Slew, VON, Short and Average with Input OFF and existing settings | Explicit selection only |
 
 `-InputTimerOnly` remains a compatible shortcut for the single
 `-Modes input-timer` trial and **cannot** be combined with `-Modes`.
@@ -1066,6 +1136,18 @@ Source and Timer Interval are captured before any mutating mode command and
 restored after Trigger validation where safe. All selections keep Identify,
 physical Input OFF and V/I/P prechecks. Invalid or empty mode
 names are rejected.
+
+Select `-Modes readback` on its own and start in Fixed CC with Input OFF.
+Supply known front-panel settings for the cases you want to verify. Use
+`-ExpectedRiseSlew` and `-ExpectedFallSlew` together (A/µs),
+`-ExpectedVonThreshold` (V) and `-ExpectedVonLatch` (`on` or `off`) together,
+`-ExpectedShort` (`on` or `off`), and `-ExpectedAverageCount` (2–16).
+The report records expected and observed values. A comparison passes when
+they match. Without a complete baseline for a command, its comparison is
+`NOT RUN` and the report retains the observed values. A successful run with
+any observation-only case has overall status `OBSERVED ONLY`. Fixed,
+Transient, Trigger and TRACE selections compare independent status queries
+with the settings of their existing trials.
 
 ### Script parameters
 

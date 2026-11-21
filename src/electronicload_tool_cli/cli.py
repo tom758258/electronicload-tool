@@ -15,6 +15,8 @@ from electronicload_tool_core.protection import (ARGUMENTS as PROTECTION_ARGUMEN
                                                 DEFAULTS as PROTECTION_DEFAULTS,
                                                 LIMITS as PROTECTION_LIMITS, TRIALS as PROTECTION_TRIALS,
                                                 execute as protection_execute)
+from electronicload_tool_core.readback import (COMMANDS as READBACK_COMMANDS,
+                                               CONTROL_STATUS_COMMANDS, SCOPE as READBACK_SCOPE)
 from electronicload_tool_core.readonly import (COMMANDS, ERROR_QUEUE_COMMAND, MAX_ERROR_READS,
                                                NATIVE_MEASUREMENTS, SYSTEM_QUERIES,
                                                execute as read_execute)
@@ -121,11 +123,15 @@ def main(argv: list[str] | None = None) -> int:
         if name == ERROR_QUEUE_COMMAND:
             sub.add_argument("--all", action="store_true",
                              help=f"Remove entries until empty is confirmed or {MAX_ERROR_READS} reads are made.")
-        if name in CONTROL_COMMANDS and name not in (*LIST_COMMANDS, *AUXILIARY_COMMANDS,
-                                                     *AVERAGE_COMMANDS):
+        if name in READBACK_COMMANDS or (name in CONTROL_STATUS_COMMANDS and name != "transient-status"):
+            sub.add_argument("--hardware-validation", choices=(READBACK_SCOPE,),
+                             help="Explicit CLI-only contributor hardware validation.")
+        elif name in CONTROL_COMMANDS and name not in (*LIST_COMMANDS, *AUXILIARY_COMMANDS,
+                                                       *AVERAGE_COMMANDS):
             sub.add_argument("--hardware-validation", choices=("input-timer", "cv", "cr", "cw", "transient-cc",
                                                                "transient-cv", "transient-cr", "transient-cw",
                                                                "cr-led", "current-slow-rise", "trigger",
+                                                               *((READBACK_SCOPE,) if name == "transient-status" else ()),
                                                                *(("protection",) if name == "input-on" else ())),
                              help="Explicit contributor hardware-validation scope; not Product LIVE.")
             sub.add_argument("--validation-settings-json",
