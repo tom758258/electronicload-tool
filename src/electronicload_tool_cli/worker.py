@@ -21,8 +21,9 @@ from electronicload_tool_core.identity import MODEL_ID
 from electronicload_tool_core.protection import (COMMANDS as PROTECTION_COMMANDS,
                                                 execute as protection_execute,
                                                 validate_arguments as validate_protection_arguments)
-from electronicload_tool_core.readonly import (COMMANDS as READ_COMMANDS, NATIVE_MEASUREMENTS,
-                                               validate_metric, execute as read_execute)
+from electronicload_tool_core.readonly import (COMMANDS as READ_COMMANDS, ERROR_QUEUE_COMMAND,
+                                               NATIVE_MEASUREMENTS, execute as read_execute,
+                                               validate_error_queue_all, validate_metric)
 from electronicload_tool_core.simulator import ControlSimulator
 from electronicload_tool_core.trace import (CONFIG_FIELDS, CSV_FIELDS, TRACE_COMMANDS,
                                            execute as trace_execute,
@@ -144,7 +145,8 @@ class Runtime:
             )
         return read_execute(command, mode=core_mode, resource=self.resource,
                             backend=self.backend, model_id=MODEL_ID,
-                            metric=arguments.get("metric"), simulator=self.simulator)
+                            metric=arguments.get("metric"), simulator=self.simulator,
+                            all_errors=arguments.get("all", False))
 
     def _shutdown_after_stop_reply(self):
         self.stop_reply_sent.wait()
@@ -267,6 +269,7 @@ def _arguments(command, raw, runtime):
                  CONFIG_FIELDS if command == "trace-configure" else
                  CSV_FIELDS if command == "trace-start" else
                  {"metric"} if command in NATIVE_MEASUREMENTS else
+                 {"all"} if command == ERROR_QUEUE_COMMAND else
                  TRANSIENT_FIELDS if command in TRANSIENT_SETUP_COMMANDS else
                  LIST_FIELDS if command == "set-list-cc" else
                  {"slot"} if command in {"list-save", "list-recall"} else
@@ -283,6 +286,8 @@ def _arguments(command, raw, runtime):
         if not isinstance(raw["metric"], str):
             raise LoadError("argument_error", "Metric must be a string when supplied.")
         validate_metric(command, raw["metric"])
+    if command == ERROR_QUEUE_COMMAND:
+        validate_error_queue_all(raw.get("all", False))
     if command == "set-average":
         validate_average(raw.get("count"))
     if command == "trigger-configure":

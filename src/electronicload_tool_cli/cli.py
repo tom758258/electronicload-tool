@@ -15,7 +15,9 @@ from electronicload_tool_core.protection import (ARGUMENTS as PROTECTION_ARGUMEN
                                                 DEFAULTS as PROTECTION_DEFAULTS,
                                                 LIMITS as PROTECTION_LIMITS, TRIALS as PROTECTION_TRIALS,
                                                 execute as protection_execute)
-from electronicload_tool_core.readonly import COMMANDS, NATIVE_MEASUREMENTS, execute as read_execute
+from electronicload_tool_core.readonly import (COMMANDS, ERROR_QUEUE_COMMAND, MAX_ERROR_READS,
+                                               NATIVE_MEASUREMENTS, SYSTEM_QUERIES,
+                                               execute as read_execute)
 from electronicload_tool_core.control import (CONTROL_COMMANDS, execute as control_execute,
                                               validate_power, TRANSIENT_FIELDS, LIST_COMMANDS,
                                               FIXED_RANGE_COMMANDS, FIXED_RANGE_CHOICES,
@@ -73,7 +75,9 @@ def main(argv: list[str] | None = None) -> int:
                         version=f"%(prog)s {version('electronicload-tool')}")
     subparsers = parser.add_subparsers(dest="command")
     for name in command_names:
-        sub = subparsers.add_parser(name, allow_abbrev=False)
+        description = ("Read and remove the next entry from the instrument's SCPI Error Queue."
+                       if name == ERROR_QUEUE_COMMAND else None)
+        sub = subparsers.add_parser(name, allow_abbrev=False, description=description)
         sub.json_errors = json_output
         if name == "list-resources":
             sub.add_argument("--live-only", action="store_true", help="Probe USB INSTR via *IDN?.")
@@ -111,6 +115,12 @@ def main(argv: list[str] | None = None) -> int:
                          help=argparse.SUPPRESS)
         if name in NATIVE_MEASUREMENTS:
             sub.add_argument("--metric", choices=tuple(NATIVE_MEASUREMENTS[name]))
+        if name in SYSTEM_QUERIES:
+            sub.add_argument("--hardware-validation", choices=("system-query",),
+                             help="Explicit CLI-only IT8812C contributor validation.")
+        if name == ERROR_QUEUE_COMMAND:
+            sub.add_argument("--all", action="store_true",
+                             help=f"Remove entries until empty is confirmed or {MAX_ERROR_READS} reads are made.")
         if name in CONTROL_COMMANDS and name not in (*LIST_COMMANDS, *AUXILIARY_COMMANDS,
                                                      *AVERAGE_COMMANDS):
             sub.add_argument("--hardware-validation", choices=("input-timer", "cv", "cr", "cw", "transient-cc",
@@ -334,7 +344,9 @@ def main(argv: list[str] | None = None) -> int:
             result = read_execute(args.command, mode=mode, resource=args.resource,
                                   backend=args.backend, model_id=args.model,
                                   validation=args.validation_allow_pending_live_support,
-                                  metric=getattr(args, "metric", None))
+                                  metric=getattr(args, "metric", None),
+                                  all_errors=getattr(args, "all", False),
+                                  hardware_validation=getattr(args, "hardware_validation", None))
     except LoadError as exc:
         return _emit_error(exc, command, mode, json_output)
     except KeyboardInterrupt:

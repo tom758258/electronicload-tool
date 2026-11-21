@@ -28,6 +28,14 @@ NATIVE_MEASUREMENTS = {
 }
 QUERIES.update({command: ("*IDN?", *(query for _, query in metrics.values()))
                 for command, metrics in NATIVE_MEASUREMENTS.items()})
+ERROR_QUEUE_COMMAND = "scpi-error-next"
+SYSTEM_QUERIES = {
+    ERROR_QUEUE_COMMAND: "SYST:ERR?",
+    "scpi-version": "SYST:VERS?",
+    "display-mode": "DISP:MODE?",
+}
+MAX_ERROR_READS = 20
+QUERIES.update({command: ("*IDN?", query) for command, query in SYSTEM_QUERIES.items()})
 COMMANDS = tuple(QUERIES)
 # Exact Product LIVE command allowlist; model, USB and backend checks remain mandatory.
 PRODUCT_LIVE_COMMANDS = frozenset({"identify", "input-state", "measure"})
@@ -39,6 +47,11 @@ def validate_metric(command: str, metric: object) -> None:
         raise LoadError("argument_error", "Unsupported measurement metric.")
 
 
+def validate_error_queue_all(all_errors: object) -> None:
+    if type(all_errors) is not bool:
+        raise LoadError("argument_error", "Error Queue all must be a boolean.")
+
+
 def _query(session, query: str) -> str:
     try:
         return session.query(query)
@@ -48,11 +61,57 @@ def _query(session, query: str) -> str:
         raise error from exc
 
 
-def _read(session, command: str, metric: str | None = None) -> dict:
+def _error_queue_entry(session, query: str) -> dict:
+    response = _query(session, query).strip()
+    match = re.fullmatch(r'([+-]?[0-9]+)[ \t]*,[ \t]*("(?:[^"\r\n]|"")*"|[^"\r\n]+)', response)
+    if match:
+        code, message = match.groups()
+        try:
+            error_code = int(code)
+        except ValueError:
+            pass
+        else:
+            if message.startswith('"'):
+                message = message[1:-1].replace('""', '"')
+            return {"error_code": error_code, "message": message.strip()}
+    raise LoadError("invalid_response", "Error Queue reply must contain an integer and a message.",
+                    3, query=query)
+
+
+def _read_system_query(session, command: str, all_errors: bool) -> dict:
+    query = SYSTEM_QUERIES[command]
+    if command == ERROR_QUEUE_COMMAND:
+        if not all_errors:
+            return _error_queue_entry(session, query)
+        errors = []
+        for read_count in range(1, MAX_ERROR_READS + 1):
+            entry = _error_queue_entry(session, query)
+            if entry["error_code"] == 0:
+                break
+            errors.append(entry)
+        empty_confirmed = entry["error_code"] == 0
+        return {"errors": errors, "read_count": read_count, "max_reads": MAX_ERROR_READS,
+                "empty_confirmed": empty_confirmed, "limit_reached": not empty_confirmed}
+    response = _query(session, query).strip()
+    if command == "scpi-version":
+        if re.fullmatch(r"[0-9]{4}\.[0-9]+", response):
+            return {"scpi_version": response}
+        raise LoadError("invalid_response", "SCPI version reply must use YYYY.V format.", 3, query=query)
+    mode = response.upper()
+    if mode == "NORM":
+        mode = "NORMAL"
+    if mode not in ("NORMAL", "TEXT"):
+        raise LoadError("invalid_response", "Display Mode reply must be NORMAL or TEXT.", 3, query=query)
+    return {"display_mode": mode}
+
+
+def _read(session, command: str, metric: str | None = None, all_errors: bool = False) -> dict:
     validate_metric(command, metric)
     identity = parse_identity(_query(session, "*IDN?"))
     if command == "identify":
         return identity.public_result()
+    if command in SYSTEM_QUERIES:
+        return _read_system_query(session, command, all_errors)
     if command == "input-state":
         response = _query(session, "INP:STAT?").strip()
         if response not in ("0", "1"):
@@ -79,12 +138,21 @@ def _read(session, command: str, metric: str | None = None) -> dict:
 def execute(
     command: str, *, mode: str = "live", model_id: str = MODEL_ID,
     resource: str | None = None, backend: str = "system", validation: bool = False,
-    metric: str | None = None, simulator=None,
+    metric: str | None = None, simulator=None, all_errors: bool = False,
+    hardware_validation: str | None = None,
 ) -> dict:
     """Run one request; the legacy validation flag never opens offline-only commands."""
     if command not in COMMANDS or mode not in ("live", "dry-run", "simulate"):
         raise LoadError("argument_error", "Unknown command or execution mode.")
     validate_metric(command, metric)
+    validate_error_queue_all(all_errors)
+    if all_errors and command != ERROR_QUEUE_COMMAND:
+        raise LoadError("argument_error", "Only scpi-error-next accepts all.")
+    if hardware_validation is not None and (
+            hardware_validation != "system-query" or command not in SYSTEM_QUERIES or mode == "simulate"):
+        raise LoadError("argument_error", "System Query contributor validation requires live or dry-run.")
+    validation_result = ({"validation_only": True, "validation_scope": hardware_validation}
+                         if hardware_validation else {})
     if model_id != MODEL_ID:
         raise LoadError("unsupported_model", "The requested model profile is not registered.")
     validate_connection(resource, backend, required=mode == "live")
@@ -96,16 +164,18 @@ def execute(
             "read_termination": TERMINATION, "write_termination": TERMINATION,
             "live_access": "product" if command in PRODUCT_LIVE_COMMANDS else "blocked",
             "resource_required_for_live": True,
+            **({"max_reads": MAX_ERROR_READS} if all_errors else {}),
+            **validation_result,
         }
-    if mode == "live" and command not in PRODUCT_LIVE_COMMANDS:
+    if mode == "live" and command not in PRODUCT_LIVE_COMMANDS and hardware_validation is None:
         raise LoadError("unsupported_live_scope", "Product LIVE is not open for this command.")
     try:
         if mode == "simulate":
             require_trusted_session(simulator)
-            return _read(simulator or Simulator(), command, metric)
+            return _read(simulator or Simulator(), command, metric, all_errors)
         with open_session(resource) as (session, runtime):
-            result = _read(session, command, metric)
-            result["visa"] = runtime
+            require_trusted_session(session)
+            result = {**_read(session, command, metric, all_errors), "visa": runtime, **validation_result}
         return result
     except LoadError as exc:
         if command == "input-state":

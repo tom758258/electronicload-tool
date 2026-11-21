@@ -7,8 +7,10 @@ from types import SimpleNamespace
 from electronicload_tool_core.errors import LoadError
 from electronicload_tool_core.identity import MODEL_ID, parse_identity
 from electronicload_tool_core.readonly import execute
+from electronicload_tool_core.visa import mark_session_untrusted
 
 RESOURCE = "USB0::0xFFFF::0x0001::SYNTHETIC::INSTR"
+SYSTEM_SCOPE = {"resource": RESOURCE, "hardware_validation": "system-query"}
 
 NATIVE_CASES = [
     ("measure-min-max", None, ["MEAS:VOLT:MIN?", "MEAS:VOLT:MAX?", "MEAS:CURR:MIN?", "MEAS:CURR:MAX?"],
@@ -22,6 +24,95 @@ NATIVE_CASES = [
     ("measure-discharge", "capacity", ["MEAS:CAP?"], {"capacity_ah": 0.25}),
     ("measure-discharge", "time", ["MEAS:TIME?"], {"discharge_time_s": 1800.0}),
 ]
+
+
+@pytest.mark.parametrize("command,query,reply,expected", [
+    ("scpi-version", "SYST:VERS?", " 2020.01\n", {"scpi_version": "2020.01"}),
+    ("display-mode", "DISP:MODE?", " norm\n", {"display_mode": "NORMAL"}),
+    ("display-mode", "DISP:MODE?", "TEXT\n", {"display_mode": "TEXT"}),
+    ("scpi-error-next", "SYST:ERR?", ' +120 , "Parameter, overflowed"\n',
+     {"error_code": 120, "message": "Parameter, overflowed"}),
+    ("scpi-error-next", "SYST:ERR?", "0, No Error", {"error_code": 0, "message": "No Error"}),
+])
+def test_system_query_contributor_uses_exact_queries(fake_visa, command, query, reply, expected):
+    fake_visa.responses[query] = reply
+    plan = execute(command, mode="dry-run", **SYSTEM_SCOPE)
+    assert plan["queries"] == ["*IDN?", query] and plan["live_access"] == "blocked"
+    assert fake_visa.calls == []
+    result = execute(command, **SYSTEM_SCOPE)
+    assert result == {**expected, "validation_only": True, "validation_scope": "system-query",
+                      "visa": {"library": "FAKE-VISA.dll", "manufacturer": "FAKE VISA"}}
+    assert fake_visa.calls[-4:] == ["*IDN?", query, "session_close", "manager_close"]
+
+
+@pytest.mark.parametrize("nonzero_count,confirmed", [(0, True), (2, True), (19, True), (20, False)])
+def test_system_query_queue_read_bound_in_one_visa_session(fake_visa, monkeypatch, nonzero_count, confirmed):
+    entries = [(-222, 'Data, "out" of range'), (120, "Overflow")] * 10
+    responses = (['-222,"Data, ""out"" of range"', '+120,"Overflow"'] * 10)[:nonzero_count]
+    if confirmed:
+        responses.append('0,"No error"')
+    replies = iter(responses)
+    query = type(fake_visa.session).query
+
+    def next_entry(session, command):
+        if command == "SYST:ERR?":
+            fake_visa.responses[command] = next(replies)
+        return query(session, command)
+
+    monkeypatch.setattr(type(fake_visa.session), "query", next_entry)
+    result = execute("scpi-error-next", all_errors=True, **SYSTEM_SCOPE)
+    assert result["errors"] == [{"error_code": code, "message": message}
+                                for code, message in entries[:nonzero_count]]
+    assert result["read_count"] == nonzero_count + int(confirmed)
+    assert result["max_reads"] == 20
+    assert result["empty_confirmed"] is confirmed and result["limit_reached"] is not confirmed
+    assert fake_visa.calls.count("open_resource") == 1
+    assert fake_visa.calls[-(result["read_count"] + 3):] == [
+        "*IDN?", *(["SYST:ERR?"] * result["read_count"]), "session_close", "manager_close",
+    ]
+
+
+@pytest.mark.parametrize("command,query,reply", [
+    ("scpi-error-next", "SYST:ERR?", TimeoutError()),
+    ("scpi-error-next", "SYST:ERR?", '0,"No error'),
+    ("scpi-error-next", "SYST:ERR?", "0"),
+    ("scpi-version", "SYST:VERS?", "v1.3.1"),
+    ("display-mode", "DISP:MODE?", "GRAPH"),
+])
+def test_system_query_invalid_response_or_query_failure_stops_and_closes(fake_visa, command, query, reply):
+    fake_visa.responses[query] = reply
+    with pytest.raises(LoadError) as failure:
+        execute(command, all_errors=command == "scpi-error-next", **SYSTEM_SCOPE)
+    assert failure.value.code == ("query_failed" if isinstance(reply, Exception) else "invalid_response")
+    assert failure.value.exit_code == 3 and failure.value.details["query"] == query
+    assert fake_visa.calls[-4:] == ["*IDN?", query, "session_close", "manager_close"]
+
+
+@pytest.mark.parametrize("overrides,code", [
+    ({"backend": "other"}, "unsupported_backend"),
+    ({"resource": None}, "missing_resource"),
+    ({"resource": "ASRL1::INSTR"}, "invalid_resource"),
+    ({"model_id": "other"}, "unsupported_model"),
+    ({"hardware_validation": None, "validation": True}, "unsupported_live_scope"),
+    ({"mode": "simulate"}, "argument_error"),
+])
+def test_system_query_rejects_wrong_scope_before_visa(fake_visa, overrides, code):
+    with pytest.raises(LoadError) as failure:
+        execute("display-mode", **{**SYSTEM_SCOPE, **overrides})
+    assert failure.value.code == code and fake_visa.calls == []
+
+
+@pytest.mark.parametrize("trusted", [True, False])
+def test_system_query_rejects_mismatched_identity_or_untrusted_session(fake_visa, trusted):
+    if not trusted:
+        mark_session_untrusted(fake_visa.session)
+    fake_visa.responses["*IDN?"] = "ITECH Ltd,IT8812,TEST,1.2"
+    with pytest.raises(LoadError) as failure:
+        execute("scpi-error-next", **SYSTEM_SCOPE)
+    assert failure.value.code == ("identity_mismatch" if trusted else "trace_session_untrusted")
+    assert ("*IDN?" in fake_visa.calls) is trusted
+    assert "SYST:ERR?" not in fake_visa.calls
+    assert fake_visa.calls[-2:] == ["session_close", "manager_close"]
 
 
 @pytest.mark.parametrize("command,metric,queries,result", NATIVE_CASES)

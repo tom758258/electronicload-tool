@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param([switch]$TransientOnly, [switch]$FixedAutoOnly, [switch]$FixedSlewVonShortOnly,
       [switch]$InputTimerOnly, [switch]$TraceOnly, [switch]$CrLedSlowRiseOnly, [switch]$TriggerOnly,
-      [switch]$ProtectionOnly)
+      [switch]$ProtectionOnly, [switch]$SystemQueryOnly)
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -21,12 +21,37 @@ function Invoke-PreflightCli {
 }
 
 try {
-    if (@($TransientOnly, $FixedAutoOnly, $FixedSlewVonShortOnly, $InputTimerOnly, $TraceOnly, $CrLedSlowRiseOnly, $TriggerOnly, $ProtectionOnly |
+    if (@($TransientOnly, $FixedAutoOnly, $FixedSlewVonShortOnly, $InputTimerOnly, $TraceOnly, $CrLedSlowRiseOnly, $TriggerOnly, $ProtectionOnly, $SystemQueryOnly |
             Where-Object { $_ }).Count -gt 1) {
         throw 'Select only one focused preflight switch.'
     }
     if (-not (Test-Path -LiteralPath $cli)) {
         throw 'Sync the repository .venv with uv before running preflight.'
+    }
+    if ($SystemQueryOnly) {
+        $manifest = Invoke-PreflightCli @('manifest')
+        $cases = @(
+            @{command='scpi-version'; args=@(); field='scpi_version'; expected='1999.0'},
+            @{command='display-mode'; args=@(); field='display_mode'; expected='NORMAL'},
+            @{command='scpi-error-next'; args=@(); field='error_code'; expected=0},
+            @{command='scpi-error-next'; args=@('--all'); field='empty_confirmed'; expected=$true}
+        )
+        foreach ($case in $cases) {
+            $command = $case.command
+            $field = $case.field
+            if ($manifest.commands.$command.kind -cne 'async_job') { throw 'System Query Manifest command missing.' }
+            $plan = Invoke-PreflightCli (@($command,'--dry-run','--hardware-validation','system-query') + $case.args)
+            $simulated = Invoke-PreflightCli (@($command,'--simulate') + $case.args)
+            if ($plan.result.live_access -cne 'blocked' -or $plan.result.validation_scope -cne 'system-query' -or
+                $null -eq $simulated.result.$field -or $simulated.result.$field -cne $case.expected) {
+                throw 'System Query preview or simulation failed.'
+            }
+            $refused = Invoke-PreflightCli (@($command,'--validation-allow-pending-live-support',
+                '--resource','USB0::0xFFFF::0x0001::SYNTHETIC::INSTR') + $case.args) 2
+            if ($refused.error.code -cne 'unsupported_live_scope') { throw 'System Query LIVE refusal failed.' }
+        }
+        Write-Host 'PASS: System Query preflight'
+        exit 0
     }
     if ($ProtectionOnly) {
         $manifest = Invoke-PreflightCli @('manifest')

@@ -146,6 +146,32 @@ status is rejected without PyVISA's automatic device-clear recovery. Read-only q
 not require input OFF. Closing the session and resource manager does not turn
 input OFF. A failed query never proves OFF or produces a substitute zero value.
 
+## System Queries
+
+| CLI command | SCPI query after `*IDN?` | Result |
+| --- | --- | --- |
+| `scpi-version` | `SYST:VERS?` | `scpi_version`, a `YYYY.V` string for the SCPI specification |
+| `display-mode` | `DISP:MODE?` | `display_mode`, normalized to `NORMAL` or `TEXT` |
+| `scpi-error-next` | `SYST:ERR?` | One integer `error_code` and string `message` |
+
+Each Error Queue read removes the returned entry. `scpi-error-next --all`
+reads in the same session until it receives code `0` or reaches 20 reads.
+`errors` contains only nonzero entries. `read_count` includes the zero reply
+when present and `max_reads` is 20. A zero reply, including on the 20th read,
+sets `empty_confirmed: true` and `limit_reached: false`. A nonzero 20th reply
+sets `empty_confirmed: false` and `limit_reached: true`. A nonzero instrument
+error code is successful query data. Communication and invalid-response
+failures use the standard CLI error envelope and exit code 3. The System
+Query commands send no configuration writes or queue-clear commands.
+
+All three support `--simulate` and `--dry-run`. Dry-run lists `*IDN?` and the
+selected query, with `max_reads` for `--all`. Product LIVE and Worker LIVE
+are blocked. The separate contributor CLI scope requires
+`--hardware-validation system-query`, an explicit USB INSTR resource,
+System VISA, and exact IT8812C identification.
+[Contributor procedure](#contributor-system-query-validation) ·
+[ITECH IT8800 Programming Guide V2.1, printed pp. 31–33](https://assets.testequity.com/te1/Documents/pdf/itech/ITECH_IT8800-Programming-Guide-EN.pdf#page=41)
+
 ## Offline Measurement Extensions
 
 `measure-min-max`, `measure-discharge`, `set-average` and `average-status`
@@ -992,7 +1018,7 @@ does not authorize physical instrument operation.
 
 | Script | Purpose | Real hardware |
 | --- | --- | --- |
-| `scripts/preflight-cli.ps1` | Offline CLI, simulator, refusal and Manifest checks; focused switches: `-TransientOnly`, `-FixedAutoOnly`, `-FixedSlewVonShortOnly`, `-InputTimerOnly`, `-TraceOnly`, `-CrLedSlowRiseOnly`, `-TriggerOnly`, `-ProtectionOnly` | Never |
+| `scripts/preflight-cli.ps1` | Offline CLI, simulator, refusal and Manifest checks; focused switches: `-TransientOnly`, `-FixedAutoOnly`, `-FixedSlewVonShortOnly`, `-InputTimerOnly`, `-TraceOnly`, `-CrLedSlowRiseOnly`, `-TriggerOnly`, `-ProtectionOnly`, `-SystemQueryOnly` | Never |
 | `scripts/live-cli-check.ps1 -PlanOnly` | Validate command plans; reported physical cases remain `NOT RUN` | Never |
 | `scripts/live-cli-check.ps1` | Separately approved interactive IT8812C validation, including deliberate Input ON/OFF | With operator approval |
 
@@ -1020,14 +1046,15 @@ for focused verification.
 | `trigger` | Four physical sources (HOLD, TIMER, BUS, EXTERNAL), using Transient CC Pulse and finite LIST CC with observation and Trigger Setup restoration; MANUAL powered validation is excluded | Yes |
 | `input-timer` | Bounded Fixed CC Input Timer, expiry and explicit disable | Yes |
 | `protection` | Software current trip, software power trip, hardware power limiting and separate defaults | Explicit selection only |
+| `system-query` | SCPI Version, Display Mode and single/bounded Error Queue reads with Input OFF | Explicit selection only |
 
 `-InputTimerOnly` remains a compatible shortcut for the single
 `-Modes input-timer` trial and **cannot** be combined with `-Modes`.
 When Trigger and legacy Transient are both selected, the original Trigger
 Source and Timer Interval are captured before any mutating mode command and
-restored after Trigger validation where safe. All selections keep Identify,
-physical Input OFF and V/I/P prechecks. Invalid or empty mode
-names are rejected.
+restored after Trigger validation where safe. All selections keep Identify
+and physical Input OFF prechecks. The dedicated System Query procedure omits
+the V/I/P precheck. Invalid or empty mode names are rejected.
 
 ### Script parameters
 
@@ -1156,6 +1183,28 @@ that budget. Select a smaller `-Modes` set if necessary. V/I/P are separate quer
 of power freshness, synchronization, waveform timing or accuracy. This
 contributor-only CLI validation **does not** enable Worker LIVE or expand
 Product LIVE support.
+
+### Contributor System Query validation
+
+Select `-Modes system-query` alone for the separately approved interactive
+procedure. Use an operator-supplied USB INSTR resource and System VISA. Add
+`-PlanOnly` to preview the procedure offline.
+
+```powershell
+.\scripts\live-cli-check.ps1 -Target itech-it8812c -Resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" -Modes system-query -PlanOnly
+```
+
+The script prompts for confirmation before hardware access and explains that
+each Error Queue read consumes the returned entry. It identifies the device,
+confirms Input OFF, reads SCPI Version and Display Mode, reads one Error Queue
+entry, runs the bounded `--all` query, then confirms Input OFF again. It stops on
+the first failed step. The procedure sends no Input switching, setting, clear, or reset
+commands and uses only errors already reported by the instrument. An empty
+instrument queue exercises only the zero-reply path.
+
+The shareable report records version, display mode, error codes, queue counts
+and whether the empty queue or read limit was reached. Full instrument error
+messages are retained in private raw CLI logs only with `-DebugArtifacts`.
 
 ### Contributor Protection validation
 
