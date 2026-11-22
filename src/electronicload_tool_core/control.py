@@ -1080,9 +1080,11 @@ def _set_fixed_cc(session, current, range_name, stop, cc_mode_scope=None):
     return {"input_state": "OFF", **settings}
 
 
-def _turn_input_on(session, check, *, on_attempt=None):
+def _turn_input_on(session, check, *, on_attempt=None, on_remote_attempt=None):
     check()
     # Remote can change the state observed by the first safety check.
+    if on_remote_attempt is not None:
+        on_remote_attempt()
     _write(session, "SYST:REM")
     settings = check()
     try:

@@ -684,14 +684,29 @@ def sequence_visa(fake_visa, monkeypatch):
 SEQUENCE_CC = ("set-cc", {"current": 0.1, "range": "auto"})
 
 
-def run_sequence(setup=SEQUENCE_CC, *, loops=1, wait=0.25, **kwargs):
-    from electronicload_tool_core.sequence import execute
+def sequence_trial_document(setup, loops, wait):
     steps = (setup, ("input-on", {}), ("input-state", {}), ("wait", {"seconds": wait}),
              ("measure", {}), ("input-off", {}), ("input-state", {}))
-    document = {"version": 1, "loop_count": loops,
-                "steps": [{"action": action, "arguments": args} for action, args in steps]}
-    return execute(document, **{"resource": RESOURCE, "hardware_validation": "sequence",
-                                "confirmed": True, **kwargs})
+    return {"version": 1, "loop_count": loops,
+            "steps": [{"action": action, "arguments": args} for action, args in steps]}
+
+
+def run_sequence(setup=SEQUENCE_CC, *, loops=1, wait=0.25, **kwargs):
+    from electronicload_tool_core.sequence import execute
+
+    return execute(sequence_trial_document(setup, loops, wait),
+                   **{"resource": RESOURCE, "hardware_validation": "sequence", "confirmed": True, **kwargs})
+
+
+def sequence_cli_error(tmp_path, capsys):
+    file = tmp_path / "sequence.json"
+    file.write_text(json.dumps(sequence_trial_document(SEQUENCE_CC, 1, 0.25)), encoding="utf-8")
+    assert cli.main(["sequence", "--file", str(file), "--resource", RESOURCE,
+                     "--hardware-validation", "sequence", "--confirm", "--json"]) == 3
+    error = json.loads(capsys.readouterr().out)["error"]
+    assert error["code"] == "sequence_cleanup_unconfirmed"
+    assert "Independently switch off" in error["message"]
+    return error["details"]
 
 
 @pytest.mark.parametrize(("setup", "write", "query"), [
@@ -778,6 +793,25 @@ def test_sequence_live_guards_before_writes_and_after_remote(sequence_visa, cond
         assert fake.input and fake.calls == ["*IDN?", "INP:STAT?"]
 
 
+def test_sequence_lost_remote_reply_requires_manual_off(sequence_visa, tmp_path, capsys):
+    fake, calls = sequence_visa
+
+    def lose_input_state(inst):
+        if inst.calls.count("SYST:REM") == 2:
+            inst.response_errors["INP:STAT?"] = TimeoutError("PRIVATE")
+
+    fake.after_remote = lose_input_state
+    details = sequence_cli_error(tmp_path, capsys)
+    assert details["failed_step"]["action"] == "input-on"
+    assert details["original_error"]["code"] == "query_failed"
+    assert details["input_state"] == "UNKNOWN"
+    assert details["cleanup"]["reason"] == "session_untrusted"
+    assert not details["cleanup"]["attempted"] and not details["cleanup"]["off_confirmed"]
+    assert calls.count("open_resource") == 1
+    assert fake.calls[-2:] == ["SYST:REM", "INP:STAT?"]
+    assert "INP ON" not in fake.calls and "INP OFF" not in fake.calls
+
+
 @pytest.mark.parametrize("condition", ["stop", "off_confirmation", "lost_reply", "uncertain_write", "interrupted_io"])
 def test_sequence_live_cleans_up_on_stop_and_reports_uncertain_off(sequence_visa, monkeypatch, condition):
     fake, calls = sequence_visa
@@ -820,36 +854,39 @@ def test_sequence_live_cleans_up_on_stop_and_reports_uncertain_off(sequence_visa
     assert "PRIVATE" not in json.dumps(error.value.as_dict())
 
 
-@pytest.mark.parametrize(("fail_at", "cause", "reason"), [
-    ("explicit_off", "input_off_not_confirmed", "explicit_off_unconfirmed"),
-    ("loop_end", "query_failed", "session_untrusted"),
+@pytest.mark.parametrize(("outcome", "cause", "reason", "state"), [
+    ("explicit_off", "input_off_not_confirmed", "explicit_off_unconfirmed", "UNKNOWN"),
+    ("loop_end_lost_reply", "query_failed", "session_untrusted", "UNKNOWN"),
+    ("loop_end_on", "input_not_off", "input_not_off", "ON"),
 ])
-def test_sequence_does_not_resend_an_unconfirmed_explicit_off(sequence_visa, monkeypatch, fail_at, cause, reason):
+def test_sequence_does_not_resend_an_unconfirmed_explicit_off(
+    sequence_visa, monkeypatch, tmp_path, capsys, outcome, cause, reason, state,
+):
     fake, calls = sequence_visa
-    if fail_at == "explicit_off":
+    if outcome == "explicit_off":
         monkeypatch.setattr(control, "INPUT_STATE_CONFIRM_TIMEOUT_S", 0.01)
         fake.after_write = lambda inst, cmd: setattr(inst, "input", True) if cmd == "INP OFF" else None
     else:
         query = fake.query
 
-        def lose_final_off_reply(command):
+        def read_final_input_state(command):
             if command == "INP:STAT?" and "INP OFF" in fake.calls:
                 after_off = fake.calls[fake.calls.index("INP OFF") + 1:]
                 # First confirm the OFF write, then read the last step's Input state.
                 if after_off.count(command) == 2:
-                    fake.response_errors[command] = TimeoutError("PRIVATE")
+                    if outcome == "loop_end_on":
+                        fake.input = True
+                    else:
+                        fake.response_errors[command] = TimeoutError("PRIVATE")
             return query(command)
 
-        monkeypatch.setattr(fake, "query", lose_final_off_reply)
-    with pytest.raises(LoadError, match="Independently switch off") as error:
-        run_sequence()
+        monkeypatch.setattr(fake, "query", read_final_input_state)
+    details = sequence_cli_error(tmp_path, capsys)
     assert calls.count("open_resource") == 1
     assert fake.calls.count("INP OFF") == 1
-    assert error.value.code == "sequence_cleanup_unconfirmed"
-    details = error.value.details
     assert details["original_error"]["code"] == cause
-    assert details["input_state"] == "UNKNOWN"
+    assert details["input_state"] == state
     assert details["cleanup"]["reason"] == reason
     assert not details["cleanup"]["attempted"] and not details["cleanup"]["off_confirmed"]
-    if fail_at == "loop_end":
+    if outcome != "explicit_off":
         assert details["failed_step"] is None and details["input_states"][-1]["input_state"] == "OFF"

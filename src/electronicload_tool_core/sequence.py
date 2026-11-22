@@ -6,12 +6,14 @@ from threading import Event
 from . import control
 from .errors import LoadError
 from .hardware_validation import (
+    require_sequence_timer_off,
     sequence_fixed_readback,
     sequence_fixed_setup,
     sequence_input_on,
     validate_sequence_trial,
 )
 from .identity import MODEL_ID, parse_identity
+from .readback import fixed_slew_status
 from .readonly import read_measurement
 from .simulator import ControlSimulator
 from .visa import open_session, require_trusted_session, validate_connection
@@ -124,10 +126,15 @@ class _Execution:
                        "cleanup": {"required": False, "attempted": False, "off_confirmed": False}}
         self.step = None
         self.owns_input = False
+        self.input_on_remote_attempted = False
         self.explicit_off_attempted = False
         self.explicit_off_needs_loop_check = False
 
+    def _input_on_remote_attempt(self):
+        self.input_on_remote_attempted = True
+
     def _input_on_attempt(self):
+        self.input_on_remote_attempted = False
         self.owns_input = True
         self.result["input_state"] = "UNKNOWN"
         self.result["cleanup"]["off_confirmed"] = False
@@ -157,8 +164,9 @@ class _Execution:
                 elif action == "input-off":
                     self.explicit_off_attempted = True
                     control._turn_input_off(session)
+                    if self.owns_input:
+                        self.explicit_off_needs_loop_check = True
                     self.explicit_off_attempted = self.owns_input = False
-                    self.explicit_off_needs_loop_check = True
                     self.result["input_state"] = "OFF"
                 elif action == "wait":
                     if self.stop.wait(float(arguments["seconds"])):
@@ -191,7 +199,8 @@ class _Execution:
 
     def _input_on(self, session, setup):
         if self.live:
-            sequence_input_on(session, setup, self.stop, self._input_on_attempt)
+            sequence_input_on(session, setup, self.stop, self._input_on_attempt,
+                              on_remote_attempt=self._input_on_remote_attempt)
             return
 
         action, expected = setup
@@ -202,6 +211,13 @@ class _Execution:
                 session, self.stop, allow_cv=True, allow_cr=True, allow_cw=True)
             if settings["function_mode"] not in {"FIX", "FIXED"}:
                 raise LoadError("unsafe_mode", "Sequence Input ON requires Fixed mode.")
+            require_sequence_timer_off(session)
+            if scope == "cc" and "rise_slew" in expected:
+                observed = fixed_slew_status(session)
+                if not observed["configured"] or any(
+                    Decimal(observed[f"{field}_a_per_us"]) != expected[field] for field in SLEW_FIELDS
+                ):
+                    raise LoadError("readback_mismatch", "CC slew differs from the Sequence setup.", 3)
             sequence_fixed_readback(session, scope, expected, self.stop)
             return settings
 
@@ -215,7 +231,8 @@ class _Execution:
         untrusted = error.code in UNTRUSTED_ERRORS or interrupted_io
         if untrusted or self.explicit_off_attempted:
             self.result["input_state"] = "UNKNOWN"
-            if self.owns_input or self.explicit_off_attempted or (self.live and self.explicit_off_needs_loop_check):
+            if (self.owns_input or self.explicit_off_attempted or self.input_on_remote_attempted
+                    or (self.live and self.explicit_off_needs_loop_check)):
                 cleanup["reason"] = ("session_untrusted" if untrusted
                                      else "explicit_off_unconfirmed")
         elif self.owns_input:
@@ -230,16 +247,19 @@ class _Execution:
                 self.result["input_state"] = "OFF"
         elif error.code in {"input_not_off", "already_on"}:
             self.result["input_state"] = "ON"
+            if self.explicit_off_needs_loop_check:
+                cleanup["reason"] = "input_not_off"
         cleanup["off_confirmed"] = self.result["input_state"] == "OFF"
 
     def failure(self, error):
         cleanup = self.result["cleanup"]
         risk = not cleanup["off_confirmed"] and (
-            self.owns_input or self.explicit_off_attempted or cleanup.get("reason") == "session_untrusted")
+            self.owns_input or self.explicit_off_attempted or "reason" in cleanup)
         progress = {**self.result, "failed_step": self.step, "original_error": error.as_dict()}
         if risk:
+            state = "Input is ON." if self.result["input_state"] == "ON" else "Input OFF is unconfirmed."
             return LoadError("sequence_cleanup_unconfirmed",
-                             "Input OFF is unconfirmed. Independently switch off the load now.",
+                             f"{state} Independently switch off the load now.",
                              3, **progress)
         return LoadError(error.code, str(error), error.exit_code, **progress)
 

@@ -738,7 +738,12 @@ def sequence_fixed_readback(session, scope, expected, stop):
     c._mutation_off(session, stop)
 
 
-def sequence_input_on(session, setup, stop, on_attempt):
+def require_sequence_timer_off(session):
+    if c._flag(session, "INP:TIM?") != "OFF":
+        raise LoadError("input_timer_enabled", "Disable Input Timer before Sequence Input ON.")
+
+
+def sequence_input_on(session, setup, stop, on_attempt, *, on_remote_attempt):
     """Recheck the exact last setup and interlocks before and after Remote."""
     action, settings = setup
     scope = action.removeprefix("set-")
@@ -746,11 +751,10 @@ def sequence_input_on(session, setup, stop, on_attempt):
     def check():
         _setup_guard(session, stop)
         sequence_fixed_readback(session, scope, settings, stop)
-        if c._flag(session, "INP:TIM?") != "OFF":
-            raise LoadError("input_timer_enabled", "Disable Input Timer before Sequence Input ON.")
+        require_sequence_timer_off(session)
         if scope != "cc" and c._flag(session, c.SLOW_RISE_QUERY) != "OFF":
             raise LoadError("current_slow_rise_enabled", "Disable Current Slow Rise before Input ON.")
         c._mutation_off(session, stop)
         return {}
 
-    c._turn_input_on(session, check, on_attempt=on_attempt)
+    c._turn_input_on(session, check, on_attempt=on_attempt, on_remote_attempt=on_remote_attempt)

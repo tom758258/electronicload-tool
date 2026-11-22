@@ -5,7 +5,7 @@ from threading import Event
 
 import pytest
 
-from electronicload_tool_core import sequence
+from electronicload_tool_core import control, sequence
 from electronicload_tool_core.errors import LoadError
 from electronicload_tool_core.simulator import ControlSimulator
 
@@ -114,23 +114,47 @@ def test_confirmed_run_consumes_slew_as_paired_fixed_setup():
     assert sim.fixed_cc_slew == {"rise_slew_a_per_us": "0.1", "fall_slew_a_per_us": "0.2"}
 
 
-def test_simulator_refuses_sequence_on_if_remote_changes_the_fixed_setpoint(monkeypatch):
+@pytest.mark.parametrize("changed", ["current", "slew"])
+def test_simulator_refuses_sequence_on_if_remote_changes_the_fixed_settings(monkeypatch, changed):
     sim = ControlSimulator()
     write = sim.write
     commands = []
+    setup = CC if changed == "current" else step("set-cc", **CC["arguments"], rise_slew=0.1, fall_slew=0.2)
 
     def drift_on_remote(command):
         commands.append(command)
         write(command)
         if command == "SYST:REM" and "CURR 0.1" in commands:
-            sim.current_a = 0.2
+            if changed == "current":
+                sim.current_a = 0.2
+            else:
+                sim.fixed_cc_slew["rise_slew_a_per_us"] = "0.2"
 
     monkeypatch.setattr(sim, "write", drift_on_remote)
     with pytest.raises(LoadError) as error:
-        sequence.execute(document(CC, ON, OFF), mode="simulate", confirmed=True, simulator=sim)
+        sequence.execute(document(setup, ON, OFF), mode="simulate", confirmed=True, simulator=sim)
     assert error.value.code == "readback_mismatch"
     assert error.value.details["failed_step"]["action"] == "input-on"
     assert "INP ON" not in commands and not sim.input_on
+
+
+def test_simulator_refuses_sequence_on_with_enabled_input_timer(monkeypatch):
+    sim = ControlSimulator()
+    control.execute("set-input-timer", mode="simulate", simulator=sim, seconds=5)
+    control.execute("input-timer-enable", mode="simulate", simulator=sim)
+    write = sim.write
+    commands = []
+
+    def record(command):
+        commands.append(command)
+        write(command)
+
+    monkeypatch.setattr(sim, "write", record)
+    with pytest.raises(LoadError) as error:
+        sequence.execute(document(CC, ON, OFF), mode="simulate", confirmed=True, simulator=sim)
+    assert error.value.code == "input_timer_enabled"
+    assert error.value.details["failed_step"]["action"] == "input-on"
+    assert "INP ON" not in commands and not sim.input_on and sim.input_timer_enabled
 
 
 def test_preexisting_stop_does_not_run_zero_wait(monkeypatch):
