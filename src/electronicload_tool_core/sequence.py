@@ -214,6 +214,9 @@ class _Execution:
                                     else {"code": "interrupted", "message": "OFF cleanup was interrupted."})
             else:
                 self.result["input_state"] = "OFF"
+        elif error.code == "readback_mismatch" and error.details.get("input_state") == "ON":
+            self.result["input_state"] = "ON"
+            cleanup["reason"] = "input_not_off"
         elif error.code in {"input_not_off", "already_on"}:
             self.result["input_state"] = "ON"
         if (self.result["input_state"] == "ON"

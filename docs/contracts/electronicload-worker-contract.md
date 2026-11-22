@@ -152,9 +152,11 @@ after attempting to switch Input or entering Remote during setup or Input ON,
 the terminal uses `sequence_cleanup_unconfirmed` and directs the operator to
 independently switch off the load. It reports `input_state: "ON"` if a post-Remote
 readback observes ON or if Input is observed ON again after the Sequence verified
-its own OFF within the same loop. It reports `"UNKNOWN"` when the Input state
-cannot be determined. The Worker emits no per-step events and creates no
-Sequence artifacts.
+its own OFF within the same loop. When a Fixed settings readback observes ON
+and the settings do not match, the terminal also reports ON, gives the same
+manual OFF instruction, and preserves `readback_mismatch` in `original_error`.
+It reports `"UNKNOWN"` when the Input state cannot be determined. The Worker
+emits no per-step events and creates no Sequence artifacts.
 
 ## Configuration readback
 

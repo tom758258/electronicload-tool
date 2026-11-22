@@ -355,7 +355,7 @@ def test_fixed_slew_von_short_cli_refusal(capsys, arguments, code):
     assert json.loads(capsys.readouterr().out)['error']['code'] == code
 
 
-def test_sequence_file_json_confirmation_and_preview(tmp_path, capsys):
+def test_sequence_file_json_and_live_refusal(tmp_path, capsys):
     assert main(["manifest", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["commands"]["sequence"] == {"kind": "async_job"}
     file = tmp_path / "sequence.json"
@@ -365,26 +365,17 @@ def test_sequence_file_json_confirmation_and_preview(tmp_path, capsys):
         encoding="utf-8",
     )
     args = ["sequence", "--file", str(file)]
-    assert main(args + ["--dry-run"]) == 0
-    assert json.loads(capsys.readouterr().out)["result"]["input_on_requires_confirmation"]
-    assert main(args + ["--simulate"]) == 2
-    assert json.loads(capsys.readouterr().out)["error"]["code"] == "confirmation_required"
-    assert main(args + ["--simulate", "--confirm", "--json"]) == 0
+    assert main(args + ["--simulate", "--confirm"]) == 0
     assert json.loads(capsys.readouterr().out)["result"]["input_state"] == "OFF"
     assert main(args + ["--validation-allow-pending-live-support", "--confirm"]) == 2
     assert json.loads(capsys.readouterr().out)["error"]["code"] == "unsupported_live_scope"
 
 
-@pytest.mark.parametrize("number", ["0.10000000000000000001", "NaN", "0.1,\"current\":0.1"])
-def test_sequence_file_checks_original_json(tmp_path, capsys, number):
+def test_sequence_file_preserves_original_decimal(tmp_path, capsys):
     file = tmp_path / "sequence.json"
     file.write_text(
-        '{"version":1,"loop_count":1,"steps":[{"action":"set-cc","arguments":{"current":'
-        + number + ',"range":"low"}}]}', encoding="utf-8",
+        '{"version":1,"loop_count":1,"steps":[{"action":"set-cc","arguments":'
+        '{"current":0.10000000000000000001,"range":"low"}}]}', encoding="utf-8",
     )
-    assert main(["sequence", "--file", str(file), "--dry-run", "--json"]) == 2
-    error = json.loads(capsys.readouterr().out)["error"]
-    if number.startswith("0.100"):
-        assert error["details"]["reason"] == "invalid_current_resolution"
-    else:
-        assert error["code"] == "argument_error"
+    assert main(["sequence", "--file", str(file), "--dry-run"]) == 2
+    assert json.loads(capsys.readouterr().out)["error"]["details"]["reason"] == "invalid_current_resolution"

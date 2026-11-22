@@ -763,7 +763,13 @@ def _sequence_fixed_readback(session, scope, expected, stop):
             ):
                 raise LoadError("readback_mismatch", "CC slew differs from the Sequence setup.", 3)
     else:
-        _match(_snapshot(session, scope), expected)
+        snapshot = _snapshot(session, scope)
+        try:
+            _match(snapshot, expected)
+        except LoadError as exc:
+            # A settings mismatch skips the final OFF check. Keep the Input reading.
+            exc.details["input_state"] = snapshot["input_state"]
+            raise
     c._mutation_off(session, stop)
 
 

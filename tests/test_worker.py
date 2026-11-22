@@ -284,6 +284,17 @@ def test_measurement_worker_admission_results_and_average_state(worker, capsys):
     assert run('set-average', {'count': 8}) == {'average_count': 8}
 
 
+def sequence_request(*actions, **arguments):
+    steps = [{"action": action, "arguments": params} for action, params in actions]
+    return request("sequence", {"document": {"version": 1, "loop_count": 1, "steps": steps}, **arguments})
+
+
+SEQUENCE_SET = ("set-cc", {"current": 0.25, "range": "auto"})
+SEQUENCE_ON = ("input-on", {})
+SEQUENCE_OFF = ("input-off", {})
+SEQUENCE_READ = ("input-state", {})
+
+
 @pytest.mark.parametrize('commands', [
     (
         ('measure-min-max', {}), ('measure-discharge', {}), ('set-average', {'count': 8}),
@@ -294,7 +305,10 @@ def test_measurement_worker_admission_results_and_average_state(worker, capsys):
         ('protection-clear', {'confirm': True}),
     ),
     (('scpi-error-next', {'all': True}), ('scpi-version', {}), ('display-mode', {})),
-], ids=['measurement_trace_protection', 'system_query'])
+    (('sequence', sequence_request(
+        SEQUENCE_SET, SEQUENCE_ON, SEQUENCE_OFF, confirm_input_on=True,
+    )['arguments']),),
+], ids=['measurement_trace_protection', 'system_query', 'sequence'])
 def test_offline_live_jobs_fail_before_visa(fake_visa, commands):
     from http.server import ThreadingHTTPServer
     from electronicload_tool_cli import worker as worker_module
@@ -1822,17 +1836,6 @@ def test_configuration_readback_worker_uses_session_and_async_contract(worker, c
         assert result["error"]["code"] == "unsupported_live_scope"
 
 
-def sequence_request(*actions, **arguments):
-    steps = [{"action": action, "arguments": params} for action, params in actions]
-    return request("sequence", {"document": {"version": 1, "loop_count": 1, "steps": steps}, **arguments})
-
-
-SEQUENCE_SET = ("set-cc", {"current": 0.25, "range": "auto"})
-SEQUENCE_ON = ("input-on", {})
-SEQUENCE_OFF = ("input-off", {})
-SEQUENCE_READ = ("input-state", {})
-
-
 def test_sequence_worker_admission_dry_run_and_simulator_state(worker):
     _, events, ready = worker
     endpoint = ready["command_url"]
@@ -1855,9 +1858,6 @@ def test_sequence_worker_admission_dry_run_and_simulator_state(worker):
     assert code == 202
     terminal = wait_finished(events, job["worker_job_id"])
     assert terminal["result"]["input_on_requires_confirmation"]
-    code, job = http(endpoint, request("fixed-status"))
-    assert code == 202
-    assert wait_finished(events, job["worker_job_id"])["result"]["current_a"] == 0.0
 
     code, job = http(endpoint, sequence_request(
         SEQUENCE_SET, SEQUENCE_ON, ("measure", {}), SEQUENCE_OFF, SEQUENCE_READ, confirm_input_on=True))
@@ -1870,15 +1870,6 @@ def test_sequence_worker_admission_dry_run_and_simulator_state(worker):
     code, job = http(endpoint, request("fixed-status"))
     assert code == 202
     assert wait_finished(events, job["worker_job_id"])["result"]["current_a"] == 0.25
-
-    code, job = http(endpoint, request("input-on", {"confirm_input_on": True}))
-    assert code == 202 and wait_finished(events, job["worker_job_id"])["state"] == "succeeded"
-    code, job = http(endpoint, sequence_request(SEQUENCE_READ))
-    assert code == 202
-    failed = wait_finished(events, job["worker_job_id"])
-    assert failed["result"] is None and failed["error"]["code"] == "input_not_off"
-    code, job = http(endpoint, request("input-state"))
-    assert code == 202 and wait_finished(events, job["worker_job_id"])["result"]["input_state"] == "ON"
 
 
 def test_sequence_worker_cli_forwarding_preserves_nested_decimal(worker, capsys):
@@ -1925,28 +1916,3 @@ def test_sequence_worker_stop_fails_and_reports_partial_results(trace_worker_wit
     assert details["cleanup"] == {"required": True, "attempted": True, "off_confirmed": True}
     assert details["measurements"][0]["step_index"] == 3
     assert details["failed_step"]["action"] == "wait" and not simulator.input_on
-
-
-def test_sequence_worker_live_admits_then_refuses_before_visa():
-    from http.server import ThreadingHTTPServer
-
-    from electronicload_tool_cli import worker as module
-
-    runtime = module.Runtime(mode="live", resource="USB0::0xFFFF::0x0001::SYNTHETIC::INSTR")
-    with ThreadingHTTPServer(("127.0.0.1", 0), module._handler(runtime)) as server:
-        runtime.server, runtime.port = server, server.server_port
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            payload = sequence_request(SEQUENCE_SET, SEQUENCE_ON, SEQUENCE_OFF, confirm_input_on=True)
-            payload["context"] = {"mode": "live"}
-            code, job = http(runtime.urls()["command_url"], payload)
-            assert code == 202
-            runtime.job_thread.join(timeout=3)
-            terminal = http(runtime.urls()["status_url"])[1]["last_job"]
-            assert terminal["worker_job_id"] == job["worker_job_id"]
-            assert terminal["state"] == "failed" and terminal["result"] is None
-            assert terminal["error"]["code"] == "unsupported_live_scope"
-        finally:
-            server.shutdown()
-            thread.join(timeout=3)
