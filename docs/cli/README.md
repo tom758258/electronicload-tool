@@ -1147,35 +1147,33 @@ Worker 使用 `arguments.document` 與 `arguments.confirm_input_on`。
 
 ### Contributor Software Sequence validation / 貢獻者實機驗證
 
-For separately authorized physical runs, use the CLI-only
+For separately authorized physical runs, select `-Modes sequence` on its own
+with a dedicated 5 V / 0.8 A source. The script uses the contributor CLI command
 `sequence --file <file> --hardware-validation sequence --resource <USB-INSTR> --backend system --confirm --json`
-with the registered IT8812C over USB/System VISA. The entire run uses one
-session. Fixed setup and Input switching verify the applicable interlocks
-and settings. Use an exclusive instrument, a bounded source/DUT, and an
-independent manual OFF method. A lost or timed-out session requires
-independent OFF when the state is unknown. Ordinary CLI and Worker LIVE are
-closed for Sequence.
+with the registered IT8812C over USB/System VISA. Each trial uses one session.
+Fixed setup and Input switching verify the applicable interlocks and settings.
+Use an exclusive instrument and an independent manual OFF method. Ordinary CLI
+and Worker LIVE are closed for Sequence.
 
-Select `-Modes sequence` on its own with a dedicated 5 V / 0.8 A source.
-Four fixed documents exercise 0.1 A CC, 3 V CV, 1000 Ω CR and 0.10 W CW.
-Each has one ON, an operator confirmation before dispatch, measurement,
-and verified OFF. The script retains its 30 s command and 900 s total
-deadlines. The Core handles trusted cleanup on the existing session. If
-the process times out or Input OFF is unconfirmed, the script reports
-independent manual OFF and does not open another session for cleanup.
+The contributor scope accepts only the four fixed documents, for 0.1 A CC,
+3 V CV, 1000 Ω CR and 0.10 W CW. Each has one ON, a 0.25 s Wait, measurement,
+and verified OFF. The script requires operator confirmation before each trial
+and enforces a 30 s command deadline and 900 s total deadline. The Core handles
+trusted cleanup on the existing session. If the process times out or Input OFF
+is unconfirmed, the script directs the operator to switch off the load
+independently and does not open another session for cleanup.
 
-同意實機驗證後，使用上方 CLI 專用指令及明確指定的 USB VISA Resource。
-整份 Sequence 使用同一個 IT8812C USB／System VISA Session，確認 Fixed
-設定與 Input 切換的適用安全條件。實機操作需獨占儀器，使用受限電源與 DUT，
-並備妥獨立手動 OFF 手段。Session 失信或逾時且無法確認 Input 狀態時，
-須獨立執行 OFF。一般 CLI 與 Worker 維持拒絕 Sequence LIVE。
+另行授權實機驗證後，單獨選擇 `-Modes sequence` 並使用專用 5 V／0.8 A 電源。
+Script 使用上方 CLI 貢獻者指令，以 USB／System VISA 連接已註冊的 IT8812C。
+每次試驗使用一個 Session，確認 Fixed 設定與 Input 切換的適用安全條件。
+實機操作需獨占儀器，並備妥獨立手動 OFF 手段。一般 CLI 與 Worker 維持拒絕
+Sequence LIVE。
 
-單獨選擇 `-Modes sequence`，使用專用 5 V／0.8 A 電源。四份固定文件
-分別驗證 0.1 A CC、3 V CV、1000 Ω CR、0.10 W CW。每份只有一次
-ON，送出前須操作員確認，並執行量測及確認 OFF。Script 保留單一命令
-30 秒與總時限 900 秒。通訊可信時由 Core 在原 Session 處理清理；
-若程序逾時或無法確認 Input OFF，Script 會要求獨立手動 OFF，
-且不另開 Session 清理。
+貢獻者驗證範圍只接受四份固定文件，分別驗證 0.1 A CC、3 V CV、1000 Ω CR、
+0.10 W CW。每份只有一次 ON、0.25 秒 Wait、量測及確認 OFF。Script 在每次
+試驗前要求操作員確認，並執行單一命令 30 秒與總時限 900 秒的限制。通訊可信時
+由 Core 在原 Session 處理清理。若程序逾時或無法確認 Input OFF，Script 會要求
+操作員獨立手動 OFF，且不另開 Session 清理。
 
 ## Worker and Automation
 

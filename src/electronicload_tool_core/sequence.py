@@ -5,7 +5,12 @@ from threading import Event
 
 from . import control
 from .errors import LoadError
-from .hardware_validation import sequence_fixed_setup, sequence_input_on
+from .hardware_validation import (
+    sequence_fixed_readback,
+    sequence_fixed_setup,
+    sequence_input_on,
+    validate_sequence_trial,
+)
 from .identity import MODEL_ID, parse_identity
 from .readonly import read_measurement
 from .simulator import ControlSimulator
@@ -120,6 +125,7 @@ class _Execution:
         self.step = None
         self.owns_input = False
         self.explicit_off_attempted = False
+        self.explicit_off_needs_loop_check = False
 
     def _input_on_attempt(self):
         self.owns_input = True
@@ -152,6 +158,7 @@ class _Execution:
                     self.explicit_off_attempted = True
                     control._turn_input_off(session)
                     self.explicit_off_attempted = self.owns_input = False
+                    self.explicit_off_needs_loop_check = True
                     self.result["input_state"] = "OFF"
                 elif action == "wait":
                     if self.stop.wait(float(arguments["seconds"])):
@@ -170,6 +177,7 @@ class _Execution:
                 raise LoadError("input_not_off", "Sequence loop did not finish with Input OFF.", 3,
                                 loop_index=loop)
             self.result["cleanup"]["off_confirmed"] = True
+            self.explicit_off_needs_loop_check = False
             self.result["completed_loops"] += 1
         _check_stop(self.stop)
 
@@ -186,11 +194,15 @@ class _Execution:
             sequence_input_on(session, setup, self.stop, self._input_on_attempt)
             return
 
+        action, expected = setup
+        scope = action.removeprefix("set-")
+
         def check():
             settings = control._check_input_on_conditions(
                 session, self.stop, allow_cv=True, allow_cr=True, allow_cw=True)
             if settings["function_mode"] not in {"FIX", "FIXED"}:
                 raise LoadError("unsafe_mode", "Sequence Input ON requires Fixed mode.")
+            sequence_fixed_readback(session, scope, expected, self.stop)
             return settings
 
         control._turn_input_on(session, check, on_attempt=self._input_on_attempt)
@@ -203,7 +215,7 @@ class _Execution:
         untrusted = error.code in UNTRUSTED_ERRORS or interrupted_io
         if untrusted or self.explicit_off_attempted:
             self.result["input_state"] = "UNKNOWN"
-            if self.owns_input or self.explicit_off_attempted:
+            if self.owns_input or self.explicit_off_attempted or (self.live and self.explicit_off_needs_loop_check):
                 cleanup["reason"] = ("session_untrusted" if untrusted
                                      else "explicit_off_unconfirmed")
         elif self.owns_input:
@@ -221,8 +233,9 @@ class _Execution:
         cleanup["off_confirmed"] = self.result["input_state"] == "OFF"
 
     def failure(self, error):
-        risk = ((self.owns_input or self.explicit_off_attempted)
-                and not self.result["cleanup"]["off_confirmed"])
+        cleanup = self.result["cleanup"]
+        risk = not cleanup["off_confirmed"] and (
+            self.owns_input or self.explicit_off_attempted or cleanup.get("reason") == "session_untrusted")
         progress = {**self.result, "failed_step": self.step, "original_error": error.as_dict()}
         if risk:
             return LoadError("sequence_cleanup_unconfirmed",
@@ -259,8 +272,8 @@ def execute(document, *, mode="live", model_id=MODEL_ID, backend="system", resou
         raise LoadError("unsupported_live_scope", "Product LIVE is not open for Sequence.")
     validate_connection(resource, backend, required=mode == "live")
     marker = {"validation_only": True, "validation_scope": COMMAND} if hardware_validation else {}
-    if hardware_validation and any(SLEW_FIELDS & args.keys() for _, args in steps):
-        raise LoadError("unsupported_live_scope", "Sequence hardware validation excludes Fixed CC slew setup.")
+    if hardware_validation:
+        validate_sequence_trial(loops, steps)
     if mode == "dry-run":
         return {**marker, "version": 1, "loop_count": loops, "expanded_step_count": loops * len(steps),
                 "hardware_access": False, "input_on_requires_confirmation": contains_on,
