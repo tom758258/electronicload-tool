@@ -203,23 +203,28 @@ def test_cc_discharge_at_initial_cutoff_never_changes_input_or_configuration(clo
 
 
 @pytest.mark.parametrize(
-    ("voltages", "cutoff_ah", "timeout", "reason"),
+    ("voltage", "cutoff_ah", "timeout", "reason", "current_fails"),
     [
-        (["4", "3"], None, 4, "voltage_cutoff"),
-        (["4", "4"], 0.0006, 4, "capacity_cutoff"),
-        (["4", "3"], 0.0006, 4, "voltage_cutoff"),
-        (["4", "4"], None, 2, "timeout"),
+        ("3", None, 1.5, "voltage_cutoff", False),
+        ("4", 0.0006, 4, "capacity_cutoff", False),
+        ("3", 0.0006, 4, "voltage_cutoff", True),
+        ("4", 0.0009, 2, "timeout", False),
     ],
 )
-def test_cc_discharge_cutoffs_use_measured_current_and_confirm_off(clock, voltages, cutoff_ah,
-                                                               timeout, reason):
+def test_cc_discharge_cutoffs_use_measured_current_and_confirm_off(
+    clock, voltage, cutoff_ah, timeout, reason, current_fails,
+):
     class DelayedReading(RecordingLoad):
         def query(self, command):
             if command == "MEAS:CURR?" and command in self.io:
                 clock.now += 0.25
+                if current_fails:
+                    raise OSError("No current reply after the voltage cutoff")
+            if command == "FETC:POW?" and command in self.io:
+                clock.now += 0.5
             return super().query(command)
 
-    load = DelayedReading({"MEAS:VOLT?": ["12", *voltages], "MEAS:CURR?": ["1", "3"],
+    load = DelayedReading({"MEAS:VOLT?": ["12", "4", voltage], "MEAS:CURR?": ["1", "3"],
                            "FETC:POW?": ["4", "9.5"]})
     arguments = dict(current=0.5, cutoff_voltage=3, interval_s=1, timeout_s=timeout,
                      confirm_input_on=True)
@@ -232,10 +237,22 @@ def test_cc_discharge_cutoffs_use_measured_current_and_confirm_off(clock, voltag
         result = failed.value.details
     else:
         result = run("cc-discharge", load, clock, **arguments)
-    assert result["capacity_ah"] == pytest.approx((1 + 3) / 2 * 1.25 / 3600)
+    expected = {"voltage_v": float(voltage)}
+    if reason != "voltage_cutoff":
+        expected["current_a"] = 3
+    if reason == "timeout":
+        expected["power_w"] = 9.5
+    expected_capacity = 0 if reason == "voltage_cutoff" else (1 + 3) / 2 * 1.25 / 3600
+    assert result["capacity_ah"] == pytest.approx(expected_capacity)
     assert result["stop_reason"] == reason and result["sample_count"] == 2
-    assert result["last_measurement"] == {"voltage_v": float(voltages[-1]), "current_a": 3, "power_w": 9.5}
-    assert result["input_state"] == "OFF" and load.io.count("INP OFF") == 1
+    assert result["last_measurement"] == expected
+    assert result["elapsed_s"] == {"voltage_cutoff": 1, "capacity_cutoff": 1.25, "timeout": 2}[reason]
+    assert result["cleanup"]["off_confirmed"] and not load.input_on
+    assert load.io.count("INP OFF") == 1
+    if reason != "timeout":
+        assert load.io.count("FETC:POW?") == 1
+    if reason == "voltage_cutoff":
+        assert load.io.count("MEAS:CURR?") == 1
 
 
 def test_cc_discharge_stops_when_capacity_exactly_reaches_cutoff(clock):
@@ -286,7 +303,12 @@ def test_discharge_finishes_off_cleanup_before_slow_csv_rows(clock, tmp_path, mo
     with path.open(encoding="utf-8", newline="") as file:
         rows = list(csv.DictReader(file))
     assert [row["sample_index"] for row in rows] == ["1", "2"]
-    assert float(rows[-1]["power_w"]) == result["last_measurement"]["power_w"]
+    assert float(rows[0]["power_w"]) == 6
+    if reason == "voltage_cutoff":
+        assert rows[-1]["voltage_v"] == "3.0"
+        assert rows[-1]["current_a"] == rows[-1]["power_w"] == ""
+    else:
+        assert float(rows[-1]["power_w"]) == result["last_measurement"]["power_w"]
 
 
 @pytest.mark.parametrize("scenario", ["untrusted", "off_unconfirmed", "csv_write_failed"])
@@ -298,15 +320,15 @@ def test_discharge_failure_reports_safe_state_and_retains_csv(clock, tmp_path, m
                 return
             super().write(command)
 
-    if scenario in {"csv_write_failed", "off_unconfirmed"}:
-        def fail_write(self, rows):
-            assert rows
-            raise OSError("Unwritable file")
+    def fail_write(self, rows):
+        assert scenario == "csv_write_failed", "Skip row export when OFF is unconfirmed"
+        assert rows
+        raise OSError("Unwritable file")
 
-        monkeypatch.setattr(csv.DictWriter, "writerows", fail_write)
+    monkeypatch.setattr(csv.DictWriter, "writerows", fail_write)
 
     voltage = OSError("No reply") if scenario == "untrusted" else "3"
-    load = FaultyLoad({"MEAS:VOLT?": ["12", voltage]})
+    load = FaultyLoad({"MEAS:VOLT?": ["12", "4", voltage]})
     path = tmp_path / "fault.csv"
     with pytest.raises(LoadError) as failed:
         run("cc-discharge", load, clock, current=0.5, cutoff_voltage=3, timeout_s=2,
@@ -320,12 +342,15 @@ def test_discharge_failure_reports_safe_state_and_retains_csv(clock, tmp_path, m
         assert error.code == "workflow_cleanup_unconfirmed"
         assert error.details["manual_action_required"] is True
         assert error.details["input_state"] == "UNKNOWN" and load.input_on
+        assert error.details["sample_count"] >= 1
+        with path.open(encoding="utf-8", newline="") as file:
+            reader = csv.DictReader(file)
+            assert reader.fieldnames and list(reader) == []
         if scenario == "untrusted":
             assert error.details["original_error"]["code"] == "query_failed"
             assert load.io[-1] == "MEAS:VOLT?" and "INP OFF" not in load.io
         else:
             assert error.details["cleanup"]["error"]["code"] == "input_off_not_confirmed"
-            assert error.details["csv_export_error"] == "OSError"
             assert load.io.count("INP OFF") == 1
 
 

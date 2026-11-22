@@ -140,16 +140,41 @@ def _measure(session, command, settings, quantities, stop, result, record_row):
         _wait(stop, max(0, min(due, deadline) - monotonic()))
         if monotonic() >= deadline:
             break
-        reading = _sample(session, quantities)
-        sampled = monotonic()
-        if sampled >= deadline:
+        cutoff_reason = None
+        if discharge:
+            reading = {}
+            sampled = None
+            # Check each cutoff before asking for the next measurement.
+            for quantity in quantities:
+                if monotonic() >= deadline or (stop is not None and stop.is_set()):
+                    break
+                values = _sample(session, (quantity,))
+                observed = monotonic()
+                if observed >= deadline:
+                    break
+                reading.update(values)
+                sampled = observed
+                if quantity == "voltage" and Decimal(str(values["voltage_v"])) <= settings["cutoff_voltage"]:
+                    cutoff_reason = "voltage_cutoff"
+                    break
+                if quantity == "current":
+                    current = Decimal(str(values["current_a"]))
+                    if previous_time is not None:
+                        elapsed = Decimal(str(observed - previous_time))
+                        ampere_seconds += (previous_current + current) * elapsed / 2
+                    previous_time, previous_current = observed, current
+                    if cutoff_ampere_seconds is not None and ampere_seconds >= cutoff_ampere_seconds:
+                        cutoff_reason = "capacity_cutoff"
+                        break
+        else:
+            reading = _sample(session, quantities)
+            sampled = monotonic()
+            if sampled >= deadline:
+                sampled = None
+        if sampled is None:
             _check_stop(stop)
             break
         if discharge:
-            current = Decimal(str(reading["current_a"]))
-            if previous_time is not None:
-                ampere_seconds += (previous_current + current) * Decimal(str(sampled - previous_time)) / 2
-            previous_time, previous_current = sampled, current
             capacity_ah = float(ampere_seconds / 3600)
             if not math.isfinite(capacity_ah):
                 raise LoadError("capacity_overflow", "Integrated capacity exceeds the numeric range.", 3)
@@ -166,11 +191,8 @@ def _measure(session, command, settings, quantities, stop, result, record_row):
             field = BASIC_MEASUREMENTS[settings["metric"]][0]
             if OPERATORS[settings["operator"]](Decimal(str(reading[field])), settings["threshold"]):
                 return "condition_met"
-        if discharge:
-            if Decimal(str(reading["voltage_v"])) <= settings["cutoff_voltage"]:
-                return "voltage_cutoff"
-            if cutoff_ampere_seconds is not None and ampere_seconds >= cutoff_ampere_seconds:
-                return "capacity_cutoff"
+        if cutoff_reason is not None:
+            return cutoff_reason
         # Missed intervals are skipped to keep the sampling cadence without catch-up bursts.
         tick = max(tick + 1, math.floor((monotonic() - started) / interval) + 1)
     if duration is not None:
@@ -308,6 +330,7 @@ def execute(command, *, mode="live", arguments, model_id=MODEL_ID, backend="syst
         result.update(sample_count=0, last_measurement=None)
     if command == "cc-discharge":
         result["capacity_ah"] = 0.0
+        quantities = ("voltage", "current", "power")
     elif command == "measure-until":
         quantities = (settings["metric"],)
 
@@ -331,17 +354,23 @@ def execute(command, *, mode="live", arguments, model_id=MODEL_ID, backend="syst
                 writer.writeheader()
                 file.flush()
                 if command == "cc-discharge":
-                    # Keep the bounded sample rows in memory until OFF cleanup finishes.
+                    # Keep rows in memory and skip export if OFF cleanup is unconfirmed.
                     rows = []
+                    failure = None
                     try:
                         _run(session, command, settings, stop, result, quantities, rows.append)
-                    finally:
-                        try:
-                            writer.writerows(rows)
-                        except (OSError, csv.Error, KeyboardInterrupt) as exc:
-                            if not isinstance(exc.__context__, LoadError):
-                                raise
-                            exc.__context__.details["csv_export_error"] = type(exc).__name__
+                    except LoadError as exc:
+                        if exc.code == "workflow_cleanup_unconfirmed":
+                            raise
+                        failure = exc
+                    try:
+                        writer.writerows(rows)
+                    except (OSError, csv.Error, KeyboardInterrupt) as exc:
+                        if failure is None:
+                            raise
+                        failure.details["csv_export_error"] = type(exc).__name__
+                    if failure is not None:
+                        raise failure
                 else:
                     _run(session, command, settings, stop, result, quantities, writer.writerow)
             result["csv_written"] = True

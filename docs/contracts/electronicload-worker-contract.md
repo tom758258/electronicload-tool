@@ -191,8 +191,12 @@ also include `sample_count` and `last_measurement` (null before the first
 sample). CC results include `current_a`, resolved `range`, `input_state`,
 and `cleanup` with `required`, `attempted`, and `off_confirmed`.
 Timed load includes `duration_s`. Discharge samples `voltage_v`, `current_a`
-and `power_w` in sequence and reports `capacity_ah`. When the preflight
-reads `initial_voltage_v`, the result includes it separately from the load
+and `power_w` in sequence. It checks voltage before querying current and
+integrates `capacity_ah` using consecutive current-reading timestamps
+before querying power. Either cutoff ends sampling immediately. A partial
+sample counts toward `sample_count`, and `last_measurement` contains only
+the fields collected for that sample. When preflight reads
+`initial_voltage_v`, the result includes it separately from the load
 samples. If the initial voltage is at or below the cutoff, the job succeeds
 with `voltage_cutoff`, zero samples, zero Ah and confirmed Input OFF.
 `csv_written: true` confirms completion of the requested export.
@@ -223,9 +227,12 @@ export failure retains the file with `csv_incomplete: true`. The CSV is
 created exclusively before sampling or enabling Input, following the
 existing local-path rules. Discharge buffers the bounded sample rows and
 exports them once the OFF cleanup path has finished, including after Stop or
-timeout. A second failure exporting the rows preserves the original execution
-or cleanup error and adds `error.details.csv_export_error`. The TRACE recovery
-restrictions also apply to these commands. Cancel is available only for `trace-start`.
+timeout. Unmeasured fields in a partial sample are blank in the CSV. A
+`workflow_cleanup_unconfirmed` failure skips row export and leaves the
+header-only CSV marked incomplete. A second failure exporting the rows
+preserves the original execution error and adds
+`error.details.csv_export_error`. The TRACE recovery restrictions also
+apply to these commands. Cancel is available only for `trace-start`.
 
 ## Configuration readback
 

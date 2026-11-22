@@ -1235,21 +1235,26 @@ electronicload-tool cc-discharge --dry-run --current 0.5 --cutoff-voltage 3 --cu
   the cutoff. After ON confirmation, discharge reads voltage, current and
   the latest available power in sequence. It stops at or below the positive
   voltage cutoff in V, or at or above the optional positive capacity cutoff
-  in Ah. Voltage takes precedence if both cutoffs are reached together. Ah is integrated
-  between consecutive measured currents and their timestamps. The first
-  sample starts at 0 Ah.
+  in Ah. The voltage cutoff ends sampling before the current and power
+  queries. The capacity cutoff ends sampling before the power query. Ah is
+  integrated between consecutive current readings using their own timestamps.
+  The first sample starts at 0 Ah.
 - CC runs verify Input OFF at the end. If OFF cannot be confirmed, the
   result instructs the operator to independently switch off the load.
   Timed load returns a summary. The three sampling commands also report
   `sample_count` and `last_measurement`. Discharge includes `capacity_ah`
   and the preflight `initial_voltage_v` when read. An initial cutoff has
-  zero load samples and zero Ah.
+  zero load samples and zero Ah. A cutoff sample includes only the readings
+  collected for that sample in `last_measurement`.
 - Only an explicit `--csv` creates a CSV. Relative paths resolve from the
   running process's working directory. Missing parent directories are created,
   and existing files are preserved. CSV uses `sample_index`, `elapsed_s`
-  and the measured columns, plus `capacity_ah` for discharge. Discharge CSV
-  rows are exported after the OFF cleanup path completes. A run that fails
-  after creating the file retains it and reports `csv_incomplete`.
+  and the measured columns, plus `capacity_ah` for discharge. Unmeasured
+  columns in a partial sample are blank. Discharge CSV rows are exported
+  after the OFF cleanup path completes. If the run reports unconfirmed OFF
+  cleanup, the file retains only its header and the result reports
+  `csv_incomplete`. Other failures after creating the file also retain it
+  and report `csv_incomplete`.
 
 For Worker argument names, results and Stop behavior, see the
 [Worker contract](../contracts/electronicload-worker-contract.md#basic-workflows).
@@ -1284,18 +1289,20 @@ For Worker argument names, results and Stop behavior, see the
   自確認 ON 後開始計時。放電先在 Input OFF 時讀取起始電壓，若小於或
   等於截止電壓，會保持 OFF 並結束。確認 ON 後依序讀取電壓、電流與
   最新可用的功率。電壓小於或等於正值截止電壓（V），或容量大於或等於
-  選填的正值截止容量（Ah），就結束放電。同時達成時以電壓截止為優先。
-  容量依相鄰實測電流與取樣
-  時間差積分，首筆為 0 Ah。
+  選填的正值截止容量（Ah），就結束放電。達到電壓截止時，直接結束取樣，
+  省略電流及功率查詢；達到容量截止時，省略功率查詢。容量採相鄰實測
+  電流的讀值與時間戳積分，首筆為 0 Ah。
 - CC 指令結束時確認 Input OFF。若無法確認，結果會要求操作人員獨立關閉
   負載。定時負載回傳執行摘要。三條取樣指令另回傳 `sample_count` 與
   `last_measurement`。放電也回傳 `capacity_ah`，成功讀取起始電壓時另有
   `initial_voltage_v`。若起始電壓已達截止，負載取樣筆數與容量皆為零。
+  截止當下的 `last_measurement` 只包含該筆已取得的讀值。
 - 只有明確指定 `--csv` 才建立 CSV。相對路徑以執行程序的工作目錄為準。
   缺少的上層目錄會建立，既有檔案會保留。欄位包含 `sample_index`、
-  `elapsed_s` 和量測欄位，放電另有 `capacity_ah`。放電 CSV 資料列在
-  OFF 清理流程結束後才寫入。若建檔後執行失敗，會保留檔案並回報
-  `csv_incomplete`。
+  `elapsed_s` 和量測欄位，放電另有 `capacity_ah`。部分取樣中未取得的
+  欄位留空。放電 CSV 資料列在 OFF 清理流程結束後才寫入。若回報無法確認
+  OFF 清理，CSV 只保留標題列，結果回報 `csv_incomplete`。建檔後若發生
+  其他錯誤，也會保留檔案並回報 `csv_incomplete`。
 
 Worker 的參數、結果與 Stop 行為見 [Worker 契約](../contracts/electronicload-worker-contract.md#basic-workflows)。
 
