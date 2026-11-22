@@ -3,7 +3,7 @@
 import argparse
 import json
 import sys
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from importlib.metadata import version
 from pathlib import Path
 
@@ -17,7 +17,7 @@ from electronicload_tool_core.protection import (ARGUMENTS as PROTECTION_ARGUMEN
                                                 execute as protection_execute)
 from electronicload_tool_core.readback import (COMMANDS as READBACK_COMMANDS,
                                                CONTROL_STATUS_COMMANDS, SCOPE as READBACK_SCOPE)
-from electronicload_tool_core.readonly import (COMMANDS, ERROR_QUEUE_COMMAND, MAX_ERROR_READS,
+from electronicload_tool_core.readonly import (BASIC_MEASUREMENTS, COMMANDS, ERROR_QUEUE_COMMAND, MAX_ERROR_READS,
                                                NATIVE_MEASUREMENTS, SYSTEM_QUERIES,
                                                execute as read_execute)
 from electronicload_tool_core.sequence import COMMAND as SEQUENCE_COMMAND, execute as sequence_execute
@@ -29,6 +29,9 @@ from electronicload_tool_core.control import (CONTROL_COMMANDS, execute as contr
 from electronicload_tool_core.trace import (CONFIG_FIELDS, CSV_FIELDS, SAMPLE_FIELDS,
                                            TRACE_COMMANDS, execute as trace_execute)
 from electronicload_tool_core.trigger import TRIGGER_SOURCES
+from electronicload_tool_core.workflows import (ARGUMENTS as WORKFLOW_ARGUMENTS,
+                                                COMMANDS as WORKFLOW_COMMANDS, OPERATORS,
+                                                execute as workflow_execute)
 from .json_input import decode_decimal_json
 from .worker import manifest, run_worker
 from .worker_client import request as worker_request, wait_ready
@@ -60,18 +63,28 @@ def _current_token(value: str) -> str:
     return value
 
 
+def _workflow_number(value: str) -> Decimal:
+    try:
+        return Decimal(value)
+    except InvalidOperation as exc:
+        raise argparse.ArgumentTypeError("Expected a number.") from exc
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     json_output = ("--json" in argv or
-                   (argv[:1] == [SEQUENCE_COMMAND] and not {"--help", "-h"}.intersection(argv)))
+                   (argv and argv[0] in (SEQUENCE_COMMAND, *WORKFLOW_COMMANDS)
+                    and not {"--help", "-h"}.intersection(argv)))
     mode = "dry-run" if "--dry-run" in argv else "simulate" if "--simulate" in argv else "live"
     command_names = (*COMMANDS, *CONTROL_COMMANDS, *TRACE_COMMANDS, *PROTECTION_COMMANDS, SEQUENCE_COMMAND,
+                     *WORKFLOW_COMMANDS,
                      "list-resources", "manifest", "worker",
                      "send-command", "status", "stop", "wait-ready")
     command = argv[0] if argv and argv[0] in command_names else None
     parser = _Parser(
         prog="electronicload-tool",
-        description="Electronic Load Tool: fixed CC, offline CV/CR/CW/Transient/LIST CC, Software Sequence and Worker v3.",
+        description=("Electronic Load Tool with fixed CC, offline CV/CR/CW/Transient/LIST CC, "
+                     "Software Sequence, basic workflows and Worker v3."),
         allow_abbrev=False,
     )
     parser.json_errors = json_output
@@ -81,6 +94,8 @@ def main(argv: list[str] | None = None) -> int:
     for name in command_names:
         description = ("Read and remove the next entry from the instrument's SCPI Error Queue."
                        if name == ERROR_QUEUE_COMMAND else None)
+        if name in WORKFLOW_COMMANDS:
+            description = "Use --simulate to run or --dry-run to preview. Results are JSON."
         sub = subparsers.add_parser(name, allow_abbrev=False, description=description)
         sub.json_errors = json_output
         if name == "list-resources":
@@ -111,10 +126,26 @@ def main(argv: list[str] | None = None) -> int:
         modes = sub.add_mutually_exclusive_group()
         modes.add_argument("--dry-run", action="store_true")
         modes.add_argument("--simulate", action="store_true")
-        sub.add_argument("--resource", help="Explicit USB INSTR resource; required for LIVE.")
+        sub.add_argument("--resource", help=("Optional USB INSTR resource for connection option validation."
+                                             if name in WORKFLOW_COMMANDS else
+                                             "Explicit USB INSTR resource; required for LIVE."))
         sub.add_argument("--backend", default="system")
         sub.add_argument("--model", default=MODEL_ID)
         sub.add_argument("--json", action="store_true")
+        if name in WORKFLOW_COMMANDS:
+            required, optional = WORKFLOW_ARGUMENTS[name]
+            choices = {"metric": tuple(BASIC_MEASUREMENTS), "operator": tuple(OPERATORS),
+                       "range": FIXED_RANGE_CHOICES}
+            types = {"count": int, "csv": str, **dict.fromkeys(choices, str)}
+            for field in (*required, *optional):
+                if field == "confirm_input_on":
+                    sub.add_argument("--confirm", dest=field, action="store_true",
+                                     help="Confirm simulated Input ON.")
+                else:
+                    sub.add_argument("--" + field.replace("_", "-"), required=field in required,
+                                     default=argparse.SUPPRESS, choices=choices.get(field),
+                                     type=types.get(field, _workflow_number))
+            continue
         sub.add_argument("--validation-allow-pending-live-support", action="store_true",
                          help=argparse.SUPPRESS)
         if name == SEQUENCE_COMMAND:
@@ -250,7 +281,8 @@ def main(argv: list[str] | None = None) -> int:
                 try:
                     arguments = (decode_decimal_json(args.arguments_json)
                                  if args.worker_command in (*LIST_COMMANDS, *TRACE_COMMANDS,
-                                                            *PROTECTION_COMMANDS, "trigger-configure", SEQUENCE_COMMAND)
+                                                            *PROTECTION_COMMANDS, "trigger-configure",
+                                                            SEQUENCE_COMMAND, *WORKFLOW_COMMANDS)
                                  else json.loads(args.arguments_json))
                     context = json.loads(args.context_json)
                 except (ValueError, UnicodeError, RecursionError) as exc:
@@ -266,7 +298,8 @@ def main(argv: list[str] | None = None) -> int:
                     body["job_id"] = args.job_id
                 if args.worker_command in {*FIXED_RANGE_COMMANDS, *TRANSIENT_SETUP_COMMANDS,
                                            *LIST_COMMANDS, *TRACE_COMMANDS, *PROTECTION_COMMANDS,
-                                           "set-von", "trigger-configure", SEQUENCE_COMMAND}:
+                                           "set-von", "trigger-configure", SEQUENCE_COMMAND,
+                                           *WORKFLOW_COMMANDS}:
                     # Forward original numeric tokens; Core in the Worker validates them.
                     # Parsing above already guarantees a complete JSON value.
                     del body["arguments"]
@@ -292,6 +325,13 @@ def main(argv: list[str] | None = None) -> int:
             result = sequence_execute(document, mode=mode, model_id=args.model,
                                       backend=args.backend, resource=args.resource,
                                       confirmed=args.confirm, hardware_validation=args.hardware_validation)
+            args.json = True
+        elif args.command in WORKFLOW_COMMANDS:
+            required, optional = WORKFLOW_ARGUMENTS[args.command]
+            arguments = {field: getattr(args, field) for field in (*required, *optional)
+                         if hasattr(args, field)}
+            result = workflow_execute(args.command, mode=mode, model_id=args.model,
+                                      backend=args.backend, resource=args.resource, arguments=arguments)
             args.json = True
         elif (args.command in PROTECTION_COMMANDS
               or getattr(args, "hardware_validation", None) == "protection"):
