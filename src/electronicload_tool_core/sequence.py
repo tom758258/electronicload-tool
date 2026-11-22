@@ -6,14 +6,11 @@ from threading import Event
 from . import control
 from .errors import LoadError
 from .hardware_validation import (
-    require_sequence_timer_off,
-    sequence_fixed_readback,
     sequence_fixed_setup,
     sequence_input_on,
     validate_sequence_trial,
 )
 from .identity import MODEL_ID, parse_identity
-from .readback import fixed_slew_status
 from .readonly import read_measurement
 from .simulator import ControlSimulator
 from .visa import open_session, require_trusted_session, validate_connection
@@ -126,15 +123,19 @@ class _Execution:
                        "cleanup": {"required": False, "attempted": False, "off_confirmed": False}}
         self.step = None
         self.owns_input = False
-        self.input_on_remote_attempted = False
+        self.remote_attempted = False
         self.explicit_off_attempted = False
         self.explicit_off_needs_loop_check = False
 
-    def _input_on_remote_attempt(self):
-        self.input_on_remote_attempted = True
+    def _remote_attempt(self):
+        self.remote_attempted = True
+        self.result["input_state"] = "UNKNOWN"
+
+    def _input_off_observed(self):
+        self.result["input_state"] = "OFF"
 
     def _input_on_attempt(self):
-        self.input_on_remote_attempted = False
+        self.remote_attempted = False
         self.owns_input = True
         self.result["input_state"] = "UNKNOWN"
         self.result["cleanup"]["off_confirmed"] = False
@@ -153,13 +154,15 @@ class _Execution:
                 self.step = {"loop_index": loop, "step_index": index, "action": action}
                 _check_stop(self.stop)
                 if action in SETPOINT_FIELDS:
-                    if self.live:
-                        sequence_fixed_setup(session, action, arguments, self.stop)
-                    else:
-                        self._simulate_setup(session, action, arguments)
+                    sequence_fixed_setup(session, action, arguments, self.stop,
+                                         on_remote_attempt=self._remote_attempt,
+                                         on_input_off=self._input_off_observed)
+                    self.remote_attempted = False
                     setup = action, arguments
                 elif action == "input-on":
-                    self._input_on(session, setup)
+                    sequence_input_on(session, setup, self.stop, on_attempt=self._input_on_attempt,
+                                      on_remote_attempt=self._remote_attempt,
+                                      on_input_off=self._input_off_observed)
                     self.result["input_state"] = "ON"
                 elif action == "input-off":
                     self.explicit_off_attempted = True
@@ -189,40 +192,6 @@ class _Execution:
             self.result["completed_loops"] += 1
         _check_stop(self.stop)
 
-    def _simulate_setup(self, session, action, arguments):
-        if session.cr_led_enabled:
-            raise LoadError("cr_led_enabled", "Disable CR-LED before Sequence setup.")
-        settings = dict(arguments)
-        if "range" in settings:
-            settings["range_name"] = settings.pop("range")
-        control.execute(action, mode="simulate", simulator=session, stop=self.stop, **settings)
-
-    def _input_on(self, session, setup):
-        if self.live:
-            sequence_input_on(session, setup, self.stop, self._input_on_attempt,
-                              on_remote_attempt=self._input_on_remote_attempt)
-            return
-
-        action, expected = setup
-        scope = action.removeprefix("set-")
-
-        def check():
-            settings = control._check_input_on_conditions(
-                session, self.stop, allow_cv=True, allow_cr=True, allow_cw=True)
-            if settings["function_mode"] not in {"FIX", "FIXED"}:
-                raise LoadError("unsafe_mode", "Sequence Input ON requires Fixed mode.")
-            require_sequence_timer_off(session)
-            if scope == "cc" and "rise_slew" in expected:
-                observed = fixed_slew_status(session)
-                if not observed["configured"] or any(
-                    Decimal(observed[f"{field}_a_per_us"]) != expected[field] for field in SLEW_FIELDS
-                ):
-                    raise LoadError("readback_mismatch", "CC slew differs from the Sequence setup.", 3)
-            sequence_fixed_readback(session, scope, expected, self.stop)
-            return settings
-
-        control._turn_input_on(session, check, on_attempt=self._input_on_attempt)
-
     def _cleanup(self, session, error):
         cleanup = self.result["cleanup"]
         cleanup["required"] = self.owns_input
@@ -231,7 +200,7 @@ class _Execution:
         untrusted = error.code in UNTRUSTED_ERRORS or interrupted_io
         if untrusted or self.explicit_off_attempted:
             self.result["input_state"] = "UNKNOWN"
-            if (self.owns_input or self.explicit_off_attempted or self.input_on_remote_attempted
+            if (self.owns_input or self.explicit_off_attempted or self.remote_attempted
                     or (self.live and self.explicit_off_needs_loop_check)):
                 cleanup["reason"] = ("session_untrusted" if untrusted
                                      else "explicit_off_unconfirmed")
@@ -247,8 +216,11 @@ class _Execution:
                 self.result["input_state"] = "OFF"
         elif error.code in {"input_not_off", "already_on"}:
             self.result["input_state"] = "ON"
-            if self.explicit_off_needs_loop_check:
-                cleanup["reason"] = "input_not_off"
+        if (self.result["input_state"] == "ON"
+                and (self.remote_attempted or self.explicit_off_needs_loop_check)):
+            cleanup["reason"] = "input_not_off"
+        elif self.remote_attempted and self.result["input_state"] == "UNKNOWN":
+            cleanup.setdefault("reason", "remote_input_unconfirmed")
         cleanup["off_confirmed"] = self.result["input_state"] == "OFF"
 
     def failure(self, error):

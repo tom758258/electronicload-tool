@@ -147,13 +147,14 @@ the Sequence may have turned Input ON and OFF remains unconfirmed. An
 already attempted explicit OFF is never resent after that Step fails.
 Untrusted communication stops further I/O. A failed job has `result: null`;
 its `error.details` carries the progress fields above, `failed_step` (null
-outside a step), and `original_error`. When the Sequence has attempted to
-switch Input and ends without verified OFF, the terminal uses
-`sequence_cleanup_unconfirmed` and directs the operator to independently
-switch off the load. It reports `input_state: "ON"`
-if the loop-end check observes ON after the Sequence had verified its own OFF,
-or `"UNKNOWN"` when the Input state cannot be determined. The Worker emits no
-per-step events and creates no Sequence artifacts.
+outside a step), and `original_error`. When Input OFF remains unconfirmed
+after attempting to switch Input or entering Remote during setup or Input ON,
+the terminal uses `sequence_cleanup_unconfirmed` and directs the operator to
+independently switch off the load. It reports `input_state: "ON"` if a post-Remote
+readback observes ON or if Input is observed ON again after the Sequence verified
+its own OFF within the same loop. It reports `"UNKNOWN"` when the Input state
+cannot be determined. The Worker emits no per-step events and creates no
+Sequence artifacts.
 
 ## Configuration readback
 

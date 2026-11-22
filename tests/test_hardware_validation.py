@@ -766,11 +766,14 @@ def test_sequence_live_scope_and_confirmation_refuse_before_io(sequence_visa, op
     ("cr_led", "cr_led_enabled"),
     ("remote_short", "unsafe_mode"),
     ("remote_transient", "unsafe_mode"),
-    ("remote_input", "input_not_off"),
+    ("remote_input", "sequence_cleanup_unconfirmed"),
+    ("remote_stop", "sequence_cleanup_unconfirmed"),
+    ("setup_remote_stop", "sequence_cleanup_unconfirmed"),
     ("remote_setpoint", "readback_mismatch"),
 ])
 def test_sequence_live_guards_before_writes_and_after_remote(sequence_visa, condition, code):
     fake, calls = sequence_visa
+    stop = Event()
     if condition == "wrong_identity":
         fake.values["*IDN"] = "ITECH Ltd,IT8812B,SYNTHETIC,1.0"
     elif condition == "initial_on":
@@ -780,17 +783,37 @@ def test_sequence_live_guards_before_writes_and_after_remote(sequence_visa, cond
     elif condition == "cr_led":
         fake.function = "RES"
         fake.values["RES:LED:STAT"] = "1"
+    elif condition.endswith("remote_stop"):
+        remote_count = 1 if condition == "setup_remote_stop" else 2
+
+        def stop_on_remote(inst):
+            if inst.calls.count("SYST:REM") == remote_count:
+                inst.input = True
+                stop.set()
+
+        fake.after_remote = stop_on_remote
     else:
         attr, value = {"remote_short": ("short", True), "remote_transient": ("transient", True),
                        "remote_input": ("input", True), "remote_setpoint": ("current", 0.2)}[condition]
         fake.after_remote = lambda inst: setattr(inst, attr, value) if inst.calls.count("SYST:REM") == 2 else None
     with pytest.raises(LoadError) as error:
-        run_sequence()
+        run_sequence(stop=stop)
     assert error.value.code == code
     assert "INP ON" not in fake.calls and "INP OFF" not in fake.calls
     assert calls.count("open_resource") == 1
     if condition == "initial_on":
         assert fake.input and fake.calls == ["*IDN?", "INP:STAT?"]
+    if code == "sequence_cleanup_unconfirmed":
+        details = error.value.details
+        # The setup guard reads Input even when Stop is set; the ON guard checks Stop first.
+        observed_on = condition != "remote_stop"
+        assert details["original_error"]["code"] == ("input_not_off" if observed_on else "stopping")
+        assert details["input_state"] == ("ON" if observed_on else "UNKNOWN")
+        assert details["cleanup"]["reason"] == ("input_not_off" if observed_on else "remote_input_unconfirmed")
+        assert not details["cleanup"]["off_confirmed"] and not details["cleanup"]["attempted"]
+        assert "Independently switch off" in str(error.value) and fake.input
+    elif condition in {"remote_short", "remote_transient", "remote_setpoint"}:
+        assert error.value.details["cleanup"]["off_confirmed"]
 
 
 def test_sequence_lost_remote_reply_requires_manual_off(sequence_visa, tmp_path, capsys):
@@ -858,11 +881,13 @@ def test_sequence_live_cleans_up_on_stop_and_reports_uncertain_off(sequence_visa
     ("explicit_off", "input_off_not_confirmed", "explicit_off_unconfirmed", "UNKNOWN"),
     ("loop_end_lost_reply", "query_failed", "session_untrusted", "UNKNOWN"),
     ("loop_end_on", "input_not_off", "input_not_off", "ON"),
+    ("stop_after_reading_on", "stopping", "input_not_off", "ON"),
 ])
 def test_sequence_does_not_resend_an_unconfirmed_explicit_off(
     sequence_visa, monkeypatch, tmp_path, capsys, outcome, cause, reason, state,
 ):
     fake, calls = sequence_visa
+    stop = Event()
     if outcome == "explicit_off":
         monkeypatch.setattr(control, "INPUT_STATE_CONFIRM_TIMEOUT_S", 0.01)
         fake.after_write = lambda inst, cmd: setattr(inst, "input", True) if cmd == "INP OFF" else None
@@ -872,8 +897,12 @@ def test_sequence_does_not_resend_an_unconfirmed_explicit_off(
         def read_final_input_state(command):
             if command == "INP:STAT?" and "INP OFF" in fake.calls:
                 after_off = fake.calls[fake.calls.index("INP OFF") + 1:]
+                reads_since_off = after_off.count(command)
                 # First confirm the OFF write, then read the last step's Input state.
-                if after_off.count(command) == 2:
+                if outcome == "stop_after_reading_on" and reads_since_off == 1:
+                    fake.input = True
+                    stop.set()
+                elif reads_since_off == 2:
                     if outcome == "loop_end_on":
                         fake.input = True
                     else:
@@ -881,7 +910,14 @@ def test_sequence_does_not_resend_an_unconfirmed_explicit_off(
             return query(command)
 
         monkeypatch.setattr(fake, "query", read_final_input_state)
-    details = sequence_cli_error(tmp_path, capsys)
+    if outcome == "stop_after_reading_on":
+        with pytest.raises(LoadError) as error:
+            run_sequence(stop=stop)
+        assert error.value.code == "sequence_cleanup_unconfirmed"
+        assert "Independently switch off" in str(error.value)
+        details = error.value.details
+    else:
+        details = sequence_cli_error(tmp_path, capsys)
     assert calls.count("open_resource") == 1
     assert fake.calls.count("INP OFF") == 1
     assert details["original_error"]["code"] == cause
@@ -889,4 +925,5 @@ def test_sequence_does_not_resend_an_unconfirmed_explicit_off(
     assert details["cleanup"]["reason"] == reason
     assert not details["cleanup"]["attempted"] and not details["cleanup"]["off_confirmed"]
     if outcome != "explicit_off":
-        assert details["failed_step"] is None and details["input_states"][-1]["input_state"] == "OFF"
+        assert details["failed_step"] is None
+        assert details["input_states"][-1]["input_state"] == ("ON" if stop.is_set() else "OFF")

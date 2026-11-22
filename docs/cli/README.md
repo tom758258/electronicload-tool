@@ -1112,8 +1112,9 @@ including later in the same loop, and apply setup only with Input OFF. Each
 loop must end OFF. Read-only steps may follow `input-off`, and a loop with no
 ON needs no explicit OFF. The entire document is checked before starting.
 `fresh_fixed_setup_required` reports which ON step needs a new setup.
-Sequence requires Input Timer OFF before Input ON. In simulation, Input ON
-also checks that any requested CC slew pair still matches the setup.
+Sequence requires Input Timer OFF before Input ON and Current Slow Rise OFF
+before Input ON in CV, CR or CW. Fixed CR setup requires CR-LED OFF. Simulation
+also checks that any requested CC slew pair still matches the setup before Input ON.
 
 ```powershell
 electronicload-tool sequence --file sequence.json --dry-run
@@ -1140,8 +1141,9 @@ new confirmation each time. Results are JSON, with one V/I/P record per
 同一輪再次 ON 也要重新設定。每輪結束時必須 OFF。`input-off` 後可以
 保留只讀步驟，未使用 ON 的輪次可以省略 OFF 步驟。整份文件會在第一步前預檢，
 `fresh_fixed_setup_required` 會指出須補上新設定的 ON 步驟。
-Sequence 要求 Input Timer OFF 才能啟用 Input。模擬執行時，Input ON 前
-也會確認指定的 CC 上升及下降 Slew 仍與設定相符。
+Sequence 要求 Input Timer OFF 才能啟用 Input。CV、CR、CW 模式也要求
+Current Slow Rise OFF，設定 Fixed CR 前則要求 CR-LED OFF。模擬執行時，
+Input ON 前也會確認指定的 CC 上升及下降 Slew 仍與設定相符。
 
 使用上方的 `--dry-run` 指令預檢，不需確認。每次正式執行若含
 `input-on`，都要重新提交確認。CLI 以 `--file` 讀取 JSON，執行結果為
@@ -1164,9 +1166,9 @@ The contributor scope accepts only the four fixed documents, for 0.1 A CC,
 and verified OFF. The script requires operator confirmation before each trial
 and enforces a 30 s command deadline and 900 s total deadline. The Core handles
 trusted cleanup on the existing session. The CLI directs the operator to
-switch off the load independently if communication is lost during the Remote
-transition or its recheck before Input ON, or if the loop-end check reads ON
-after a verified OFF. The script also gives independent OFF instructions if
+switch off the load independently if a Remote transition during setup or Input ON
+ends without a fresh OFF readback, or if Input is observed ON again after a
+verified OFF within the same loop. The script also gives independent OFF instructions if
 the process times out or Input OFF is unconfirmed and does not open another
 session for cleanup.
 
@@ -1179,8 +1181,8 @@ Sequence LIVE。
 貢獻者驗證範圍只接受四份固定文件，分別驗證 0.1 A CC、3 V CV、1000 Ω CR、
 0.10 W CW。每份只有一次 ON、0.25 秒 Wait、量測及確認 OFF。Script 在每次
 試驗前要求操作員確認，並執行單一命令 30 秒與總時限 900 秒的限制。通訊可信時
-由 Core 在原 Session 處理清理。若在 Input ON 前切換 Remote 或重新檢查時失聯，
-或已確認 OFF 但輪尾又讀到 ON，CLI 會要求操作員獨立手動 OFF。程序逾時或
+由 Core 在原 Session 處理清理。若設定或啟用 Input 時切換 Remote，卻無法重新
+讀回確認 OFF，或同一輪已確認 OFF 後又讀到 ON，CLI 會要求操作員獨立手動 OFF。程序逾時或
 無法確認 Input OFF 時，Script 也會提供獨立手動 OFF 指引，且不另開 Session 清理。
 
 ## Worker and Automation

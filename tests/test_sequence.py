@@ -157,6 +157,32 @@ def test_simulator_refuses_sequence_on_with_enabled_input_timer(monkeypatch):
     assert "INP ON" not in commands and not sim.input_on and sim.input_timer_enabled
 
 
+@pytest.mark.parametrize(("setup", "setting", "during", "code"), [
+    (step("set-cr", resistance=1000, range="auto"), "cr_led_enabled", "setup", "cr_led_enabled"),
+    (step("set-cv", voltage=3, range="auto"), "current_slow_rise_enabled", "on", "current_slow_rise_enabled"),
+])
+def test_simulator_preserves_interlocks_that_change_on_remote(monkeypatch, setup, setting, during, code):
+    sim = ControlSimulator()
+    write = sim.write
+    commands = []
+    source_function = sim.function if during == "setup" else "VOLT"
+
+    def drift_on_remote(command):
+        commands.append(command)
+        write(command)
+        # The selected function distinguishes setup Remote from Input ON Remote.
+        if command == "SYST:REM" and sim.function == source_function:
+            setattr(sim, setting, True)
+
+    monkeypatch.setattr(sim, "write", drift_on_remote)
+    with pytest.raises(LoadError) as error:
+        sequence.execute(document(setup, ON, OFF), mode="simulate", confirmed=True, simulator=sim)
+    assert error.value.code == code
+    assert error.value.details["failed_step"]["action"] == (setup["action"] if during == "setup" else "input-on")
+    assert "INP ON" not in commands and not sim.input_on
+    assert "RES:LED:STAT 0" not in commands and getattr(sim, setting)
+
+
 def test_preexisting_stop_does_not_run_zero_wait(monkeypatch):
     stop = Event()
     stop.set()

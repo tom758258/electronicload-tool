@@ -636,14 +636,16 @@ def _check_mode_change(session, *, fixed_cc=False, force_led_off=False):
     return False
 
 
-def _mutation_off(session, stop):
+def _mutation_off(session, stop, *, on_input_off=None):
     _input_off(session)
+    if on_input_off is not None:
+        on_input_off()
     if stop is not None and stop.is_set():
         raise LoadError("stopping", "Configuration was blocked because Worker is stopping.")
 
 
-def _fixed_setup_guard(session, stop, *, fixed_only=False):
-    _mutation_off(session, stop)
+def _fixed_setup_guard(session, stop, *, fixed_only=False, on_input_off=None):
+    _mutation_off(session, stop, on_input_off=on_input_off)
     mode = _query(session, "FUNC:MODE?").upper()
     if mode == "LIST":
         raise LoadError("list_selected", "Exit LIST explicitly before Fixed setup.")
@@ -651,7 +653,7 @@ def _fixed_setup_guard(session, stop, *, fixed_only=False):
         raise LoadError("unsafe_mode", "Cannot determine the current load mode.")
     if _flag(session, "TRAN?") != "OFF":
         raise LoadError("transient_enabled", "Disable Transient before Fixed setup.")
-    if not isinstance(session, ControlSimulator) and _flag(session, "INP:SHOR:STAT?") != "OFF":
+    if (fixed_only or not isinstance(session, ControlSimulator)) and _flag(session, "INP:SHOR:STAT?") != "OFF":
         raise LoadError("unsafe_mode", "Setup requires Short OFF.")
 
 
@@ -1017,7 +1019,8 @@ def _check_input_on_conditions(session, stop: Event | None, *, allow_cv: bool,
     return settings
 
 
-def _set_fixed_cc(session, current, range_name, stop, cc_mode_scope=None):
+def _set_fixed_cc(session, current, range_name, stop, cc_mode_scope=None, *,
+                  on_remote_attempt=None, on_input_off=None):
     requested = validate_current(current, range_name)
     simulated = isinstance(session, ControlSimulator)
     guard_mode = cc_mode_scope is not None or simulated
@@ -1027,7 +1030,8 @@ def _set_fixed_cc(session, current, range_name, stop, cc_mode_scope=None):
 
     def check_origin(*, before_remote):
         if guard_mode:
-            _fixed_setup_guard(session, stop, fixed_only=cc_mode_scope == "sequence")
+            _fixed_setup_guard(session, stop, fixed_only=cc_mode_scope == "sequence",
+                               on_input_off=None if before_remote else on_input_off)
         if cc_mode_scope == "sequence":
             if _check_mode_change(session, fixed_cc=True):
                 raise LoadError("cr_led_enabled", "Disable CR-LED before Sequence setup.")
@@ -1051,6 +1055,8 @@ def _set_fixed_cc(session, current, range_name, stop, cc_mode_scope=None):
         _input_off(session)
         check_origin(before_remote=True)
         _mutation_off(session, setup_stop)
+        if on_remote_attempt is not None:
+            on_remote_attempt()
         _write(session, "SYST:REM")
         if guard_mode:
             completed.append("remote")
@@ -1078,6 +1084,17 @@ def _set_fixed_cc(session, current, range_name, stop, cc_mode_scope=None):
         exc.details["completed_steps"] = completed
         raise
     return {"input_state": "OFF", **settings}
+
+
+def _set_simulated_fixed_cc_slew(session, slew):
+    from .readback import fixed_slew_status
+
+    session.fixed_cc_slew = slew
+    observed = fixed_slew_status(session)
+    if (not observed["configured"]
+            or any(Decimal(observed[key]) != Decimal(value) for key, value in slew.items())):
+        raise LoadError("readback_mismatch", "Fixed CC slew did not match readback.", 3)
+    return {key: observed[key] for key in slew}
 
 
 def _turn_input_on(session, check, *, on_attempt=None, on_remote_attempt=None):
@@ -1447,14 +1464,7 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
                         confirmed=confirmed, stop=stop, allow_cv=True, allow_cr=True, allow_cw=True,
                         vdrop=vdrop)
         if slew:
-            from .readback import fixed_slew_status
-
-            simulated.fixed_cc_slew = slew
-            observed = fixed_slew_status(simulated)
-            if (not observed["configured"]
-                    or any(Decimal(observed[key]) != Decimal(value) for key, value in slew.items())):
-                raise LoadError("readback_mismatch", "Fixed CC slew did not match readback.", 3)
-            result.update({key: observed[key] for key in slew})
+            result.update(_set_simulated_fixed_cc_slew(simulated, slew))
         if fixed_setup:
             simulated.transient_configuration = None
             simulated.last_trigger = None
