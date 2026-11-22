@@ -606,3 +606,35 @@ def test_configuration_readback_script_plan_preflight_and_noninteractive_refusal
                 assert 'expected_readback' not in case and case['condition']
         if status == 'BLOCKED':
             assert 'requires an interactive console' in result.stdout
+
+
+@pytest.mark.parametrize("plan_only", [True, False])
+def test_sequence_plan_or_noninteractive_refusal(run_script, plan_only):
+    result = run_script(["-Modes", "sequence", *(["-PlanOnly"] if plan_only else [])])
+    assert result.returncode == (0 if plan_only else 2), result.stdout + result.stderr
+    paths = re.findall(r"Report: (.+?/shareable/report\.json)", result.stdout)
+    assert paths, result.stdout + result.stderr
+    path = Path(paths[-1])
+    report_text = path.read_text(encoding="utf-8-sig")
+    report = json.loads(report_text)
+    assert report["overall_status"] == ("PLAN ONLY" if plan_only else "BLOCKED")
+    assert not report["hardware_touched"]
+    assert RESOURCE not in report_text and not (path.parents[1] / "private").exists()
+    assert all(case["status"] == "NOT RUN" for case in report["cases"])
+    if plan_only:
+        cases = report["cases"][2:]
+        assert [case["name"] for case in cases] == ["sequence-cc", "sequence-cv", "sequence-cr", "sequence-cw"]
+        assert report["per_command_deadline_ms"] == 30000 and report["total_deadline_ms"] == 900000
+        for case in cases:
+            assert "<redacted>" in case["arguments"] and "--confirm" in case["arguments"]
+            actions = [step["action"] for step in case["sequence_plan"]]
+            assert actions == [
+                case["name"].replace("sequence-", "set-"), "input-on", "input-state",
+                "wait", "measure", "input-off", "input-state",
+            ]
+            assert case["sequence_plan"][3]["arguments"] == {"seconds": "0.25"}
+
+
+def test_sequence_focused_preflight(run_script):
+    checked = run_script(["-SequenceOnly"], preflight=True)
+    assert checked.returncode == 0, checked.stdout + checked.stderr

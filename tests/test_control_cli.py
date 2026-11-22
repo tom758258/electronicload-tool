@@ -102,7 +102,7 @@ def test_manifest_static(capsys):
         'common.async_jobs': {'contract_version': 1},
         'common.job_cancel': {'contract_version': 1, 'commands': ['trace-start']},
     }
-    for command in ('trace-configure', 'trace-start'):
+    for command in ('trace-configure', 'trace-start', 'sequence'):
         assert p['commands'][command] == {'kind': 'async_job'}
     for command in ('set-cc', 'set-cv', 'set-cr', 'set-cr-led'):
         assert p['commands'][command] == {
@@ -353,3 +353,25 @@ def test_fixed_slew_von_short_cli_results(capsys, arguments, expected):
 def test_fixed_slew_von_short_cli_refusal(capsys, arguments, code):
     assert main([*arguments, '--json']) == 2
     assert json.loads(capsys.readouterr().out)['error']['code'] == code
+
+
+def test_sequence_file_live_refusal(tmp_path, capsys):
+    file = tmp_path / "sequence.json"
+    file.write_text(
+        '{"version":1,"loop_count":1,"steps":[{"action":"set-cc","arguments":{"current":0.1,'
+        '"range":"auto"}},{"action":"input-on","arguments":{}},{"action":"input-off","arguments":{}}]}',
+        encoding="utf-8",
+    )
+    args = ["sequence", "--file", str(file)]
+    assert main(args + ["--validation-allow-pending-live-support", "--confirm"]) == 2
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "unsupported_live_scope"
+
+
+def test_sequence_file_preserves_original_decimal(tmp_path, capsys):
+    file = tmp_path / "sequence.json"
+    file.write_text(
+        '{"version":1,"loop_count":1,"steps":[{"action":"set-cc","arguments":'
+        '{"current":0.10000000000000000001,"range":"low"}}]}', encoding="utf-8",
+    )
+    assert main(["sequence", "--file", str(file), "--dry-run"]) == 2
+    assert json.loads(capsys.readouterr().out)["error"]["details"]["reason"] == "invalid_current_resolution"

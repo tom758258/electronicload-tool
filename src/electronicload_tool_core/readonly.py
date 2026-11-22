@@ -118,6 +118,11 @@ def _read(session, command: str, metric: str | None = None, all_errors: bool = F
         return identity.public_result()
     if command in SYSTEM_QUERIES:
         return _read_system_query(session, command, all_errors)
+    return read_measurement(session, command, metric)
+
+
+def read_measurement(session, command: str, metric: str | None = None) -> dict:
+    """Read Input or measurements on a session whose identity was already checked."""
     if command == "input-state":
         response = _query(session, "INP:STAT?").strip()
         if response not in ("0", "1"):

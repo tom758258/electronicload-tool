@@ -23,6 +23,7 @@ deliberate confirmation. Simulation and dry-run never grant hardware authorizati
 - [Configuration readback](docs/cli/README.md#configuration-readback) for the active mode and dedicated status commands.
 - Hardware-free simulation and dry-run; Common v3 Worker with JSON/JSONL for automation.
 - Fail-closed model, command, transport and backend permissions; no implicit Input ON.
+- Offline Software Sequence with JSON preview, simulator and one Worker job per run. See the [CLI guide](docs/cli/README.md#software-sequence).
 
 ## Project Structure
 
