@@ -4,6 +4,7 @@ Default: the established validation modes, with common read-only safety precheck
 -Modes selects any supported validation mode, including trace, cr-led, current-slow-rise,
 trigger and input-timer. Omitted -Modes selects all default modes.
 -Modes protection selects the separate Protection validation procedure.
+-Modes readback checks existing settings with Input OFF and without changing the instrument.
 -InputTimerOnly is a backward-compatible shortcut for the input-timer-only trial.
 Requires approved source/DUT limits and interactive confirmation before hardware access.
 -PlanOnly validates every planned CLI request without VISA or hardware access.
@@ -45,7 +46,13 @@ param(
     [int]$TriggerListRepeat = 1,
     [string]$TriggerExternalSetup,
     [switch]$PlanOnly,
-    [switch]$DebugArtifacts
+    [switch]$DebugArtifacts,
+    [decimal]$ExpectedRiseSlew,
+    [decimal]$ExpectedFallSlew,
+    [decimal]$ExpectedVonThreshold,
+    [ValidateSet('on','off')][string]$ExpectedVonLatch,
+    [ValidateSet('on','off')][string]$ExpectedShort,
+    [ValidateRange(2,16)][int]$ExpectedAverageCount
 )
 
 $ErrorActionPreference = 'Stop'
@@ -58,7 +65,7 @@ if ($InputTimerOnly) {
 } elseif (-not $PSBoundParameters.ContainsKey('Modes')) {
     $Modes = $supportedModes
 }
-$supportedModes += 'protection'
+$supportedModes += @('protection','readback')
 $requestedModes = @($Modes | ForEach-Object { $_ -split ',' } |
     ForEach-Object { $_.Trim().ToLowerInvariant() })
 # Keep the established trial order and run each selected mode only once.
@@ -68,6 +75,7 @@ $traceSelected = 'trace' -in $selectedModes
 $triggerSelected = 'trigger' -in $selectedModes
 $timerSelected = 'input-timer' -in $selectedModes
 $protectionSelected = 'protection' -in $selectedModes
+$readbackSelected = 'readback' -in $selectedModes
 $featureSelected = @($selectedModes | Where-Object { $_ -in $featureModes }).Count -gt 0
 $featureOnly = $featureSelected -and @($selectedModes | Where-Object { $_ -notin $featureModes }).Count -eq 0
 $traceCommunicationUntrusted = $false
@@ -99,6 +107,7 @@ $slowRiseEnableAttempted = $false
 $slowRiseCommunicationTrusted = $false
 $slowRiseCleanup = @()
 $triggerScope = @('--hardware-validation', 'trigger')
+$readbackScope = @('--hardware-validation', 'readback')
 # The Trigger pulse needs an observable preset; the legacy Transient default is unchanged.
 $script:triggerPulseWidth = $(if ($PSBoundParameters.ContainsKey('PulseWidth')) { $PulseWidth } else { '2' })
 $script:originalTriggerSnapshot = $null
@@ -189,6 +198,8 @@ function Save-Report {
         if ($entry.Contains('error_code')) { $case.error_code = $entry.error_code }
         if ($entry.Contains('expected_error')) { $case.expected_error = $entry.expected_error }
         if ($entry.Contains('expected_range')) { $case.expected_range = $entry.expected_range }
+        if ($entry.Contains('expected_readback')) { $case.expected_readback = $entry.expected_readback }
+        if ($entry.Contains('readback_comparison')) { $case.readback_comparison = $entry.readback_comparison }
         if ($entry.Contains('condition')) { $case.condition = $entry.condition }
         if ($entry.Contains('origin_function')) { $case.origin_function = $entry.origin_function }
         foreach ($field in @('trace_source','trace_points','trace_interval_s','trace_sample_count',
@@ -202,7 +213,7 @@ function Save-Report {
                              'protection_write_progress')) {
             if ($entry.Contains($field)) { $case[$field] = $entry[$field] }
         }
-        if ($entry.status -eq 'PASS') {
+        if ($entry.status -eq 'PASS' -or $entry.readback_comparison -in @('OBSERVED ONLY','MISMATCH')) {
             if ($entry.command -in @('input-state','input-on','input-off','input-timer-status',
                                      'trigger-configure','trigger-status')) {
                 $case.input_state = $entry.response.result.input_state
@@ -220,6 +231,17 @@ function Save-Report {
                                   'fixed_cr', 'led_enabled', 'vdrop_v', 'vdrop_max_v', 'resistance_ohm')) {
                 if ($null -ne $entry.response.result.$field) {
                     $case[$field] = $entry.response.result.$field
+                }
+            }
+            if ($entry.command -in @('readback','fixed-status','fixed-slew-status','von-status',
+                                     'short-status','average-status','trace-status','list-status','transient-status')) {
+                foreach ($field in @('input_state','active_mode','function','range','current_a','voltage_v',
+                                     'power_w','rise_slew_a_per_us','fall_slew_a_per_us','threshold_v',
+                                     'latch','short_state','average_count','source','points','interval_s',
+                                     'delay_s','filter_enabled','feed','selected')) {
+                    if ($null -ne $entry.response.result.$field) {
+                        $case[$field] = $entry.response.result.$field
+                    }
                 }
             }
             if ($entry.command -eq 'measure') {
@@ -564,7 +586,7 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
             $result.result | Add-Member -MemberType NoteProperty -Name read_timestamp_utc_plus_8 `
                 -Value $stampMatch.Groups[1].Value -Force
         }
-        $entry.status = 'PASS'
+        $entry.status = if ($entry.Contains('readback_comparison')) { 'NOT RUN' } else { 'PASS' }
         $entry['response'] = $result
         if ($null -ne $result.result.visa) {
             # Compare metadata before shortening library paths in shareable output.
@@ -597,6 +619,9 @@ function Fail-Case([string]$Name, [string]$Code, [string]$Message) {
     if ($null -ne $case) {
         $case.status = 'FAIL'
         $case['error_code'] = $Code
+        if ($case.Contains('readback_comparison') -and $Code -ceq 'readback_mismatch') {
+            $case.readback_comparison = 'MISMATCH'
+        }
     }
     throw $Message
 }
@@ -618,6 +643,38 @@ function Assert-InputOff([object]$Result, [string]$CaseName) {
         }
         Fail-Case $CaseName 'input_not_off' 'Physical Input OFF was not confirmed; further writes are blocked.'
     }
+}
+
+function Assert-ReadbackFields($Actual, [hashtable]$Expected, [string]$Name) {
+    foreach ($field in $Expected.Keys) {
+        $value = $Actual.$field
+        $wanted = $Expected[$field]
+        $matches = if ($null -eq $value) { $false }
+            elseif ($wanted -is [bool]) { $value -is [bool] -and $value -eq $wanted }
+            elseif ($wanted -is [string]) { $value -is [string] -and $value -ceq $wanted }
+            else {
+                try { $value -isnot [bool] -and [decimal]$value -eq $wanted }
+                catch { $false }
+            }
+        if (-not $matches) {
+            Fail-Case $Name 'readback_mismatch' "Independent readback differs for $field."
+        }
+    }
+}
+
+function New-TransientReadbackFields([string]$Function, [hashtable]$Settings) {
+    $unit = @{CC='a';CV='v';CR='ohm';CW='w'}[$Function]
+    $fields = @{transient_mode=$Settings.transient_mode}
+    foreach ($key in @('level_a','level_b','width_a','width_b','pulse_width','rise_slew','fall_slew')) {
+        if (-not $Settings.ContainsKey($key)) { continue }
+        $field = switch -Wildcard ($key) {
+            'level_*' { "${key}_$unit" }
+            '*slew' { "${key}_a_per_us" }
+            default { "${key}_s" }
+        }
+        $fields[$field] = [decimal]$Settings[$key]
+    }
+    return $fields
 }
 
 function New-TriggerPlan {
@@ -672,9 +729,11 @@ function New-TriggerPlan {
             '","configuration":' + $configJson + ',"trigger":' + $triggerJson + '}}'))
         $script:triggerTrials += @{prefix=$prefix;source=$source;isList=$isList;interval=$TriggerIntervalSeconds}
         $script:triggerPlans += @{name="$prefix-configure";command='trigger-configure';args=($triggerScope + $sourceArgs)}
+        $script:triggerPlans += @{name="$prefix-source-status";command='trigger-status';args=$triggerScope}
         if ($isList) {
             $script:triggerPlans += @{name="$prefix-setup";command='set-list-cc';
                 args=($triggerScope + @('--arguments-json',$listJson))}
+            $script:triggerPlans += @{name="$prefix-readback";command='list-status';args=$readbackScope}
         } else {
             $script:triggerPlans += @{name="$prefix-setup";command='set-transient-cc';args=($triggerScope + $setTransient)}
             $script:triggerPlans += @{name="$prefix-enable";command='transient-enable';args=($triggerScope + $expected)}
@@ -986,16 +1045,32 @@ function Invoke-TriggerTrial($Trial) {
     $entry = $script:report.results | Where-Object { $_.name -ceq "$prefix-observed" }
     $setupEntry = $script:report.results | Where-Object { $_.name -ceq "$prefix-setup" }
     try {
-        $configured = Invoke-TriggerStep "$prefix-configure"
-        Assert-TriggerOff $configured "$prefix-configure"
-        if ($configured.result.source -cne $Trial.source -or ($Trial.source -eq 'TIMER' -and
-            [decimal]$configured.result.interval_s -ne [decimal]$Trial.interval)) {
-            Fail-Case "$prefix-configure" 'readback_mismatch' 'Trigger Source or Timer did not match.'
+        Assert-TriggerOff (Invoke-TriggerStep "$prefix-configure") "$prefix-configure"
+        $observed = Invoke-TriggerStep "$prefix-source-status"
+        Assert-TriggerOff $observed "$prefix-source-status"
+        if ($observed.result.source -cne $Trial.source -or ($Trial.source -eq 'TIMER' -and
+            [decimal]$observed.result.interval_s -ne [decimal]$Trial.interval)) {
+            Fail-Case "$prefix-source-status" 'readback_mismatch' 'Trigger Source or Timer did not match.'
         }
         $setup = Invoke-TriggerStep "$prefix-setup"
         $armed = $Trial.isList
         Assert-TriggerOff $setup "$prefix-setup"
-        if (-not $Trial.isList) {
+        if ($Trial.isList) {
+            $name = "$prefix-readback"
+            $readback = (Invoke-TriggerStep $name).result
+            if ($readback.input_state -cne 'OFF') {
+                $script:triggerOffConfirmed = $false
+                $script:report.trigger_input_off_unconfirmed = $true
+            }
+            Assert-ReadbackFields $readback @{state_source='instrument_readback';selected=$true;input_state='OFF'} $name
+            $list = $readback.configuration
+            Assert-ReadbackFields $list @{range='low';repeat_count=$TriggerListRepeat;step_count=2} $name
+            if ($list.steps.Count -ne 2) { Fail-Case $name 'readback_mismatch' 'Expected two LIST steps.' }
+            Assert-ReadbackFields $list.steps[0] @{current_a=[decimal]$LevelA;
+                slew_a_per_us=[decimal]$RiseSlew;width_s=[decimal]$TriggerListWidthA} $name
+            Assert-ReadbackFields $list.steps[1] @{current_a=[decimal]$LevelB;
+                slew_a_per_us=[decimal]$FallSlew;width_s=[decimal]$TriggerListWidthB} $name
+        } else {
             $armed = $true
             Assert-TriggerOff (Invoke-TriggerStep "$prefix-enable") "$prefix-enable"
         }
@@ -1155,6 +1230,12 @@ function Assert-TraceResult([object]$Result, [hashtable]$Step) {
     $actual = $Result.result
     $expected = $Step.trace_expected
     $name = $Step.name
+    if ($Step.command -ceq 'trace-status') {
+        Assert-ReadbackFields $actual @{state_source='instrument_readback'; source=$expected.source;
+            points=$expected.points; interval_s=[decimal]$expected.interval; delay_s=0;
+            filter_enabled=$false; feed='NEVER'} $name
+        return
+    }
     $count = [int]($expected.points / $(if ($expected.source -ceq 'TWO') { 2 } else { 1 }))
     $readInterval = [decimal]::Parse([string]$actual.interval_s,
         [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture)
@@ -1232,6 +1313,9 @@ try {
     if ($requestedModes.Count -eq 0 -or @($requestedModes | Where-Object { $_ -notin $supportedModes }).Count -gt 0) {
         throw "Modes must contain one or more of: $($supportedModes -join ', ')."
     }
+    if ($readbackSelected -and $selectedModes.Count -ne 1) {
+        throw 'Select the readback-only trial on its own.'
+    }
     if ($protectionSelected -and ($selectedModes.Count -ne 1 -or
         $SourceVoltageLimitV -ne 5 -or $SourceCurrentLimitA -ne 0.8)) {
         throw 'Select Protection alone with a dedicated 5 V / 0.8 A source.'
@@ -1289,13 +1373,50 @@ try {
         @{name='input-state';command='input-state';args=@()},
         @{name='measure-off';command='measure';args=@()}
     )
+    if ($readbackSelected) {
+        $baselineParameters = @{
+            'fixed-slew-status' = @{rise_slew_a_per_us='ExpectedRiseSlew';fall_slew_a_per_us='ExpectedFallSlew'}
+            'von-status' = @{threshold_v='ExpectedVonThreshold';latch='ExpectedVonLatch'}
+            'short-status' = @{short_state='ExpectedShort'}
+            'average-status' = @{average_count='ExpectedAverageCount'}
+        }
+        foreach ($command in @('readback','fixed-status','fixed-slew-status','von-status','short-status','average-status')) {
+            $expected = @{state_source='instrument_readback'}
+            if ($command -in @('readback','fixed-status','fixed-slew-status')) {
+                $expected += @{active_mode='fixed';function='CC';input_state='OFF'}
+            }
+            $step = @{name=$command;command=$command;args=$readbackScope;readback_expected=$expected}
+            if ($baselineParameters.ContainsKey($command)) {
+                $baseline = @{}
+                foreach ($field in $baselineParameters[$command].Keys) {
+                    $parameter = $baselineParameters[$command][$field]
+                    if ($PSBoundParameters.ContainsKey($parameter)) { $baseline[$field] = $PSBoundParameters[$parameter] }
+                }
+                if ($baseline.Count -eq $baselineParameters[$command].Count) {
+                    if ($baseline.ContainsKey('latch')) { $baseline.latch = $baseline.latch.ToLowerInvariant() }
+                    if ($baseline.ContainsKey('short_state')) { $baseline.short_state = $baseline.short_state.ToUpperInvariant() }
+                    $expected += $baseline
+                    $step.readback_expected = $expected
+                    $step.expected_readback = $baseline
+                } else {
+                    $step.condition = 'Settings are observed only without all expected values for this command.'
+                }
+                $step.check_readback_settings = $true
+            }
+            $planned += $step
+        }
+    }
     if ('cc' -in $selectedModes) {
         $planned += @(
             @{name='set-cc-high';command='set-cc';args=$highArgs;allow_cr_handoff=$true},
             @{name='cc-handoff-from-cr';command='set-cc';args=($highArgs + @('--hardware-validation','cr-led'));
               cr_handoff_after='set-cc-high'},
+            @{name='set-cc-high-readback';command='fixed-status';args=$readbackScope;
+              readback_expected=@{function='CC';range='high';current_a=[decimal]$currentText;input_state='OFF'}},
             @{name='set-cc-auto';command='set-cc';args=$autoArgs},
             @{name='set-cc-low';command='set-cc';args=$lowArgs},
+            @{name='set-cc-low-readback';command='fixed-status';args=$readbackScope;
+              readback_expected=@{function='CC';range='low';current_a=[decimal]$currentText;input_state='OFF'}},
             @{name='input-on';command='input-on';args=$onArgs},
             @{name='measure-on';command='measure';args=@()},
             @{name='input-off';command='input-off';args=@()},
@@ -1386,20 +1507,33 @@ try {
             $expectedArgs = $scopeArgs + @('--validation-settings-json',
                 ($trial.settings | ConvertTo-Json -Compress))
             $planned += @{name="$prefix-setup";command="set-$($trial.scope)";args=$setupArgs}
+            $function = ($trial.scope -split '-')[-1].ToUpperInvariant()
             if ($trial.scope.StartsWith('transient-')) {
+                $transientReadback = New-TransientReadbackFields $function $trial.settings
                 $planned += @{name="$prefix-enable";command='transient-enable';args=$expectedArgs}
+            } else {
+                $field = @{CV='voltage_v';CR='resistance_ohm';CW='power_w'}[$function]
+                $token = @{CV='voltage';CR='resistance';CW='power'}[$function]
+                $check = @{function=$function;input_state='OFF';$field=[decimal]$trial.settings[$token]}
+                if ($null -ne $trial.settings.range) { $check.range = $trial.settings.range }
+                $planned += @{name="$prefix-readback";command='fixed-status';args=$readbackScope;
+                              readback_expected=$check}
             }
             $planned += @{name="$prefix-on";command='input-on';args=($expectedArgs + @('--confirm'))}
             if ($trial.scope.StartsWith('transient-')) {
                 $planned += @{name="$prefix-trigger-1";command='transient-trigger';args=$expectedArgs}
                 $planned += @{name="$prefix-trigger-2";command='transient-trigger';args=$expectedArgs}
-                $planned += @{name="$prefix-status-on";command='transient-status';args=$scopeArgs}
+                $planned += @{name="$prefix-status-on";command='transient-status';args=$readbackScope;
+                              readback_expected=@{enabled=$true;function=$function;input_state='ON'};
+                              transient_expected=$transientReadback;range_from="$prefix-setup"}
             }
             $planned += @{name="$prefix-measure";command='measure';args=@()}
             $planned += @{name="$prefix-off";command='input-off';args=@()}
             if ($trial.scope.StartsWith('transient-')) {
                 $planned += @{name="$prefix-disable";command='transient-disable';args=$scopeArgs}
-                $planned += @{name="$prefix-status-off";command='transient-status';args=$scopeArgs}
+                $planned += @{name="$prefix-status-off";command='transient-status';args=$readbackScope;
+                              readback_expected=@{enabled=$false;function=$function;input_state='OFF'};
+                              transient_expected=$transientReadback;range_from="$prefix-setup"}
             }
             $planned += @{name="$prefix-final-state";command='input-state';args=@()}
         }
@@ -1423,6 +1557,8 @@ try {
                            '--points',([string]$trial.points),'--interval-s',$trial.interval)
             $planned += @{name="$($trial.name)-configure";command='trace-configure';
                           args=$setupArgs;trace_expected=$trial}
+            $planned += @{name="$($trial.name)-status";command='trace-status';
+                          args=@('--hardware-validation','trace');trace_expected=$trial}
             if ($trial.name -eq 'trace-powered') {
                 $planned += @{name='trace-powered-on';command='input-on';args=$onArgs}
             }
@@ -1499,8 +1635,11 @@ try {
         $entry = [ordered]@{name=$_.name;command=$_.command;arguments=$_.args;status='NOT RUN'}
         if ($_.ContainsKey('expected_error')) { $entry['expected_error'] = $_.expected_error }
         if ($_.ContainsKey('condition')) { $entry['condition'] = $_.condition }
+        if ($_.ContainsKey('expected_readback')) { $entry['expected_readback'] = $_.expected_readback }
+        if ($_.ContainsKey('check_readback_settings')) { $entry['readback_comparison'] = 'NOT RUN' }
         $entry
     })
+    $plannedRanges = @{}
     foreach ($step in $allSteps) {
         if ($step.command -eq 'operator-observation') { continue }
         $extras = @($step.args)
@@ -1516,6 +1655,12 @@ try {
             $entry = $report.results | Where-Object { $_.name -eq $step.name } | Select-Object -First 1
             $entry['expected_range'] = $resolved
         }
+        if ($step.ContainsKey('range_from') -and $plannedRanges.ContainsKey($step.range_from)) {
+            $step.transient_expected.range = $plannedRanges[$step.range_from]
+        }
+        if ($step.command -in @('set-transient-cc','set-transient-cv','set-transient-cr')) {
+            $plannedRanges[$step.name] = $plan.result.expected_configuration.range
+        }
         $report.plans += $plan
     }
     $report.prechecks.plan = 'PASS'
@@ -1526,6 +1671,10 @@ try {
     Write-Host "Mode: $(if ($PlanOnly) { 'PLAN ONLY' } else { 'LIVE' })"
     Write-Host "Selected modes: $($selectedModes -join ', ')."
     Write-Host "Plan: Identify, Input State, Measure."
+    if ($readbackSelected) {
+        Write-Host 'Readback requires Fixed CC and confirmed Input OFF. It queries existing settings only.'
+        Write-Host 'Use known front-panel settings as expected values. Incomplete comparisons are recorded as NOT RUN.'
+    }
     if ($protectionSelected) {
         Write-Host 'Protection: independent software current trip, software power trip and hardware power limit trials at 0.20 A.'
         Write-Host 'Start in Fixed CC. Each trial requires Enter before Input ON. Software Clear also requires source isolation and a second Enter.'
@@ -1537,7 +1686,7 @@ try {
     if ('cc' -in $selectedModes -or $traceSelected) {
         Write-Host 'CC setup from CR: conditional contributor handoff with Input OFF and the Core LED OFF interlock.'
     }
-    if (-not $protectionSelected -and
+    if (-not ($protectionSelected -or $readbackSelected) -and
         @($selectedModes | Where-Object { $_ -ne 'trace' -and $_ -notin $featureModes }).Count -gt 0) {
         Write-Host 'Other selected modes retain explicit ON/OFF and independent OFF confirmation.'
     }
@@ -1552,7 +1701,7 @@ try {
         Write-Host 'Slow Rise requires a non-resistance starting function and expects Fixed CV setup to be refused while enabled.'
         Write-Host 'If the Slow Rise trial stops before confirmed Disable, cleanup requires trusted communication and confirmed Input OFF.'
     }
-    if (-not $protectionSelected) {
+    if (-not ($protectionSelected -or $readbackSelected)) {
         Write-Host 'Fixed Auto adds Input OFF setup/readback with the existing values; no extra ON/OFF cycles.'
     }
     if (@($selectedModes | Where-Object { $_.StartsWith('transient-') }).Count -gt 0) {
@@ -1587,7 +1736,9 @@ try {
     # Focused selections keep their preflight; mixed/all-mode runs check
     # the original base and only the chosen feature-specific offline scopes.
     $preflightScript = Join-Path $PSScriptRoot 'preflight-cli.ps1'
-    if ($protectionSelected) {
+    if ($readbackSelected) {
+        & $preflightScript -ReadbackOnly
+    } elseif ($protectionSelected) {
         & $preflightScript -ProtectionOnly
     } elseif ($selectedModes.Count -eq 1 -and $timerSelected) {
         & $preflightScript -InputTimerOnly
@@ -1630,7 +1781,9 @@ try {
     if ($triggerSelected) {
         Write-Host '- Confirm external On/Off and analog programming are disabled and external trigger wiring was reviewed while de-energized.'
     }
-    Write-Host '- Selected trials may deliberately turn Input ON; the script explicitly commands and verifies OFF, but cannot guarantee OFF after communication failures.'
+    if (-not $readbackSelected) {
+        Write-Host '- Selected trials may deliberately turn Input ON; the script explicitly commands and verifies OFF, but cannot guarantee OFF after communication failures.'
+    }
     $ack = if ($protectionSelected) {
         $watch = [Diagnostics.Stopwatch]::StartNew()
         Read-ValidationAnswer 'Confirm a dedicated source and no important DUT. Press Enter to start (Ctrl+C to cancel)' 'identify' -DiscardPendingKeys
@@ -1758,12 +1911,22 @@ try {
         if ($step.ContainsKey('expected_range') -and $observedRange -cne $step.expected_range) {
             Fail-Case $step.name 'readback_mismatch' 'Auto Range differs from the Core plan.'
         }
-        if ($step.command -eq 'transient-status') {
-            $expectedOn = $step.name.EndsWith('-status-on')
-            $expectedState = $(if ($expectedOn) { 'ON' } else { 'OFF' })
-            if ($result.result.enabled -ne $expectedOn -or $result.result.input_state -cne $expectedState) {
-                Fail-Case $step.name 'readback_mismatch' 'Transient/Input control status did not match.'
+        if ($step.ContainsKey('readback_expected')) {
+            $step.readback_expected.state_source = 'instrument_readback'
+            Assert-ReadbackFields $result.result $step.readback_expected $step.name
+        }
+        if ($step.ContainsKey('check_readback_settings')) {
+            $entry = $report.results | Where-Object { $_.name -eq $step.name } | Select-Object -First 1
+            if (-not $step.ContainsKey('expected_readback')) {
+                $entry.readback_comparison = 'OBSERVED ONLY'
+                Write-Host "NOT RUN $($step.name): observed values without a complete expected setting."
+                continue
             }
+            $entry.readback_comparison = 'MATCHED'
+            $entry.status = 'PASS'
+        }
+        if ($step.ContainsKey('transient_expected')) {
+            Assert-ReadbackFields $result.result.configuration $step.transient_expected $step.name
         }
         if ($step.command -eq 'input-off') { $inputOnAttempted = $false }
         if ($step.command -eq 'input-timer-disable') { $timerEnableAttempted = $false }
@@ -1783,10 +1946,16 @@ try {
     }
     if ($triggerSelected) { Invoke-TriggerValidation }
     if ($protectionSelected) { Invoke-ProtectionValidation }
-    $report.status = 'PASS'
+    $report.status = if ($readbackSelected -and ($report.results.readback_comparison -contains 'OBSERVED ONLY')) {
+        'OBSERVED ONLY'
+    } else { 'PASS' }
     Save-Report
     Show-Summary
-    Write-Host 'PASS: one-run CLI LIVE validation.'
+    if ($report.status -eq 'OBSERVED ONLY') {
+        Write-Host 'Readback complete. Only comparisons with supplied expected values were verified.'
+    } else {
+        Write-Host 'PASS: one-run CLI LIVE validation.'
+    }
     exit 0
 } catch {
     if ($report.status -ne 'BLOCKED') {
@@ -1940,7 +2109,7 @@ try {
     }
     Save-Report
     if ($null -ne $reportDirectory) {
-        if ($report.status -ne 'PASS' -and $report.status -ne 'PLAN ONLY') { Show-Summary }
+        if ($report.status -notin @('PASS','PLAN ONLY','OBSERVED ONLY')) { Show-Summary }
         Write-Host "Report: $reportDirectory/shareable/report.json"
         if ($DebugArtifacts) { Write-Host "Private debug logs: $reportDirectory/private (review before sharing)" }
     }

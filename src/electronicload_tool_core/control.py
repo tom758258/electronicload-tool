@@ -13,7 +13,7 @@ from time import monotonic, sleep
 from .errors import LoadError, communication_error
 from .identity import MODEL_ID, parse_identity
 from .visa import open_session, require_trusted_session, validate_connection
-from .simulator import ControlSimulator
+from .simulator import ControlSimulator, list_settings, transient_settings
 from .trigger import TRIGGER_COMMANDS, software_trigger, validate_setup as validate_trigger_setup
 
 TRANSIENT_SETUP_COMMANDS = {"set-transient-cc": "CC", "set-transient-cv": "CV",
@@ -47,6 +47,8 @@ TRANSIENT_FIELDS = frozenset({"transient_mode", "range", "level_a", "level_b", "
 # not a documented decimal step. Programming Guide V2.1 pp.48,50-51.
 SLEW_LIMITS = {"low": (Decimal("0.0001"), Decimal("0.25")),
                "high": (Decimal("0.001"), Decimal("2.5"))}
+# IT8811/12/12B/12C User Manual V2.7, section 3.18.
+LIST_WIDTH_LIMITS = (Decimal("0.00002"), Decimal("3600"))
 # Exact IT8812C Product LIVE control commands; the model, USB/System VISA,
 # Explicit Input ON authorization remains enforced.
 PRODUCT_LIVE_COMMANDS = frozenset({"set-cc", "input-on", "input-off"})
@@ -217,6 +219,7 @@ def validate_list_cc(arguments: dict) -> dict:
         raise LoadError("invalid_list_steps", "LIST requires 2 through 84 steps.")
     fields = {"current_a", "slew_a_per_us", "width_s"}
     steps = []
+    minimum_width, maximum_width = LIST_WIDTH_LIMITS
     for index, raw in enumerate(raw_steps, 1):
         if not isinstance(raw, dict) or set(raw) != fields:
             raise LoadError("argument_error", "Each LIST step requires current_a, slew_a_per_us, width_s.",
@@ -232,7 +235,7 @@ def validate_list_cc(arguments: dict) -> dict:
             except LoadError as exc:
                 raise LoadError("invalid_list_value", "LIST step values must be finite JSON numbers.",
                                 step=index, field=field) from exc
-        if not Decimal("0.00002") <= step["width_s"] <= Decimal("3600"):
+        if not minimum_width <= step["width_s"] <= maximum_width:
             raise LoadError("width_out_of_range", "LIST width must be 0.00002 through 3600 seconds.",
                             step=index)
         steps.append(step)
@@ -271,6 +274,7 @@ def _list_simulation(session, command, configuration, slot, stop):
     """Control state only; no physical LIST engine, SCPI, timer or completion claim."""
     if command == "list-status":
         return session.list_status()
+    expected_settings = list_settings(configuration) if command == "set-list-cc" else None
 
     def check_stop():
         if stop is not None and stop.is_set():
@@ -321,13 +325,19 @@ def _list_simulation(session, command, configuration, slot, stop):
             session.list_slot = slot
         elif command == "list-exit":
             session.mode = "FIX"
-    return session.list_status()
+    status = session.list_status()
+    if expected_settings is not None and (not status["selected"]
+                                          or status["configuration"] != expected_settings):
+        raise LoadError("readback_mismatch", "LIST setup did not match simulated readback.", 3)
+    return status
 
 
 def _transient_simulation(session, command, configuration, stop):
     """Control state only: no SCPI, waveform, timer or physical completion claim."""
     if command == "transient-status":
         return session.transient_status()
+    function = TRANSIENT_SETUP_COMMANDS.get(command)
+    expected_settings = transient_settings(function, configuration) if function else None
     if stop is not None and stop.is_set():
         raise LoadError("stopping", "Transient control was blocked because Worker is stopping.")
     if (command in {*TRANSIENT_SETUP_COMMANDS, "transient-enable"}
@@ -358,8 +368,8 @@ def _transient_simulation(session, command, configuration, stop):
             session.transient_configuration = dict(configuration)
             session.last_trigger = None
             session.mode = "TRAN"
-            session.transient_function = TRANSIENT_SETUP_COMMANDS[command]
-            session.function = TRANSIENT_FUNCTIONS[session.transient_function]
+            session.transient_function = function
+            session.function = TRANSIENT_FUNCTIONS[function]
         elif command == "transient-enable":
             if session.transient_configuration is None:
                 raise LoadError("transient_not_configured", "Enable requires Transient setup.")
@@ -367,7 +377,15 @@ def _transient_simulation(session, command, configuration, stop):
             session.transient_enabled = True
         elif command == "transient-disable":
             session.transient_enabled = False
-    return session.transient_status()
+    status = session.transient_status()
+    if expected_settings is not None and (status["function"] != function or status["enabled"]
+                                          or status["configuration"] != expected_settings):
+        raise LoadError("readback_mismatch", "Transient setup did not match simulated readback.", 3)
+    if command in {"transient-enable", "transient-disable"}:
+        enabled = command == "transient-enable"
+        if status["enabled"] != enabled or (_flag(session, "TRAN?") == "ON") != enabled:
+            raise LoadError("readback_mismatch", "Transient enable state did not match readback.", 3)
+    return status
 
 
 def validate_voltage(value: object, range_name: str) -> Decimal:
@@ -678,13 +696,18 @@ def _fixed_cr_mode(session):
     return {"function_mode": mode, "function": function, "fixed_cr": fixed_cr}
 
 
-def _cr_status(session, *, expected=None):
-    mode = _fixed_cr_mode(session)
+def _cr_vdrop(session):
     vdrop = _decimal_readback(session, VDROP_QUERY)
     if vdrop < 0:
         raise LoadError("invalid_response", "Instrument returned a negative Vdrop.", 3,
                         query=VDROP_QUERY)
-    return {**mode, "led_enabled": _flag(session, LED_QUERY) == "ON", "vdrop_v": str(vdrop),
+    return str(vdrop)
+
+
+def _cr_status(session, *, expected=None):
+    mode = _fixed_cr_mode(session)
+    vdrop = _cr_vdrop(session)
+    return {**mode, "led_enabled": _flag(session, LED_QUERY) == "ON", "vdrop_v": vdrop,
             **_cr_settings(session, expected=expected)}
 
 
@@ -801,6 +824,14 @@ def _average(session, command, count, stop):
         except LoadError as exc:
             exc.details["command"] = action
             raise
+    observed = _average_count(session)
+    if command == "set-average" and observed != count:
+        raise LoadError("readback_mismatch", "Average count did not match readback.", 3,
+                        requested_average_count=count, observed_average_count=observed)
+    return {"average_count": observed}
+
+
+def _average_count(session):
     query = "SENS:AVER:COUN?"
     try:
         response = _query(session, query)
@@ -815,10 +846,7 @@ def _average(session, command, count, stop):
             or observed != observed.to_integral_value()):
         raise LoadError("invalid_response", "Average readback must be an integer from 2 through 16.",
                         3, query=query)
-    if command == "set-average" and observed != count:
-        raise LoadError("readback_mismatch", "Average count did not match readback.", 3,
-                        requested_average_count=count, observed_average_count=int(observed))
-    return {"average_count": int(observed)}
+    return int(observed)
 
 
 def _short_simulation(session: ControlSimulator, command: str, stop: Event | None) -> dict:
@@ -1146,6 +1174,16 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
     validate_connection(resource, backend, required=mode == "live")
     if mode == "simulate":
         require_trusted_session(simulator)
+    if hardware_validation == "readback":
+        from .readback import CONTROL_STATUS_COMMANDS, execute as execute_readback
+
+        if (command not in CONTROL_STATUS_COMMANDS or confirmed
+                or any(value is not None for value in (current, voltage, resistance, power,
+                    range_name, validation_settings, transient, list_configuration, slot, rise_slew,
+                    fall_slew, latch, seconds, count, vdrop, trigger_source, trigger_interval))):
+            raise LoadError("argument_error", "Readback validation accepts only status commands without arguments.")
+        return execute_readback(command, mode=mode, resource=resource,
+                                hardware_validation=hardware_validation)
     if command in TRIGGER_COMMANDS or hardware_validation == "trigger":
         if any(value is not None for value in (current, voltage, resistance, power,
                 range_name, slot, rise_slew, fall_slew, latch, seconds, count, vdrop)):
@@ -1267,8 +1305,13 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
             _input_off(simulated)
             simulated.von_settings = (threshold, latch)
         if command in {"set-von", "von-status"}:
-            voltage, latch = simulated.von_settings
-            return {"threshold_v": str(voltage), "latch": latch}
+            from .readback import von_status
+
+            result = von_status(simulated)
+            if threshold is not None and (Decimal(result["threshold_v"]), result["latch"]) != (
+                    threshold, latch):
+                raise LoadError("readback_mismatch", "VON settings did not match readback.", 3)
+            return result
         return _short_simulation(simulated, command, stop)
     if command in LIST_COMMANDS:
         if (any(value is not None for value in (current, voltage, resistance, power, range_name,
@@ -1383,8 +1426,14 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
                         confirmed=confirmed, stop=stop, allow_cv=True, allow_cr=True, allow_cw=True,
                         vdrop=vdrop)
         if slew:
+            from .readback import fixed_slew_status
+
             simulated.fixed_cc_slew = slew
-            result.update(simulated.fixed_cc_slew)
+            observed = fixed_slew_status(simulated)
+            if (not observed["configured"]
+                    or any(Decimal(observed[key]) != Decimal(value) for key, value in slew.items())):
+                raise LoadError("readback_mismatch", "Fixed CC slew did not match readback.", 3)
+            result.update({key: observed[key] for key in slew})
         if fixed_setup:
             simulated.transient_configuration = None
             simulated.last_trigger = None

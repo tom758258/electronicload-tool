@@ -18,7 +18,7 @@ from .visa import (TraceSessionLost, mark_session_untrusted, open_session,
                    require_trusted_session,
                    validate_connection)
 
-TRACE_COMMANDS = ("trace-configure", "trace-start")
+TRACE_COMMANDS = ("trace-configure", "trace-start", "trace-status")
 CONFIG_FIELDS = frozenset({"source", "points", "interval_s"})
 CSV_FIELDS = frozenset({"csv", "csv_format", "csv_time_columns"})
 SAMPLE_FIELDS = {"VOLT": ("voltage_v",), "CURR": ("current_a",), "TWO": ("voltage_v", "current_a")}
@@ -153,6 +153,31 @@ def _read_configuration(ask):
     source = SOURCE_READBACK[_choice(ask, "TRAC:FEED?", SOURCE_READBACK)]
     points = _integer(ask, "TRAC:POIN?", maximum=65535)
     return source, points, _read_decimal(ask, "TRAC:TIM?")
+
+
+def _status(session, *, simulated):
+    parse_identity(_query(session, "*IDN?"))
+    ask = partial(_query, session)
+    try:
+        source, points, interval = _read_configuration(ask)
+        delay = _read_decimal(ask, "TRAC:DEL?")
+        filter_enabled = _integer(ask, "TRAC:FILT?", maximum=1) == 1
+        # The simulator advances a capture on polling. A status job only observes it.
+        feed = session.trace_feed if simulated else _feed(ask)
+        # The guide allows wider native settings than the Tool's capture policy.
+        max_points = 1000 if source == "TWO" else 2000
+        if not 2 <= points <= max_points or not Decimal("0.00002") <= interval <= 3600:
+            raise LoadError("invalid_response", "TRACE configuration is outside model limits.", 3)
+        if not 0 <= delay <= 3600:
+            raise LoadError("invalid_response", "TRACE delay is outside model limits.", 3, query="TRAC:DEL?")
+        if feed not in ("NEXT", "NEVER"):
+            raise LoadError("invalid_response", "Unknown TRACE Feed.", 3, query=FEED_QUERY)
+    except TraceSessionLost as exc:
+        raise LoadError("invalid_response", "Invalid TRACE configuration reply.", 3,
+                        query=exc.details["operation"]) from exc
+    return {"source": source, "points": points, "interval_s": str(interval), "delay_s": str(delay),
+            "filter_enabled": filter_enabled, "feed": feed,
+            "state_source": "simulate" if simulated else "instrument_readback"}
 
 
 def _check_zero(ask, query):
@@ -405,10 +430,12 @@ def execute(command, *, mode="live", resource=None, backend="system", model_id=M
         if set(arguments) != CONFIG_FIELDS:
             raise LoadError("argument_error", "TRACE configuration requires source, points and interval_s.")
         config, _ = validate_configuration(**arguments)
-    else:
+    elif command == "trace-start":
         if set(arguments) - CSV_FIELDS:
             raise LoadError("argument_error", "TRACE start accepts only CSV options.")
         csv_options = validate_csv(arguments)
+    elif arguments:
+        raise LoadError("argument_error", "TRACE status takes no arguments.")
     if hardware_validation not in (None, "trace") or (
             hardware_validation == "trace" and mode == "simulate"):
         raise LoadError("argument_error", "TRACE contributor validation requires live or dry-run.")
@@ -417,10 +444,13 @@ def execute(command, *, mode="live", resource=None, backend="system", model_id=M
     marker = ({"validation_only": True, "validation_scope": "trace"}
               if hardware_validation == "trace" else {})
     if mode == "dry-run":
-        return {"command": command, "hardware_access": False, **config, **marker}
+        return {"command": command, "hardware_access": False, **config, **marker,
+                **({"planned_writes": []} if command == "trace-status" else {})}
 
     def run(session):
         require_trusted_session(session)
+        if command == "trace-status":
+            return _status(session, simulated=mode == "simulate")
         try:
             if command == "trace-configure":
                 return _configure(session, config, stop)

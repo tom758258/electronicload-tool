@@ -212,3 +212,27 @@ def test_power_query_failure_is_cli_error(fake_visa, capsys):
     assert fake_visa.calls.count("FETC:POW?") == 1
     assert "MEAS:POW?" not in fake_visa.calls
     assert fake_visa.calls[-2:] == ["session_close", "manager_close"]
+
+
+def test_configuration_readback_cli_preview_refusal_and_invalid_live_reply(capsys, fake_visa):
+    for command, scope in (("readback", "readback"), ("fixed-status", "readback"),
+                           ("fixed-slew-status", "readback"), ("trace-status", "trace")):
+        assert main([command, "--simulate", "--json"]) == 0
+        actual = json.loads(capsys.readouterr().out)
+        assert actual["ok"] and actual["command"] == command
+        assert actual["result"]["state_source"] == "simulate"
+        assert main([command, "--dry-run", "--hardware-validation", scope, "--json"]) == 0
+        plan = json.loads(capsys.readouterr().out)["result"]
+        assert plan["hardware_access"] is False and plan["planned_writes"] == []
+        assert main([command, "--resource", RESOURCE, "--json",
+                     "--validation-allow-pending-live-support"]) == 2
+        assert json.loads(capsys.readouterr().out)["error"]["code"] == "unsupported_live_scope"
+    assert fake_visa.calls == []
+
+    for reply, error, expected_exit in (("1", "mode_not_fixed", 2), ("?", "invalid_response", 3)):
+        fake_visa.responses.update({"FUNC:MODE?": "FIX", "FUNC?": "CURR", "TRAN?": reply})
+        assert main(["fixed-status", "--resource", RESOURCE, "--hardware-validation",
+                     "readback", "--json"]) == expected_exit
+        output = capsys.readouterr()
+        assert output.err == ""
+        assert json.loads(output.out)["error"]["code"] == error
