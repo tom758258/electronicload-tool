@@ -20,6 +20,7 @@ from electronicload_tool_core.readback import (COMMANDS as READBACK_COMMANDS,
 from electronicload_tool_core.readonly import (COMMANDS, ERROR_QUEUE_COMMAND, MAX_ERROR_READS,
                                                NATIVE_MEASUREMENTS, SYSTEM_QUERIES,
                                                execute as read_execute)
+from electronicload_tool_core.sequence import COMMAND as SEQUENCE_COMMAND, execute as sequence_execute
 from electronicload_tool_core.control import (CONTROL_COMMANDS, execute as control_execute,
                                               validate_power, TRANSIENT_FIELDS, LIST_COMMANDS,
                                               FIXED_RANGE_COMMANDS, FIXED_RANGE_CHOICES,
@@ -61,15 +62,16 @@ def _current_token(value: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    json_output = "--json" in argv
+    json_output = ("--json" in argv or
+                   (argv[:1] == [SEQUENCE_COMMAND] and not {"--help", "-h"}.intersection(argv)))
     mode = "dry-run" if "--dry-run" in argv else "simulate" if "--simulate" in argv else "live"
-    command_names = (*COMMANDS, *CONTROL_COMMANDS, *TRACE_COMMANDS, *PROTECTION_COMMANDS,
+    command_names = (*COMMANDS, *CONTROL_COMMANDS, *TRACE_COMMANDS, *PROTECTION_COMMANDS, SEQUENCE_COMMAND,
                      "list-resources", "manifest", "worker",
                      "send-command", "status", "stop", "wait-ready")
     command = argv[0] if argv and argv[0] in command_names else None
     parser = _Parser(
         prog="electronicload-tool",
-        description="Electronic Load Tool: fixed CC, offline CV/CR/CW/Transient/LIST CC and Worker v3.",
+        description="Electronic Load Tool: fixed CC, offline CV/CR/CW/Transient/LIST CC, Software Sequence and Worker v3.",
         allow_abbrev=False,
     )
     parser.json_errors = json_output
@@ -115,6 +117,10 @@ def main(argv: list[str] | None = None) -> int:
         sub.add_argument("--json", action="store_true")
         sub.add_argument("--validation-allow-pending-live-support", action="store_true",
                          help=argparse.SUPPRESS)
+        if name == SEQUENCE_COMMAND:
+            sub.add_argument("--file", required=True, help="UTF-8 Software Sequence JSON document.")
+            sub.add_argument("--hardware-validation", choices=(SEQUENCE_COMMAND,),
+                             help="Explicit CLI-only IT8812C contributor hardware validation.")
         if name in NATIVE_MEASUREMENTS:
             sub.add_argument("--metric", choices=tuple(NATIVE_MEASUREMENTS[name]))
         if name in SYSTEM_QUERIES:
@@ -160,7 +166,7 @@ def main(argv: list[str] | None = None) -> int:
                                  "Amperes" if "current" in field else "Watts")
             sub.add_argument("--restore-defaults", choices=tuple(PROTECTION_DEFAULTS),
                              default=argparse.SUPPRESS)
-        if name in {"protection-set", "protection-clear", "input-on"}:
+        if name in {"protection-set", "protection-clear", "input-on", SEQUENCE_COMMAND}:
             sub.add_argument("--confirm", action="store_true")
         if name == "input-on":
             sub.add_argument("--protection-trial", choices=tuple(PROTECTION_TRIALS),
@@ -244,7 +250,7 @@ def main(argv: list[str] | None = None) -> int:
                 try:
                     arguments = (decode_decimal_json(args.arguments_json)
                                  if args.worker_command in (*LIST_COMMANDS, *TRACE_COMMANDS,
-                                                            *PROTECTION_COMMANDS, "trigger-configure")
+                                                            *PROTECTION_COMMANDS, "trigger-configure", SEQUENCE_COMMAND)
                                  else json.loads(args.arguments_json))
                     context = json.loads(args.context_json)
                 except (ValueError, UnicodeError, RecursionError) as exc:
@@ -260,7 +266,7 @@ def main(argv: list[str] | None = None) -> int:
                     body["job_id"] = args.job_id
                 if args.worker_command in {*FIXED_RANGE_COMMANDS, *TRANSIENT_SETUP_COMMANDS,
                                            *LIST_COMMANDS, *TRACE_COMMANDS, *PROTECTION_COMMANDS,
-                                           "set-von", "trigger-configure"}:
+                                           "set-von", "trigger-configure", SEQUENCE_COMMAND}:
                     # Forward original numeric tokens; Core in the Worker validates them.
                     # Parsing above already guarantees a complete JSON value.
                     del body["arguments"]
@@ -278,6 +284,15 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if 200 <= code < 300 else 2 if code in (400, 409, 429) else 3
         if args.command == "list-resources":
             result = discover_resources(live_only=args.live_only)
+        elif args.command == SEQUENCE_COMMAND:
+            try:
+                document = decode_decimal_json(Path(args.file).read_text(encoding="utf-8-sig"))
+            except (OSError, ValueError, RecursionError) as exc:
+                raise LoadError("argument_error", "Cannot read a valid Sequence JSON document.") from exc
+            result = sequence_execute(document, mode=mode, model_id=args.model,
+                                      backend=args.backend, resource=args.resource,
+                                      confirmed=args.confirm, hardware_validation=args.hardware_validation)
+            args.json = True
         elif (args.command in PROTECTION_COMMANDS
               or getattr(args, "hardware_validation", None) == "protection"):
             if getattr(args, "validation_settings_json", None) is not None:

@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param([switch]$TransientOnly, [switch]$FixedAutoOnly, [switch]$FixedSlewVonShortOnly,
       [switch]$InputTimerOnly, [switch]$TraceOnly, [switch]$CrLedSlowRiseOnly, [switch]$TriggerOnly,
-      [switch]$ProtectionOnly, [switch]$ReadbackOnly)
+      [switch]$ProtectionOnly, [switch]$ReadbackOnly, [switch]$SequenceOnly)
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -21,12 +21,48 @@ function Invoke-PreflightCli {
 }
 
 try {
-    if (@($TransientOnly, $FixedAutoOnly, $FixedSlewVonShortOnly, $InputTimerOnly, $TraceOnly, $CrLedSlowRiseOnly, $TriggerOnly, $ProtectionOnly, $ReadbackOnly |
+    if (@($TransientOnly, $FixedAutoOnly, $FixedSlewVonShortOnly, $InputTimerOnly, $TraceOnly, $CrLedSlowRiseOnly, $TriggerOnly, $ProtectionOnly, $ReadbackOnly, $SequenceOnly |
             Where-Object { $_ }).Count -gt 1) {
         throw 'Select only one focused preflight switch.'
     }
     if (-not (Test-Path -LiteralPath $cli)) {
         throw 'Sync the repository .venv with uv before running preflight.'
+    }
+    if ($SequenceOnly -or -not ($TransientOnly -or $FixedAutoOnly -or $FixedSlewVonShortOnly -or
+        $InputTimerOnly -or $TraceOnly -or $CrLedSlowRiseOnly -or $TriggerOnly -or
+        $ProtectionOnly -or $ReadbackOnly)) {
+        $scratch = Join-Path $repo ('.tmp_tests/sequence-preflight-' + [Guid]::NewGuid())
+        [void][IO.Directory]::CreateDirectory($scratch)
+        $file = Join-Path $scratch 'sequence.json'
+        $document = '{"version":1,"loop_count":2,"steps":[{"action":"set-cc","arguments":{"current":0.1,"range":"auto"}},{"action":"input-on","arguments":{}},{"action":"wait","arguments":{"seconds":0}},{"action":"measure","arguments":{}},{"action":"input-off","arguments":{}},{"action":"input-state","arguments":{}}]}'
+        try {
+            [IO.File]::WriteAllText($file, $document)
+            $command = @('sequence','--file',$file)
+            $plan = Invoke-PreflightCli ($command + '--dry-run')
+            $simulated = Invoke-PreflightCli ($command + @('--simulate','--confirm'))
+            $refused = Invoke-PreflightCli ($command + @('--simulate')) 2
+            $live = Invoke-PreflightCli ($command + @('--validation-allow-pending-live-support',
+                '--resource','USB0::0xFFFF::0x0001::SYNTHETIC::INSTR','--confirm')) 2
+            $manifest = Invoke-PreflightCli @('manifest')
+            $invalid = $document.Replace('{"action":"input-state","arguments":{}}',
+                '{"action":"input-on","arguments":{}}')
+            [IO.File]::WriteAllText($file, $invalid)
+            $precheck = Invoke-PreflightCli ($command + '--dry-run') 2
+            if ($plan.result.hardware_access -ne $false -or
+                $plan.result.input_on_requires_confirmation -ne $true -or
+                $simulated.result.completed_steps -ne 12 -or
+                $simulated.result.measurements.Count -ne 2 -or $simulated.result.input_state -cne 'OFF' -or
+                $refused.error.code -cne 'confirmation_required' -or $live.error.code -cne 'unsupported_live_scope' -or
+                $manifest.commands.sequence.kind -cne 'async_job' -or
+                $precheck.error.details.reason -cne 'fresh_fixed_setup_required' -or
+                $precheck.error.details.step_index -ne 6) {
+                throw 'Software Sequence preflight failed.'
+            }
+        } finally {
+            Remove-Item -LiteralPath $scratch -Recurse -Force
+        }
+        Write-Host 'PASS: Software Sequence offline preflight'
+        if ($SequenceOnly) { exit 0 }
     }
     if ($ReadbackOnly -or -not ($TransientOnly -or $FixedAutoOnly -or $FixedSlewVonShortOnly -or
         $InputTimerOnly -or $TraceOnly -or $CrLedSlowRiseOnly -or $TriggerOnly -or $ProtectionOnly)) {

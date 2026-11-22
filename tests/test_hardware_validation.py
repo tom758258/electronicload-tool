@@ -668,3 +668,166 @@ def test_configuration_readback_mismatch_in_simulated_von_write_is_reported():
     with pytest.raises(LoadError) as failure:
         control.execute("set-von", mode="simulate", simulator=IgnoredLatch(), voltage="2", latch="off")
     assert failure.value.code == "readback_mismatch"
+
+
+@pytest.fixture
+def sequence_visa(fake_visa, monkeypatch):
+    fake = ValidationFake()
+    fake.values.update({"INP:TIM": "0", "MEAS:VOLT": "5", "MEAS:CURR": ".1", "FETC:POW": ".5"})
+    monkeypatch.setattr(fake_visa.session, "query", lambda command: fake.query(command))
+    monkeypatch.setattr(fake_visa.session, "write", fake.write, raising=False)
+
+    # Normal session creation still uses the recording factory.
+    return fake, fake_visa.calls
+
+
+def run_sequence(*steps, **kwargs):
+    from electronicload_tool_core.sequence import execute
+    document = {"version": 1, "loop_count": 1,
+                "steps": [{"action": action, "arguments": args} for action, args in steps]}
+    return execute(document, **{"resource": RESOURCE, "hardware_validation": "sequence",
+                                "confirmed": True, **kwargs})
+
+
+SEQUENCE_CC = ("set-cc", {"current": 0.1, "range": "auto"})
+SEQUENCE_ON = ("input-on", {})
+SEQUENCE_OFF = ("input-off", {})
+SEQUENCE_MEASURE = ("measure", {})
+
+
+def test_sequence_live_fixed_modes_in_one_session(sequence_visa):
+    fake, calls = sequence_visa
+    result = run_sequence(
+        SEQUENCE_CC, SEQUENCE_ON, SEQUENCE_OFF,
+        ("set-cv", {"voltage": 3, "range": "auto"}), SEQUENCE_ON, SEQUENCE_OFF,
+        ("set-cr", {"resistance": 1000, "range": "auto"}), SEQUENCE_ON, SEQUENCE_OFF,
+        ("set-cw", {"power": 0.10}), SEQUENCE_ON, SEQUENCE_MEASURE, SEQUENCE_OFF)
+    assert calls.count("open_resource") == 1
+    assert calls[-2:] == ["session_close", "manager_close"]
+    assert fake.calls.count("*IDN?") == 1
+    assert fake.calls.count("INP ON") == fake.calls.count("INP OFF") == 4
+    for write, query in [("CURR 0.1", "CURR?"), ("VOLT 3", "VOLT?"),
+                         ("RES 1000", "RES?"), ("POW 0.1", "POW?")]:
+        index = fake.calls.index(write)
+        assert fake.calls[index - 1] == "INP:STAT?"
+        first_on = fake.calls.index("INP ON", index)
+        assert query in fake.calls[index:first_on]
+        remote = max(i for i in range(index, first_on) if fake.calls[i] == "SYST:REM")
+        assert query in fake.calls[remote:first_on] and "INP:SHOR:STAT?" in fake.calls[remote:first_on]
+    assert not any(call.startswith(("RES:LED:STAT ", "*RST", "SYST:LOC", "TRAN OFF", "SYST:ERR?"))
+                   for call in fake.calls)
+    assert result["validation_only"] and result["cleanup"]["off_confirmed"] and not fake.input
+    assert result["measurements"][0]["step_index"] == 12
+
+
+@pytest.mark.parametrize(("options", "code"), [
+    ({"backend": "py"}, "unsupported_backend"),
+    ({"resource": "TCPIP::SYNTHETIC::INSTR"}, "invalid_resource"),
+    ({"model_id": "unregistered"}, "unsupported_model"),
+    ({"confirmed": False}, "confirmation_required"),
+    ({"hardware_validation": None}, "unsupported_live_scope"),
+])
+def test_sequence_live_scope_and_confirmation_refuse_before_io(sequence_visa, options, code):
+    fake, calls = sequence_visa
+    with pytest.raises(LoadError) as error:
+        run_sequence(SEQUENCE_CC, SEQUENCE_ON, SEQUENCE_OFF, **options)
+    assert error.value.code == code and "open_resource" not in calls and fake.calls == []
+
+
+def test_sequence_live_rejects_slew_before_io(sequence_visa):
+    fake, calls = sequence_visa
+    setup = ("set-cc", {"current": 0.1, "range": "auto", "rise_slew": 0.1, "fall_slew": 0.1})
+    with pytest.raises(LoadError) as error:
+        run_sequence(setup, SEQUENCE_ON, SEQUENCE_OFF)
+    assert error.value.code == "unsupported_live_scope"
+    assert fake.calls == [] and "open_resource" not in calls
+
+
+@pytest.mark.parametrize(("condition", "code"), [
+    ("wrong_identity", "identity_mismatch"),
+    ("initial_on", "input_not_off"),
+    ("already_list", "list_selected"),
+    ("cr_led", "cr_led_enabled"),
+    ("remote_short", "unsafe_mode"),
+    ("remote_transient", "unsafe_mode"),
+    ("remote_input", "input_not_off"),
+    ("remote_setpoint", "readback_mismatch"),
+])
+def test_sequence_live_guards_before_writes_and_after_remote(sequence_visa, condition, code):
+    fake, calls = sequence_visa
+    if condition == "wrong_identity":
+        fake.values["*IDN"] = "ITECH Ltd,IT8812B,SYNTHETIC,1.0"
+    elif condition == "initial_on":
+        fake.input = True
+    elif condition == "already_list":
+        fake.mode = "LIST"
+    elif condition == "cr_led":
+        fake.function = "RES"
+        fake.values["RES:LED:STAT"] = "1"
+    else:
+        attr, value = {"remote_short": ("short", True), "remote_transient": ("transient", True),
+                       "remote_input": ("input", True), "remote_setpoint": ("current", 0.2)}[condition]
+        fake.after_remote = lambda inst: setattr(inst, attr, value) if inst.calls.count("SYST:REM") == 2 else None
+    with pytest.raises(LoadError) as error:
+        run_sequence(SEQUENCE_CC, SEQUENCE_ON, SEQUENCE_OFF)
+    assert error.value.code == code
+    assert "INP ON" not in fake.calls and "INP OFF" not in fake.calls
+    assert calls.count("open_resource") == 1
+    if condition == "initial_on":
+        assert fake.input and fake.calls == ["*IDN?", "INP:STAT?"]
+
+
+@pytest.mark.parametrize("condition", ["stop", "off_confirmation", "lost_reply", "uncertain_write", "interrupted_io"])
+def test_sequence_live_cleans_up_on_stop_and_reports_uncertain_off(sequence_visa, monkeypatch, condition):
+    fake, calls = sequence_visa
+    stop = Event()
+    query = fake.query
+    if condition in {"stop", "off_confirmation"}:
+        def read(command):
+            response = query(command)
+            if command == "FETC:POW?":
+                stop.set()
+            return response
+
+        monkeypatch.setattr(fake, "query", read)
+        # The recording VISA session delegates to the fake query.
+        monkeypatch.setattr(fake, "after_write", (
+            (lambda inst, cmd: setattr(inst, "input", True) if cmd == "INP OFF" else None)
+            if condition == "off_confirmation" else None))
+        monkeypatch.setattr(control, "INPUT_STATE_CONFIRM_TIMEOUT_S", 0.01)
+    elif condition in {"lost_reply", "interrupted_io"}:
+        fake.values.pop("FETC:POW")
+        fake.response_errors["FETC:POW?"] = (
+            TimeoutError("PRIVATE") if condition == "lost_reply" else KeyboardInterrupt())
+    else:
+        fake.write_fail = "INP ON"
+    with pytest.raises(LoadError) as error:
+        run_sequence(SEQUENCE_CC, SEQUENCE_ON, SEQUENCE_MEASURE, ("wait", {"seconds": 60}),
+                     SEQUENCE_OFF, stop=stop)
+    details = error.value.details
+    trusted = condition in {"stop", "off_confirmation"}
+    assert calls.count("open_resource") == 1
+    assert fake.calls.count("INP ON") == 1
+    assert fake.calls.count("INP OFF") == int(trusted)
+    assert details["cleanup"]["attempted"] is trusted
+    assert error.value.code == ("stopping" if condition == "stop" else "sequence_cleanup_unconfirmed")
+    assert details["input_state"] == ("OFF" if condition == "stop" else "UNKNOWN")
+    if trusted:
+        assert details["measurements"][0]["power_w"] == 0.5
+        assert details["failed_step"]["action"] == "wait"
+    else:
+        assert details["cleanup"]["reason"] == "session_untrusted"
+    assert "PRIVATE" not in json.dumps(error.value.as_dict())
+
+
+def test_sequence_does_not_resend_an_unconfirmed_explicit_off(sequence_visa, monkeypatch):
+    fake, calls = sequence_visa
+    monkeypatch.setattr(control, "INPUT_STATE_CONFIRM_TIMEOUT_S", 0.01)
+    fake.after_write = lambda inst, cmd: setattr(inst, "input", True) if cmd == "INP OFF" else None
+    with pytest.raises(LoadError) as error:
+        run_sequence(SEQUENCE_CC, SEQUENCE_ON, SEQUENCE_OFF)
+    assert calls.count("open_resource") == 1
+    assert fake.calls.count("INP OFF") == 1
+    assert error.value.code == "sequence_cleanup_unconfirmed"
+    assert error.value.details["original_error"]["code"] == "input_off_not_confirmed"
+    assert error.value.details["cleanup"]["reason"] == "explicit_off_unconfirmed"

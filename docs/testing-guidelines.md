@@ -469,3 +469,22 @@ the command and any limitation. Dependency download or installation failures
 must be reported; a partial check without dependencies is not a full install
 pass. Keep run-specific evidence in ignored or separately shared artifacts,
 not tracked public documentation.
+
+## Software Sequence focused checks
+
+Run `tests/test_sequence.py` and select Sequence cases in `test_control_cli.py`,
+`test_worker.py`, `test_hardware_validation.py` and
+`test_live_validation_script.py`. Cover original decimal tokens, complete
+preflight, fresh Fixed setup before each ON, loop end OFF, shared simulator state,
+interruptible Wait, one-job admission, partial JSON results, and TRACE recovery
+restrictions. Use recording Fake VISA for the CLI-only validation scope,
+single-session Fixed setup and readback, Stop cleanup, uncertain replies, and
+refusal before VISA in ordinary CLI/Worker LIVE.
+
+Use `scripts/preflight-cli.ps1 -SequenceOnly`, and exercise
+`live-cli-check.ps1 -Modes sequence` with `-PlanOnly` and unattended refusal
+using a fictional resource and blocked VISA. Verify the four fixed plans,
+deadline and report redaction. Run existing help/version, Input/Fixed, and
+read-only checks affected by shared execution paths and Ruff on changed
+Python files. Hardware validation requires separate authorization and the
+operator procedure in the [CLI guide](cli/README.md#contributor-software-sequence-validation--貢獻者實機驗證).

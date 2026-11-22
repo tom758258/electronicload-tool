@@ -1075,6 +1075,108 @@ stores settings and register state. Physical trip timing and power limiting
 require the [contributor procedure](#contributor-protection-validation).
 Ordinary CLI and Worker requests support simulation and dry-run only.
 
+## Software Sequence
+
+Create a UTF-8 JSON file with `version: 1`, an integer `loop_count` from 1 to
+255, and 1 to 255 steps. At most 10,000 steps may run after expansion.
+Every step has exactly `action` and `arguments`.
+
+```json
+{
+  "version": 1,
+  "loop_count": 1,
+  "steps": [
+    {"action": "set-cc", "arguments": {"current": 0.1, "range": "auto"}},
+    {"action": "input-on", "arguments": {}},
+    {"action": "wait", "arguments": {"seconds": 0.25}},
+    {"action": "measure", "arguments": {}},
+    {"action": "input-off", "arguments": {}},
+    {"action": "input-state", "arguments": {}}
+  ]
+}
+```
+
+| Action | Arguments |
+| --- | --- |
+| `set-cc` | `current` in A and `range`; optional paired `rise_slew` and `fall_slew` in A/µs for offline use |
+| `set-cv` | `voltage` in V and `range` |
+| `set-cr` | `resistance` in Ω and `range` |
+| `set-cw` | `power` in W |
+| `input-on`, `input-off`, `measure`, `input-state` | Empty object `{}` |
+| `wait` | Finite decimal `seconds` from 0 to 3600, inclusive |
+
+Range is `auto`, `low` or `high`. Write setpoints and Wait as JSON numbers.
+Every execution starts with an Input OFF check. A Sequence never changes a
+load that starts ON. Insert a fresh Fixed setup before **every** `input-on`,
+including later in the same loop, and apply setup only with Input OFF. Each
+loop must end OFF. Read-only steps may follow `input-off`, and a loop with no
+ON needs no explicit OFF. The entire document is checked before starting.
+`fresh_fixed_setup_required` reports which ON step needs a new setup.
+
+```powershell
+electronicload-tool sequence --file sequence.json --dry-run
+electronicload-tool sequence --file sequence.json --simulate --confirm
+```
+
+The preview requires no confirmation. Runs with any `input-on` require a
+new confirmation each time. Results are JSON, with one V/I/P record per
+`measure` and a final verified Input state. For Worker requests, use
+`arguments.document` and `arguments.confirm_input_on` as described in the
+[Worker contract](../contracts/electronicload-worker-contract.md#software-sequence).
+
+### Software Sequence（繁體中文）
+
+建立 UTF-8 JSON 檔，包含 `version: 1`、1 至 255 的整數 `loop_count`
+及 1 至 255 個步驟。展開後最多執行 10,000 個步驟，每步只包含
+`action` 和 `arguments`。範例、參數與單位如上表。Range 可選
+`auto`、`low` 或 `high`，Setpoint 與 Wait 必須使用 JSON 數字。Wait
+接受 0 至 3600 秒的有限小數，包含端點。CC 的上升和下降 Slew 必須成對提供，
+限離線使用。
+
+正式執行前會確認 Input OFF。若起始已 ON，會拒絕執行並保留原狀態。
+**每次** `input-on` 前都要在 Input OFF 時重新設定 Fixed Setpoint，
+同一輪再次 ON 也要重新設定。每輪結束時必須 OFF。`input-off` 後可以
+保留只讀步驟，未使用 ON 的輪次可以省略 OFF 步驟。整份文件會在第一步前預檢，
+`fresh_fixed_setup_required` 會指出須補上新設定的 ON 步驟。
+
+使用上方的 `--dry-run` 指令預檢，不需確認。每次正式執行若含
+`input-on`，都要重新提交確認。CLI 以 `--file` 讀取 JSON，執行結果為
+JSON，每個 `measure` 回傳一筆 V／I／P，並包含讀回確認的最終 Input 狀態。
+Worker 使用 `arguments.document` 與 `arguments.confirm_input_on`。
+[Worker 契約](../contracts/electronicload-worker-contract.md#software-sequence)
+
+### Contributor Software Sequence validation / 貢獻者實機驗證
+
+For separately authorized physical runs, use the CLI-only
+`sequence --file <file> --hardware-validation sequence --resource <USB-INSTR> --backend system --confirm --json`
+with the registered IT8812C over USB/System VISA. The entire run uses one
+session. Fixed setup and Input switching verify the applicable interlocks
+and settings. Use an exclusive instrument, a bounded source/DUT, and an
+independent manual OFF method. A lost or timed-out session requires
+independent OFF when the state is unknown. Ordinary CLI and Worker LIVE are
+closed for Sequence.
+
+Select `-Modes sequence` on its own with a dedicated 5 V / 0.8 A source.
+Four fixed documents exercise 0.1 A CC, 3 V CV, 1000 Ω CR and 0.10 W CW.
+Each has one ON, an operator confirmation before dispatch, measurement,
+and verified OFF. The script retains its 30 s command and 900 s total
+deadlines. The Core handles trusted cleanup on the existing session. If
+the process times out or Input OFF is unconfirmed, the script reports
+independent manual OFF and does not open another session for cleanup.
+
+同意實機驗證後，使用上方 CLI 專用指令及明確指定的 USB VISA Resource。
+整份 Sequence 使用同一個 IT8812C USB／System VISA Session，確認 Fixed
+設定與 Input 切換的適用安全條件。實機操作需獨占儀器，使用受限電源與 DUT，
+並備妥獨立手動 OFF 手段。Session 失信或逾時且無法確認 Input 狀態時，
+須獨立執行 OFF。一般 CLI 與 Worker 維持拒絕 Sequence LIVE。
+
+單獨選擇 `-Modes sequence`，使用專用 5 V／0.8 A 電源。四份固定文件
+分別驗證 0.1 A CC、3 V CV、1000 Ω CR、0.10 W CW。每份只有一次
+ON，送出前須操作員確認，並執行量測及確認 OFF。Script 保留單一命令
+30 秒與總時限 900 秒。通訊可信時由 Core 在原 Session 處理清理；
+若程序逾時或無法確認 Input OFF，Script 會要求獨立手動 OFF，
+且不另開 Session 清理。
+
 ## Worker and Automation
 
 Standalone simulation commands each start with fresh state. To exercise a CV/CR/CW

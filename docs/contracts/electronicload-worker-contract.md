@@ -35,7 +35,8 @@ Common contracts remain authoritative for the HTTP and JSONL envelopes.
 - Stop acknowledges without performing VISA I/O in the HTTP handler, rejects
   further submissions, and prevents a not-yet-sent `INP ON`. Blocking VISA I/O
   already in progress is not forcibly interrupted. Worker Stop **does not**
-  imply Input OFF or authorize sending an automatic OFF.
+  imply Input OFF. An active Software Sequence performs its own bounded OFF
+  cleanup when it has attempted Input ON and still owns that transition.
 - Normal shutdown emits `summary` and terminates stdout (EOF) with an observed
   process exit. A stop acknowledgement is not shutdown confirmation.
 
@@ -49,6 +50,7 @@ Common contracts remain authoritative for the HTTP and JSONL envelopes.
 | `fixed-status` | `{}` | Fixed setpoint and applicable Range; offline only |
 | `fixed-slew-status` | `{}` | Fixed CC rising and falling slew; offline only |
 | `measure` | `{}` | `voltage_v`, `current_a`, `power_w` |
+| `sequence` | `{"document":{...},"confirm_input_on":true}` (confirmation when running with ON) | One async Software Sequence result, offline only |
 | `measure-min-max` | `{}` or `{"metric":"voltage-min"\|"voltage-max"\|"current-min"\|"current-max"}` | All four native extrema, or only the selected field; offline only |
 | `measure-discharge` | `{}` or `{"metric":"capacity"\|"time"}` | `capacity_ah`, `discharge_time_s`, or only the selected field; offline only |
 | `scpi-version` | `{}` | `scpi_version`, a `YYYY.V` string; offline only |
@@ -109,6 +111,47 @@ A live request uses `context: {"mode": "live"}` with optional matching
 `expected_model_id`. Simulation/dry-run uses the canonical
 `planning_model_id: "itech-it8812c"`; the Worker startup mode constrains the
 request mode. Worker does **not** allow the contributor-validation override.
+
+## Software Sequence
+
+`sequence` takes a version 1 JSON document in `arguments.document`. The
+document and argument schema are described in the [CLI guide](../cli/README.md#software-sequence).
+The HTTP request limit remains 65,536 bytes. Duplicate JSON keys, nonfinite
+numbers and invalid documents return HTTP 400 without creating a job. Fixed
+setpoints and Wait use original decimal tokens. Step validation failures report
+`sequence_precheck_failed` with one-based `loop_index`, `step_index`, `action`
+and a machine-readable `reason`. The repeated document is checked from the
+same OFF/no-setup state, so static step violations report the first loop.
+
+In a run containing `input-on`, missing or false `confirm_input_on` returns
+HTTP 409. The boolean is optional in `dry_run`, whose plan gives the resolved
+steps, loop and expanded step counts, `hardware_access: false` and
+`input_on_requires_confirmation`. Decimal step arguments in the plan are
+strings. Current simulator state is neither read nor modified in a dry run.
+
+Accepted requests receive HTTP 202 and run as one serial job. Simulated steps
+share the Worker's existing simulator. A valid LIVE request on a live Worker
+fails with `unsupported_live_scope` before VISA. TRACE recovery restrictions
+apply to Sequence, and only `trace-start` supports Cancel.
+
+Execution checks Input OFF before step one and at the end of each loop. If
+Input starts ON, the terminal reports `input_not_off` and leaves it ON.
+A successful result includes `loop_count`, `completed_loops`, `completed_steps`,
+`measurements`, `input_states`, final `input_state` and `cleanup`. Each reading
+includes its one-based loop and step and the action, plus V/I/P or Input state.
+`cleanup` reports `required`, `attempted` and `off_confirmed`.
+
+An interrupted Wait or other Stop failure produces a `failed` terminal.
+With trusted communication, the execution thread attempts bounded OFF if
+the Sequence may have turned Input ON and OFF remains unconfirmed. An
+already attempted explicit OFF is never resent after that Step fails.
+Untrusted communication stops further I/O. A failed job has `result: null`;
+its `error.details` carries the progress fields above, `failed_step` (null
+outside a step), and `original_error`. If the Sequence may have turned
+Input ON or an explicit OFF could not be confirmed, the terminal uses
+`sequence_cleanup_unconfirmed` with `input_state: "UNKNOWN"` and directs the
+operator to independently switch off the load. The Worker emits no per-step
+events and creates no Sequence artifacts.
 
 ## Configuration readback
 

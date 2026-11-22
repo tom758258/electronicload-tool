@@ -642,12 +642,12 @@ def _mutation_off(session, stop):
         raise LoadError("stopping", "Configuration was blocked because Worker is stopping.")
 
 
-def _fixed_setup_guard(session, stop):
+def _fixed_setup_guard(session, stop, *, fixed_only=False):
     _mutation_off(session, stop)
     mode = _query(session, "FUNC:MODE?").upper()
     if mode == "LIST":
         raise LoadError("list_selected", "Exit LIST explicitly before Fixed setup.")
-    if mode not in {"FIX", "FIXED", "TRAN"}:
+    if mode not in ({"FIX", "FIXED"} if fixed_only else {"FIX", "FIXED", "TRAN"}):
         raise LoadError("unsafe_mode", "Cannot determine the current load mode.")
     if _flag(session, "TRAN?") != "OFF":
         raise LoadError("transient_enabled", "Disable Transient before Fixed setup.")
@@ -1017,6 +1017,102 @@ def _check_input_on_conditions(session, stop: Event | None, *, allow_cv: bool,
     return settings
 
 
+def _set_fixed_cc(session, current, range_name, stop, cc_mode_scope=None):
+    requested = validate_current(current, range_name)
+    simulated = isinstance(session, ControlSimulator)
+    guard_mode = cc_mode_scope is not None or simulated
+    allow_led_cleanup = cc_mode_scope == "cr-led" or simulated
+    setup_stop = stop if guard_mode else None
+    completed = []
+
+    def check_origin(*, before_remote):
+        if guard_mode:
+            _fixed_setup_guard(session, stop, fixed_only=cc_mode_scope == "sequence")
+        if cc_mode_scope == "sequence":
+            if _check_mode_change(session, fixed_cc=True):
+                raise LoadError("cr_led_enabled", "Disable CR-LED before Sequence setup.")
+            return False
+        if allow_led_cleanup:
+            return _check_mode_change(session, fixed_cc=True)
+        _check_cc_origin_without_led_access(session, before_remote=before_remote)
+        return False
+
+    # IT8812C hardware rejects nonzero CURR after CURR:RANG MIN
+    # (error 120). A numeric selector equal to the requested low-range
+    # setpoint was verified on physical hardware with Input OFF.
+    # Preserve the high-range MAX path.
+    range_command = (f"CURR:RANG {requested:f}" if range_name == "low"
+                     else "CURR:RANG MAX")
+    sequence = (("FUNC:MODE FIX", "fixed_mode"), ("FUNC CURR", "cc_mode"),
+                (range_command, "range"), (f"CURR {requested:f}", "current"))
+    try:
+        # Remote is a control-state change: never send it for a read-only
+        # operation or before a fresh physical Input OFF confirmation.
+        _input_off(session)
+        check_origin(before_remote=True)
+        _mutation_off(session, setup_stop)
+        _write(session, "SYST:REM")
+        if guard_mode:
+            completed.append("remote")
+        if check_origin(before_remote=False):
+            _set_led(session, False, stop)
+            completed.append("led_off")
+        for action, name in sequence:
+            if cc_mode_scope == "sequence":
+                _fixed_setup_guard(session, stop, fixed_only=True)
+            _mutation_off(session, setup_stop)
+            _write(session, action)
+            completed.append(name)
+        settings = _settings(session)
+        if (settings["function_mode"] not in {"FIX", "FIXED"}
+            or settings["function"] not in {"CURR", "CURRENT"}
+            or settings["range"] != range_name
+            or not _current_within(settings["current_a"], requested, range_name)):
+            raise LoadError("readback_mismatch", "CC setting did not match readback.", 3,
+                            requested_current_a=float(requested),
+                            requested_range=range_name,
+                            observed=settings)
+        # A successful readback of settings does not itself prove Input OFF.
+        _input_off(session)
+    except LoadError as exc:
+        exc.details["completed_steps"] = completed
+        raise
+    return {"input_state": "OFF", **settings}
+
+
+def _turn_input_on(session, check, *, on_attempt=None):
+    check()
+    # Remote can change the state observed by the first safety check.
+    _write(session, "SYST:REM")
+    settings = check()
+    try:
+        if on_attempt is not None:
+            on_attempt()
+        _write(session, "INP ON")
+        if not _confirm_input_state(session, "ON"):
+            raise LoadError("input_on_not_confirmed", "Input ON was not confirmed.", 3)
+    except LoadError as exc:
+        exc.details.update(input_state="UNKNOWN", input_on_attempted=True)
+        raise
+    return {**settings, "input_state": "ON"}
+
+
+def _turn_input_off(session):
+    # The explicit OFF operation must also enter remote mode to be effective,
+    # and never assumes VISA close or remote/local release switches Input OFF.
+    try:
+        _write(session, "SYST:REM")
+        _write(session, "INP OFF")
+        confirmed_off = _confirm_input_state(session, "OFF")
+    except LoadError as exc:
+        exc.details["input_state"] = "UNKNOWN"
+        raise
+    if not confirmed_off:
+        raise LoadError("input_off_not_confirmed", "Input OFF was not confirmed.", 3,
+                        input_state="UNKNOWN")
+    return {"input_state": "OFF"}
+
+
 def _perform(session, command: str, *, current: object | None,
              voltage: object | None, resistance: object | None, power: object | None,
              range_name: str | None, confirmed: bool, stop: Event | None,
@@ -1030,60 +1126,7 @@ def _perform(session, command: str, *, current: object | None,
     if command in CR_COMMANDS:
         return _cr_setup(session, validate_resistance(resistance, range_name), range_name, vdrop, stop)
     if command == "set-cc":
-        requested = validate_current(current, range_name)
-        simulated = isinstance(session, ControlSimulator)
-        guard_mode = cc_mode_scope is not None or simulated
-        allow_led_cleanup = cc_mode_scope == "cr-led" or simulated
-        setup_stop = stop if guard_mode else None
-        completed = []
-
-        def check_origin(*, before_remote):
-            if guard_mode:
-                _fixed_setup_guard(session, stop)
-            if allow_led_cleanup:
-                return _check_mode_change(session, fixed_cc=True)
-            _check_cc_origin_without_led_access(session, before_remote=before_remote)
-            return False
-
-        # IT8812C hardware rejects nonzero CURR after CURR:RANG MIN
-        # (error 120). A numeric selector equal to the requested low-range
-        # setpoint was verified on physical hardware with Input OFF.
-        # Preserve the high-range MAX path.
-        range_command = (f"CURR:RANG {requested:f}" if range_name == "low"
-                         else "CURR:RANG MAX")
-        sequence = (("FUNC:MODE FIX", "fixed_mode"), ("FUNC CURR", "cc_mode"),
-                    (range_command, "range"), (f"CURR {requested:f}", "current"))
-        try:
-            # Remote is a control-state change: never send it for a read-only
-            # operation or before a fresh physical Input OFF confirmation.
-            _input_off(session)
-            check_origin(before_remote=True)
-            _mutation_off(session, setup_stop)
-            _write(session, "SYST:REM")
-            if guard_mode:
-                completed.append("remote")
-            if check_origin(before_remote=False):
-                _set_led(session, False, stop)
-                completed.append("led_off")
-            for action, name in sequence:
-                _mutation_off(session, setup_stop)
-                _write(session, action)
-                completed.append(name)
-            settings = _settings(session)
-            if (settings["function_mode"] not in {"FIX", "FIXED"}
-                or settings["function"] not in {"CURR", "CURRENT"}
-                or settings["range"] != range_name
-                or not _current_within(settings["current_a"], requested, range_name)):
-                raise LoadError("readback_mismatch", "CC setting did not match readback.", 3,
-                                requested_current_a=float(requested),
-                                requested_range=range_name,
-                                observed=settings)
-            # A successful readback of settings does not itself prove Input OFF.
-            _input_off(session)
-        except LoadError as exc:
-            exc.details["completed_steps"] = completed
-            raise
-        return {"input_state": "OFF", **settings}
+        return _set_fixed_cc(session, current, range_name, stop, cc_mode_scope)
     if command == "set-cv":
         requested = validate_voltage(voltage, range_name)
         _input_off(session)
@@ -1121,36 +1164,12 @@ def _perform(session, command: str, *, current: object | None,
     if command == "input-on":
         if not confirmed:
             raise LoadError("confirmation_required", "Input ON needs explicit confirmation.")
-        _check_input_on_conditions(session, stop, allow_cv=allow_cv, allow_cr=allow_cr,
-                                   allow_cw=allow_cw)
-        # The remote transition might change hardware state. Recheck every
-        # condition afterward, including the Worker stop gate, before INP ON.
-        _write(session, "SYST:REM")
-        settings = _check_input_on_conditions(session, stop, allow_cv=allow_cv, allow_cr=allow_cr,
-                                              allow_cw=allow_cw)
-        try:
-            _write(session, "INP ON")
-            confirmed_on = _confirm_input_state(session, "ON")
-        except LoadError as exc:
-            exc.details.update(input_state="UNKNOWN", input_on_attempted=True)
-            raise
-        if not confirmed_on:
-            raise LoadError("input_on_not_confirmed", "Input ON was not confirmed.", 3,
-                            input_state="UNKNOWN", input_on_attempted=True)
-        return {"input_state": "ON", **settings}
-    # The explicit OFF operation must also enter remote mode to be effective,
-    # and never assumes VISA close or remote/local release switches Input OFF.
-    try:
-        _write(session, "SYST:REM")
-        _write(session, "INP OFF")
-        confirmed_off = _confirm_input_state(session, "OFF")
-    except LoadError as exc:
-        exc.details["input_state"] = "UNKNOWN"
-        raise
-    if not confirmed_off:
-        raise LoadError("input_off_not_confirmed", "Input OFF was not confirmed.", 3,
-                        input_state="UNKNOWN")
-    return {"input_state": "OFF"}
+        def check():
+            return _check_input_on_conditions(session, stop, allow_cv=allow_cv,
+                                              allow_cr=allow_cr, allow_cw=allow_cw)
+
+        return _turn_input_on(session, check)
+    return _turn_input_off(session)
 
 
 def execute(command: str, *, mode: str = "live", resource: str | None = None,

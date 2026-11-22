@@ -4,6 +4,7 @@ Default: the established validation modes, with common read-only safety precheck
 -Modes selects any supported validation mode, including trace, cr-led, current-slow-rise,
 trigger and input-timer. Omitted -Modes selects all default modes.
 -Modes protection selects the separate Protection validation procedure.
+-Modes sequence selects four bounded Fixed Software Sequence trials.
 -Modes readback checks existing settings with Input OFF and without changing the instrument.
 -InputTimerOnly is a backward-compatible shortcut for the input-timer-only trial.
 Requires approved source/DUT limits and interactive confirmation before hardware access.
@@ -65,7 +66,7 @@ if ($InputTimerOnly) {
 } elseif (-not $PSBoundParameters.ContainsKey('Modes')) {
     $Modes = $supportedModes
 }
-$supportedModes += @('protection','readback')
+$supportedModes += @('protection','readback','sequence')
 $requestedModes = @($Modes | ForEach-Object { $_ -split ',' } |
     ForEach-Object { $_.Trim().ToLowerInvariant() })
 # Keep the established trial order and run each selected mode only once.
@@ -76,6 +77,7 @@ $triggerSelected = 'trigger' -in $selectedModes
 $timerSelected = 'input-timer' -in $selectedModes
 $protectionSelected = 'protection' -in $selectedModes
 $readbackSelected = 'readback' -in $selectedModes
+$sequenceSelected = 'sequence' -in $selectedModes
 $featureSelected = @($selectedModes | Where-Object { $_ -in $featureModes }).Count -gt 0
 $featureOnly = $featureSelected -and @($selectedModes | Where-Object { $_ -notin $featureModes }).Count -eq 0
 $traceCommunicationUntrusted = $false
@@ -129,6 +131,7 @@ $protectionTrials = @(
     @{name='software-power'; settings=[ordered]@{software_power_limit='0.50';software_power_delay='1'}; flags=@('OP','PS')},
     @{name='hardware-power'; settings=[ordered]@{hardware_power_limit='0.50'}; flags=@()}
 )
+$sequenceDocuments = $null
 $commandIndex = 0
 $report = [ordered]@{
     status = 'NOT RUN'
@@ -155,6 +158,9 @@ $report = [ordered]@{
     results = @()
 }
 
+if ($sequenceSelected) {
+    $report['sequence_input_off_unconfirmed'] = $false
+}
 if ($traceSelected) {
     $report['trace_start_deadline_ms'] = $traceStartDeadlineMs
     $report['trace_safe_shutdown_unconfirmed'] = $false
@@ -193,7 +199,14 @@ function Save-Report {
                     $safeArguments[$csvIndex + 1] = '<redacted>'
                 }
             }
+            if ($entry.command -ceq 'sequence') {
+                $fileIndex = [Array]::IndexOf($safeArguments, '--file')
+                $safeArguments[$fileIndex + 1] = '<redacted>'
+            }
             $case.arguments = $safeArguments
+        }
+        foreach ($field in @('sequence_plan','sequence_evidence')) {
+            if ($entry.Contains($field)) { $case[$field] = $entry[$field] }
         }
         if ($entry.Contains('error_code')) { $case.error_code = $entry.error_code }
         if ($entry.Contains('expected_error')) { $case.expected_error = $entry.expected_error }
@@ -282,6 +295,9 @@ function Save-Report {
         prechecks = $script:report.prechecks
         cases = $cases
         summary_counts = $counts
+    }
+    if ($script:sequenceSelected) {
+        $public['sequence_input_off_unconfirmed'] = $script:report.sequence_input_off_unconfirmed
     }
     if ($script:traceSelected) {
         $public['trace_start_deadline_ms'] = $script:traceStartDeadlineMs
@@ -491,6 +507,9 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
             $code = [string]$result.error.code
             $details = $result.error.details
             $entry['error_code'] = $(if ($code -cmatch '^[a-z_]+$') { $code } else { 'execution_failed' })
+            if ($Command -ceq 'sequence' -and $result.ok -eq $false) {
+                Save-SequenceEvidence $entry $details
+            }
             if ($Command -ceq 'protection-set' -and $result.ok -eq $false) {
                 $progress = Get-ProtectionWriteProgress $details
                 if ($null -ne $progress) { $entry['protection_write_progress'] = $progress }
@@ -819,6 +838,46 @@ function Get-ProtectionSetArgs($Settings) {
         if ($Settings[$field] -is [bool]) {
             if ($Settings[$field]) { 'on' } else { 'off' }
         } else { [string]$Settings[$field] }
+    }
+}
+
+function Save-SequenceEvidence($Entry, $Result) {
+    $offConfirmed = $Result.input_state -ceq 'OFF' -and $Result.cleanup.off_confirmed -eq $true
+    $script:report.sequence_input_off_unconfirmed = -not $offConfirmed
+    $Entry.sequence_evidence = [ordered]@{
+        completed_steps = $Result.completed_steps
+        measurements = $Result.measurements
+        input_states = $Result.input_states
+        input_state = $(if ($Result.input_state -cin @('ON','OFF')) { $Result.input_state } else { 'UNKNOWN' })
+        off_confirmed = $offConfirmed
+        cleanup_attempted = $Result.cleanup.attempted -eq $true
+        failed_step = $Result.failed_step
+        original_error_code = $Result.original_error.code
+    }
+}
+
+function New-SequencePlan {
+    $script:sequenceDocuments = Join-Path $repo ".tmp_tests/$traceRunName-sequence"
+    [void][IO.Directory]::CreateDirectory($script:sequenceDocuments)
+    $setups = [ordered]@{
+        cc = @{current=0.1;range='auto'}
+        cv = @{voltage=3;range='auto'}
+        cr = @{resistance=1000;range='auto'}
+        cw = @{power=0.10}
+    }
+    foreach ($mode in $setups.Keys) {
+        $file = Join-Path $script:sequenceDocuments "$mode.json"
+        $document = @{version=1;loop_count=1;steps=@(
+            @{action="set-$mode";arguments=$setups[$mode]},
+            @{action='input-on';arguments=@{}},
+            @{action='input-state';arguments=@{}},
+            @{action='wait';arguments=@{seconds=0.25}},
+            @{action='measure';arguments=@{}},
+            @{action='input-off';arguments=@{}},
+            @{action='input-state';arguments=@{}}
+        )}
+        [IO.File]::WriteAllText($file, ($document | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
+        @{name="sequence-$mode";command='sequence';args=@('--file',$file,'--hardware-validation','sequence','--confirm')}
     }
 }
 
@@ -1313,6 +1372,10 @@ try {
     if ($requestedModes.Count -eq 0 -or @($requestedModes | Where-Object { $_ -notin $supportedModes }).Count -gt 0) {
         throw "Modes must contain one or more of: $($supportedModes -join ', ')."
     }
+    if ($sequenceSelected -and ($selectedModes.Count -ne 1 -or
+        $SourceVoltageLimitV -ne 5 -or $SourceCurrentLimitA -ne 0.8)) {
+        throw 'Select Sequence alone with a dedicated 5 V / 0.8 A source.'
+    }
     if ($readbackSelected -and $selectedModes.Count -ne 1) {
         throw 'Select the readback-only trial on its own.'
     }
@@ -1335,7 +1398,7 @@ try {
         }
         $report.prechecks.current = 'PASS'
     }
-    $report.script_current_ceiling_a = if ($protectionSelected) { 0.20 } else { $scriptCurrentCeilingA }
+    $report.script_current_ceiling_a = if ($protectionSelected) { 0.20 } elseif ($sequenceSelected) { 0.10 } else { $scriptCurrentCeilingA }
     if ($timerSelected) {
         & $python -c 'import sys; from electronicload_tool_core.control import validate_input_timer; value=validate_input_timer(int(sys.argv[1])); sys.exit(0 if 3 <= value <= 10 else 2)' $TimerSeconds
         if ($LASTEXITCODE -ne 0) { throw 'Timer validation seconds must be an integer from 3 through 10.' }
@@ -1619,6 +1682,7 @@ try {
               condition='Cleanup Disable confirmed with Input OFF'}
         )
     }
+    if ($sequenceSelected) { $planned += @(New-SequencePlan) }
     if ($triggerSelected) { New-TriggerPlan }
     if ($protectionSelected) { New-ProtectionPlan }
     foreach ($step in ($planned | Where-Object { $_.ContainsKey('cr_handoff_after') })) {
@@ -1661,6 +1725,10 @@ try {
         if ($step.command -in @('set-transient-cc','set-transient-cv','set-transient-cr')) {
             $plannedRanges[$step.name] = $plan.result.expected_configuration.range
         }
+        if ($step.command -ceq 'sequence') {
+            $entry = $report.results | Where-Object { $_.name -eq $step.name } | Select-Object -First 1
+            $entry.sequence_plan = $plan.result.steps
+        }
         $report.plans += $plan
     }
     $report.prechecks.plan = 'PASS'
@@ -1674,6 +1742,9 @@ try {
     if ($readbackSelected) {
         Write-Host 'Readback requires Fixed CC and confirmed Input OFF. It queries existing settings only.'
         Write-Host 'Use known front-panel settings as expected values. Incomplete comparisons are recorded as NOT RUN.'
+    }
+    if ($sequenceSelected) {
+        Write-Host 'Sequence: four Fixed trials, each with a separate confirmation, one ON, measurement and confirmed OFF.'
     }
     if ($protectionSelected) {
         Write-Host 'Protection: independent software current trip, software power trip and hardware power limit trials at 0.20 A.'
@@ -1736,7 +1807,9 @@ try {
     # Focused selections keep their preflight; mixed/all-mode runs check
     # the original base and only the chosen feature-specific offline scopes.
     $preflightScript = Join-Path $PSScriptRoot 'preflight-cli.ps1'
-    if ($readbackSelected) {
+    if ($sequenceSelected) {
+        & $preflightScript -SequenceOnly
+    } elseif ($readbackSelected) {
         & $preflightScript -ReadbackOnly
     } elseif ($protectionSelected) {
         & $preflightScript -ProtectionOnly
@@ -1857,9 +1930,25 @@ try {
         if ($protectionSelected -and $step.name -ceq 'input-state') {
             $report.protection_input_off_unconfirmed = $true
         }
+        if ($step.command -ceq 'sequence') {
+            $answer = Read-ValidationAnswer "Confirm dedicated source, reviewed VISA runtime and safe $($step.name) trial. Press Enter to allow one Input ON" $step.name -DiscardPendingKeys
+            if ($null -eq $answer -or $answer -cne '') {
+                Fail-Case $step.name 'operator_confirmation_required' 'Sequence trial was not confirmed.'
+            }
+            $report.sequence_input_off_unconfirmed = $true
+        }
         $result = Invoke-LiveCommand -Command $step.command -CaseName $step.name `
             -ExtraArgs $step.args -DeadlineMs $commandDeadline -ExpectedError $step.expected_error `
             -AllowCrHandoff:($step.allow_cr_handoff -eq $true)
+        if ($step.command -ceq 'sequence') {
+            $entry = $report.results | Where-Object { $_.name -eq $step.name } | Select-Object -First 1
+            Save-SequenceEvidence $entry $result.result
+            if ($report.sequence_input_off_unconfirmed -or $result.result.completed_steps -ne 7 -or
+                @($result.result.measurements).Count -ne 1 -or
+                ($result.result.input_states.input_state -join ',') -cne 'ON,OFF') {
+                Fail-Case $step.name 'sequence_result_mismatch' 'Sequence measurements or Input states did not match the trial.'
+            }
+        }
         if ($step.allow_cr_handoff -and $result.ok -eq $false) { continue }
         if ($step.ContainsKey('expected_error')) {
             Write-Host "PASS $($step.name): confirmed refusal ($($step.expected_error))."
@@ -1970,7 +2059,7 @@ try {
     Write-Host "Validation did not complete: $($_.Exception.Message)"
 } finally {
     # PowerShell pipeline interruption can bypass catch and the exit after finally.
-    $validationInterrupted = ($triggerSelected -or $protectionSelected) -and
+    $validationInterrupted = ($triggerSelected -or $protectionSelected -or $sequenceSelected) -and
         $phase -in @('identify','cases') -and $report.status -eq 'NOT RUN'
     if ($validationInterrupted) { $report.status = 'FAIL' }
     if ($inputOnAttempted) {
@@ -2102,6 +2191,12 @@ try {
             $report.trigger_restore_status = 'FAIL'
             Write-Host 'WARNING: Trigger Source and Timer Interval restoration blocked by uncertain safety state; operator action required.'
         }
+    }
+    if ($sequenceSelected -and $report.sequence_input_off_unconfirmed) {
+        Write-Host 'Sequence Input OFF is unconfirmed. Use the independent manual OFF procedure immediately.'
+    }
+    if ($null -ne $sequenceDocuments) {
+        Remove-Item -LiteralPath $sequenceDocuments -Recurse -Force -ErrorAction SilentlyContinue
     }
     foreach ($artifact in $protectionArtifacts) { Save-CommandArtifacts $artifact }
     if ($protectionSelected -and $report.protection_input_off_unconfirmed) {
