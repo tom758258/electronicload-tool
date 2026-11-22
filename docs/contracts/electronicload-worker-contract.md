@@ -166,7 +166,8 @@ and creates no Sequence artifacts.
 ## Basic Workflows
 
 The four commands are independent Common v3 async jobs. The command table
-lists required arguments. The three sampling commands also accept an
+shows example arguments. `measure-log` requires `interval_s` and exactly one
+of `count` or `duration_s`. The three sampling commands also accept an
 optional local `csv` path. Both CC commands accept optional `range`, with
 `auto` as the default. CC discharge also accepts `interval_s` (defaults to
 1 second) and `cutoff_capacity_ah`. The [CLI guide](../cli/README.md#basic-workflows)
@@ -189,7 +190,11 @@ has `elapsed_s` and `stop_reason` (`completed`, `condition_met`,
 also include `sample_count` and `last_measurement` (null before the first
 sample). CC results include `current_a`, resolved `range`, `input_state`,
 and `cleanup` with `required`, `attempted`, and `off_confirmed`.
-Timed load includes `duration_s`. Discharge includes `capacity_ah`.
+Timed load includes `duration_s`. Discharge samples `voltage_v`, `current_a`
+and `power_w` in sequence and reports `capacity_ah`. When the preflight
+reads `initial_voltage_v`, the result includes it separately from the load
+samples. If the initial voltage is at or below the cutoff, the job succeeds
+with `voltage_cutoff`, zero samples, zero Ah and confirmed Input OFF.
 `csv_written: true` confirms completion of the requested export.
 There are no per-sample events or sample arrays in results.
 
@@ -202,7 +207,13 @@ instrument I/O. If OFF remains unconfirmed when the workflow might have
 changed Input state, or communication becomes untrusted in a CC run, the job
 reports `workflow_cleanup_unconfirmed`, `manual_action_required: true`, and
 the known state (`UNKNOWN` if it cannot be determined). The error tells the
-operator to independently switch off the load.
+operator to independently switch off the load. When this error occurs, the
+Worker includes the most recent such job terminal in the optional
+`summary.workflow_cleanup_failure` field, even after a subsequent successful
+job. This records historical evidence for the current Worker run. Consumers
+should retain terminal and cleanup evidence and independently confirm the
+Input state. The field leaves `last_job`, Common summary and process exit
+meanings intact.
 
 Stop interrupts the wait between samples or during timed load. A Stop or
 timeout produces a failed terminal (normally `stopping` or
@@ -210,8 +221,11 @@ timeout produces a failed terminal (normally `stopping` or
 `error.details` and `result: null`. After CSV creation, an execution or
 export failure retains the file with `csv_incomplete: true`. The CSV is
 created exclusively before sampling or enabling Input, following the
-existing local-path rules. The TRACE recovery restrictions also apply to
-these commands. Cancel is available only for `trace-start`.
+existing local-path rules. Discharge buffers the bounded sample rows and
+exports them once the OFF cleanup path has finished, including after Stop or
+timeout. A second failure exporting the rows preserves the original execution
+or cleanup error and adds `error.details.csv_export_error`. The TRACE recovery
+restrictions also apply to these commands. Cancel is available only for `trace-start`.
 
 ## Configuration readback
 

@@ -495,8 +495,10 @@ Run `tests/test_workflows.py` and select Workflow tests in
 `tests/test_worker.py`. Include the affected CLI help/version, shared
 measurements, Fixed CC/Input and Sequence checks when those paths are touched.
 Run Ruff on modified Python files. Use a controllable clock and simulated
-readbacks for cadence, timeout, trapezoidal Ah accumulation, CSV retention,
-Stop, and OFF confirmation. Check the Common v3 HTTP/JSONL boundary with the
-simulated Worker and verify LIVE refusal before VISA with the recording fake.
+readbacks for count and duration cadence, timeout, the initial voltage cutoff,
+trapezoidal Ah accumulation at the cutoff boundary, and OFF cleanup before
+CSV row export. Check the Common v3 HTTP/JSONL boundary with the simulated
+Worker, including retention of cleanup failure evidence across subsequent jobs.
+Verify LIVE refusal before VISA with the recording fake.
 The basic workflows run offline and require no release or physical-device
 acceptance.

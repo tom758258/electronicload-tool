@@ -90,6 +90,7 @@ class Runtime:
         self.fatal_error = None
         self.trace_cancel = None
         self.trace_safety = None
+        self.workflow_cleanup_failure = None
 
     def urls(self):
         base = f"http://{self.host}:{self.port}"
@@ -200,6 +201,9 @@ class Runtime:
                     "command": command, "timestamp_utc": _utc(), **outcome}
         with self.lock:
             self._record_trace_safety(command, context["mode"], outcome, session_lost)
+            if (command in WORKFLOW_COMMANDS and outcome["error"] is not None
+                    and outcome["error"]["code"] == "workflow_cleanup_unconfirmed"):
+                self.workflow_cleanup_failure = terminal
             self.last_job = terminal
             self.active_job = None
             self.trace_cancel = None
@@ -546,10 +550,12 @@ def run_worker(*, mode="simulate", resource=None, backend="system",
             trace_shutdown = ({"trace_safety": {**runtime.trace_safety,
                                                "safe_shutdown_unconfirmed": True}}
                               if runtime.trace_safety else {})
+            workflow_shutdown = ({"workflow_cleanup_failure": runtime.workflow_cleanup_failure}
+                                 if runtime.workflow_cleanup_failure else {})
             runtime.emit("summary", ok=runtime.fatal_error is None,
                          fatal_error=runtime.fatal_error,
                          last_job=runtime.last_job, exit_code=0 if runtime.fatal_error is None else 3,
-                         **trace_shutdown)
+                         **trace_shutdown, **workflow_shutdown)
             return 0 if runtime.fatal_error is None else 3
     except OSError as exc:
         runtime.emit("error", error=_error("worker", "listen_failed", "Worker HTTP bind failed.",

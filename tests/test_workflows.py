@@ -108,6 +108,15 @@ def test_periodic_sampling_skips_missed_intervals(clock, tmp_path):
         assert [float(row["elapsed_s"]) for row in csv.DictReader(file)] == [1.25, 2, 3]
 
 
+def test_measure_log_duration_ends_without_sampling_at_deadline(clock):
+    load = RecordingLoad()
+    load.input_on = True
+    result = run("measure-log", load, clock, interval_s=1, duration_s=2)
+    assert result["stop_reason"] == "duration_elapsed" and result["elapsed_s"] == 2
+    assert result["sample_count"] == load.io.count("MEAS:VOLT?") == 2
+    assert load.input_on and all(query.endswith("?") for query in load.io)
+
+
 def test_cc_timed_load_checks_settings_then_waits_then_verifies_off(clock):
     load = RecordingLoad()
     result = run("cc-timed-load", load, clock, current=0.5, duration_s=30, confirm_input_on=True)
@@ -182,6 +191,17 @@ def test_stop_during_cc_setup_prevents_input_on(clock):
     assert {"INP ON", "INP OFF"}.isdisjoint(load.io)
 
 
+def test_cc_discharge_at_initial_cutoff_never_changes_input_or_configuration(clock):
+    load = RecordingLoad()
+    result = run("cc-discharge", load, clock, current=0.5, cutoff_voltage=12, timeout_s=2,
+                 confirm_input_on=True)
+    assert result["stop_reason"] == "voltage_cutoff" and result["initial_voltage_v"] == 12
+    assert result["sample_count"] == result["capacity_ah"] == 0
+    assert result["last_measurement"] is None and result["input_state"] == "OFF"
+    assert result["cleanup"] == {"required": False, "attempted": False, "off_confirmed": True}
+    assert not load.input_on and all(query.endswith("?") for query in load.io)
+
+
 @pytest.mark.parametrize(
     ("voltages", "cutoff_ah", "timeout", "reason"),
     [
@@ -199,7 +219,8 @@ def test_cc_discharge_cutoffs_use_measured_current_and_confirm_off(clock, voltag
                 clock.now += 0.25
             return super().query(command)
 
-    load = DelayedReading({"MEAS:VOLT?": voltages, "MEAS:CURR?": ["1", "3"]})
+    load = DelayedReading({"MEAS:VOLT?": ["12", *voltages], "MEAS:CURR?": ["1", "3"],
+                           "FETC:POW?": ["4", "9.5"]})
     arguments = dict(current=0.5, cutoff_voltage=3, interval_s=1, timeout_s=timeout,
                      confirm_input_on=True)
     if cutoff_ah is not None:
@@ -213,8 +234,59 @@ def test_cc_discharge_cutoffs_use_measured_current_and_confirm_off(clock, voltag
         result = run("cc-discharge", load, clock, **arguments)
     assert result["capacity_ah"] == pytest.approx((1 + 3) / 2 * 1.25 / 3600)
     assert result["stop_reason"] == reason and result["sample_count"] == 2
-    assert result["last_measurement"] == {"voltage_v": float(voltages[-1]), "current_a": 3}
+    assert result["last_measurement"] == {"voltage_v": float(voltages[-1]), "current_a": 3, "power_w": 9.5}
     assert result["input_state"] == "OFF" and load.io.count("INP OFF") == 1
+
+
+def test_cc_discharge_stops_when_capacity_exactly_reaches_cutoff(clock):
+    load = RecordingLoad()
+    result = run("cc-discharge", load, clock, current=0.4, cutoff_voltage=3,
+                 cutoff_capacity_ah=0.001, timeout_s=9.5, confirm_input_on=True)
+    assert result["stop_reason"] == "capacity_cutoff" and result["capacity_ah"] == 0.001
+    assert result["sample_count"] == 10 and result["elapsed_s"] == 9
+    assert result["cleanup"]["off_confirmed"] and not load.input_on
+
+
+@pytest.mark.parametrize(("reason", "off_at"), [("voltage_cutoff", 1), ("timeout", 1.5), ("stopped", 1)])
+def test_discharge_finishes_off_cleanup_before_slow_csv_rows(clock, tmp_path, monkeypatch, reason, off_at):
+    class TimedLoad(RecordingLoad):
+        def query(self, command):
+            reply = super().query(command)
+            if command == "FETC:POW?" and clock.now == 1 and reason == "stopped":
+                clock.set()
+            return reply
+
+        def write(self, command):
+            if command == "INP OFF":
+                assert clock.now == off_at
+            super().write(command)
+
+    load = TimedLoad({"MEAS:VOLT?": ["12", "4", "3" if reason == "voltage_cutoff" else "4"]})
+    original_write = csv.DictWriter.writerows
+
+    def slow_write(writer, rows):
+        for row in rows:
+            assert not load.input_on and load.io[-1] == "INP:STAT?"
+            clock.now += 2
+        return original_write(writer, rows)
+
+    monkeypatch.setattr(csv.DictWriter, "writerows", slow_write)
+    path = tmp_path / "discharge.csv"
+    arguments = dict(current=0.5, cutoff_voltage=3, timeout_s=1.5, confirm_input_on=True, csv=str(path))
+    if reason == "voltage_cutoff":
+        result = run("cc-discharge", load, clock, **arguments)
+        assert result["csv_written"]
+    else:
+        with pytest.raises(LoadError) as failed:
+            run("cc-discharge", load, clock, **arguments)
+        result = failed.value.details
+        assert result["csv_incomplete"]
+    assert result["stop_reason"] == reason and result["cleanup"]["off_confirmed"]
+    assert result["elapsed_s"] == off_at + 4
+    with path.open(encoding="utf-8", newline="") as file:
+        rows = list(csv.DictReader(file))
+    assert [row["sample_index"] for row in rows] == ["1", "2"]
+    assert float(rows[-1]["power_w"]) == result["last_measurement"]["power_w"]
 
 
 @pytest.mark.parametrize("scenario", ["untrusted", "off_unconfirmed", "csv_write_failed"])
@@ -226,17 +298,15 @@ def test_discharge_failure_reports_safe_state_and_retains_csv(clock, tmp_path, m
                 return
             super().write(command)
 
-    if scenario == "csv_write_failed":
-        def fail_write(self, row):
-            if "elapsed_s" in row and isinstance(row["elapsed_s"], float):
-                raise OSError("Unwritable file")
-            return original_write(self, row)
+    if scenario in {"csv_write_failed", "off_unconfirmed"}:
+        def fail_write(self, rows):
+            assert rows
+            raise OSError("Unwritable file")
 
-        original_write = workflows.csv.DictWriter.writerow
-        monkeypatch.setattr(workflows.csv.DictWriter, "writerow", fail_write)
+        monkeypatch.setattr(csv.DictWriter, "writerows", fail_write)
 
     voltage = OSError("No reply") if scenario == "untrusted" else "3"
-    load = FaultyLoad({"MEAS:VOLT?": [voltage]})
+    load = FaultyLoad({"MEAS:VOLT?": ["12", voltage]})
     path = tmp_path / "fault.csv"
     with pytest.raises(LoadError) as failed:
         run("cc-discharge", load, clock, current=0.5, cutoff_voltage=3, timeout_s=2,
@@ -255,6 +325,7 @@ def test_discharge_failure_reports_safe_state_and_retains_csv(clock, tmp_path, m
             assert load.io[-1] == "MEAS:VOLT?" and "INP OFF" not in load.io
         else:
             assert error.details["cleanup"]["error"]["code"] == "input_off_not_confirmed"
+            assert error.details["csv_export_error"] == "OSError"
             assert load.io.count("INP OFF") == 1
 
 
@@ -283,6 +354,7 @@ def test_measure_stop_keeps_partial_results_and_does_not_write_input(clock, tmp_
     ("command", "flags"),
     [
         ("measure-log", ["--interval-s", ".001", "--count", "1"]),
+        ("measure-log", ["--interval-s", "1", "--duration-s", ".01"]),
         ("measure-until", ["--interval-s", ".01", "--metric", "voltage",
                            "--operator", "ge", "--threshold", "12", "--timeout-s", "1"]),
         ("cc-timed-load", ["--current", ".5", "--duration-s", ".001", "--confirm"]),
@@ -297,6 +369,12 @@ def test_cli_workflows_use_json_with_simulator_and_refuse_live(command, flags, c
     assert main([command, *flags]) == 2
     outcome = json.loads(capsys.readouterr().out)
     assert outcome["error"]["code"] == "unsupported_live_scope"
+
+
+@pytest.mark.parametrize("flags", [[], ["--count", "1", "--duration-s", "1"]])
+def test_cli_measure_log_requires_one_stop_option(flags, capsys):
+    assert main(["measure-log", "--dry-run", "--interval-s", "1", *flags]) == 2
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "argument_error"
 
 
 def test_dry_run_previews_without_simulator_io_or_csv_creation(capsys, tmp_path, monkeypatch):
@@ -320,6 +398,7 @@ def test_dry_run_previews_without_simulator_io_or_csv_creation(capsys, tmp_path,
         ("measure-log", {"interval_s": 1, "count": True}, "argument_error"),
         ("measure-log", {"interval_s": 1, "count": 10001}, "argument_error"),
         ("measure-log", {"interval_s": 3600, "count": 25}, "argument_error"),
+        ("measure-log", {"interval_s": 1, "duration_s": 10000.001}, "argument_error"),
         ("measure-until", {"interval_s": 0.001, "metric": "power", "operator": "gt",
                            "timeout_s": 11, "threshold": 0}, "argument_error"),
         ("cc-timed-load", {"current": 0.5, "duration_s": 86401}, "argument_error"),

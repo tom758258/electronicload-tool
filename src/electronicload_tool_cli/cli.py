@@ -96,6 +96,8 @@ def main(argv: list[str] | None = None) -> int:
                        if name == ERROR_QUEUE_COMMAND else None)
         if name in WORKFLOW_COMMANDS:
             description = "Use --simulate to run or --dry-run to preview. Results are JSON."
+            if name == "measure-log":
+                description += " Use exactly one of --count and --duration-s."
         sub = subparsers.add_parser(name, allow_abbrev=False, description=description)
         sub.json_errors = json_output
         if name == "list-resources":

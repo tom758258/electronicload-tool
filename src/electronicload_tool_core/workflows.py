@@ -18,7 +18,7 @@ from .visa import require_trusted_session, validate_connection
 CC_COMMANDS = ("cc-timed-load", "cc-discharge")
 CC_OPTIONS = ("range", "confirm_input_on")
 ARGUMENTS = {
-    "measure-log": (("interval_s", "count"), ("csv",)),
+    "measure-log": (("interval_s",), ("count", "duration_s", "csv")),
     "measure-until": (("interval_s", "metric", "operator", "threshold", "timeout_s"), ("csv",)),
     "cc-timed-load": (("current", "duration_s"), CC_OPTIONS),
     "cc-discharge": (("current", "cutoff_voltage", "timeout_s"),
@@ -76,14 +76,18 @@ def validate_arguments(command, arguments, *, mode):
         interval = settings["interval_s"]
         if not MIN_INTERVAL <= interval <= MAX_INTERVAL:
             raise LoadError("argument_error", f"interval_s must be from {MIN_INTERVAL} to {MAX_INTERVAL} seconds.")
-        if "timeout_s" in settings and settings["timeout_s"] > interval * MAX_SAMPLES:
-            raise LoadError("argument_error", f"A timeout may allow at most {MAX_SAMPLES} samples.")
+        time_limit = settings.get("timeout_s", settings.get("duration_s"))
+        if time_limit is not None and time_limit > interval * MAX_SAMPLES:
+            raise LoadError("argument_error", f"A time limit may allow at most {MAX_SAMPLES} samples.")
     if command == "measure-log":
-        count = settings["count"]
-        if type(count) is not int or not 1 <= count <= MAX_SAMPLES:
-            raise LoadError("argument_error", f"count must be an integer from 1 to {MAX_SAMPLES}.")
-        if (count - 1) * interval >= MAX_SECONDS:
-            raise LoadError("argument_error", f"The last sample must be scheduled before {MAX_SECONDS} seconds.")
+        if ("count" in settings) == ("duration_s" in settings):
+            raise LoadError("argument_error", "Supply exactly one of count or duration_s.")
+        if "count" in settings:
+            count = settings["count"]
+            if type(count) is not int or not 1 <= count <= MAX_SAMPLES:
+                raise LoadError("argument_error", f"count must be an integer from 1 to {MAX_SAMPLES}.")
+            if (count - 1) * interval >= MAX_SECONDS:
+                raise LoadError("argument_error", f"The last sample must be scheduled before {MAX_SECONDS} seconds.")
     if command in CC_COMMANDS:
         if settings["current"] <= 0:
             raise LoadError("argument_error", "Load current must be positive.")
@@ -120,16 +124,19 @@ def _sample(session, quantities):
                         communication_untrusted=True) from exc
 
 
-def _measure(session, command, settings, quantities, stop, result, writer):
+def _measure(session, command, settings, quantities, stop, result, record_row):
     started = monotonic()
-    deadline = started + float(settings.get("timeout_s", MAX_SECONDS))
+    duration = settings.get("duration_s")
+    deadline = started + float(duration if duration is not None else settings.get("timeout_s", MAX_SECONDS))
     interval = float(settings["interval_s"])
     tick = 0
     discharge = command == "cc-discharge"
-    capacity = Decimal(0)
+    ampere_seconds = Decimal(0)
+    cutoff_ah = settings.get("cutoff_capacity_ah")
+    cutoff_ampere_seconds = cutoff_ah * 3600 if cutoff_ah is not None else None
     previous_time = previous_current = None
     while True:
-        due = started + tick * interval
+        due = deadline if tick >= MAX_SAMPLES else started + tick * interval
         _wait(stop, max(0, min(due, deadline) - monotonic()))
         if monotonic() >= deadline:
             break
@@ -141,19 +148,19 @@ def _measure(session, command, settings, quantities, stop, result, writer):
         if discharge:
             current = Decimal(str(reading["current_a"]))
             if previous_time is not None:
-                capacity += (previous_current + current) * Decimal(str(sampled - previous_time)) / 7200
+                ampere_seconds += (previous_current + current) * Decimal(str(sampled - previous_time)) / 2
             previous_time, previous_current = sampled, current
-            capacity_ah = float(capacity)
+            capacity_ah = float(ampere_seconds / 3600)
             if not math.isfinite(capacity_ah):
                 raise LoadError("capacity_overflow", "Integrated capacity exceeds the numeric range.", 3)
             result["capacity_ah"] = capacity_ah
         result["sample_count"] += 1
         result["last_measurement"] = reading
-        if writer is not None:
-            writer.writerow({"sample_index": result["sample_count"], "elapsed_s": sampled - started,
-                             **reading, **({"capacity_ah": result["capacity_ah"]} if discharge else {})})
+        if record_row is not None:
+            record_row({"sample_index": result["sample_count"], "elapsed_s": sampled - started,
+                        **reading, **({"capacity_ah": result["capacity_ah"]} if discharge else {})})
         _check_stop(stop)
-        if command == "measure-log" and result["sample_count"] == settings["count"]:
+        if command == "measure-log" and result["sample_count"] == settings.get("count"):
             return "completed"
         if command == "measure-until":
             field = BASIC_MEASUREMENTS[settings["metric"]][0]
@@ -162,10 +169,12 @@ def _measure(session, command, settings, quantities, stop, result, writer):
         if discharge:
             if Decimal(str(reading["voltage_v"])) <= settings["cutoff_voltage"]:
                 return "voltage_cutoff"
-            if "cutoff_capacity_ah" in settings and capacity >= settings["cutoff_capacity_ah"]:
+            if cutoff_ampere_seconds is not None and ampere_seconds >= cutoff_ampere_seconds:
                 return "capacity_cutoff"
         # Missed intervals are skipped to keep the sampling cadence without catch-up bursts.
         tick = max(tick + 1, math.floor((monotonic() - started) / interval) + 1)
+    if duration is not None:
+        return "duration_elapsed"
     raise LoadError("workflow_timeout", "Workflow reached its time limit.", 3)
 
 
@@ -198,23 +207,27 @@ def _run_cc(session, settings, stop, result, run_load):
         if result["input_state"] != "OFF":
             raise LoadError("input_not_off", "Switch off the load before starting the Workflow.")
         initial_off = True
-        cc = {"current": settings["current"], "range": settings["range"]}
-        sequence_fixed_setup(session, "set-cc", cc, stop, on_remote_attempt=remote_attempt,
-                             on_input_state=observe)
-        remote_attempted = False
-        sequence_input_on(session, ("set-cc", cc), stop, on_attempt=input_on_attempt,
-                          on_remote_attempt=remote_attempt, on_input_state=observe)
-        observe("ON")
-        setup_in_progress = False
-        result["stop_reason"] = run_load()
+        cutoff = settings.get("cutoff_voltage")
+        if cutoff is not None:
+            result["initial_voltage_v"] = _sample(session, ("voltage",))["voltage_v"]
+            _check_stop(stop)
+        if cutoff is not None and Decimal(str(result["initial_voltage_v"])) <= cutoff:
+            result["stop_reason"] = "voltage_cutoff"
+        else:
+            cc = {"current": settings["current"], "range": settings["range"]}
+            sequence_fixed_setup(session, "set-cc", cc, stop, on_remote_attempt=remote_attempt,
+                                 on_input_state=observe)
+            remote_attempted = False
+            sequence_input_on(session, ("set-cc", cc), stop, on_attempt=input_on_attempt,
+                              on_remote_attempt=remote_attempt, on_input_state=observe)
+            observe("ON")
+            setup_in_progress = False
+            result["stop_reason"] = run_load()
     except LoadError as exc:
         failure = LoadError("stopping", str(exc), 3, **exc.details) if exc.code == "stopping" else exc
     except KeyboardInterrupt:
         failure = LoadError("interrupted", "Workflow was interrupted.", 3,
                             communication_untrusted=setup_in_progress)
-    except OSError as exc:
-        failure = LoadError("workflow_csv_failed", "Could not write Workflow CSV.", 3,
-                            exception_type=type(exc).__name__)
     except Exception as exc:
         failure = LoadError("execution_failed", "Workflow execution failed.", 3,
                             exception_type=type(exc).__name__)
@@ -251,19 +264,19 @@ def _wait_load(stop, duration_s):
     return "duration_elapsed"
 
 
-def _run(session, command, settings, stop, result, quantities, writer):
+def _run(session, command, settings, stop, result, quantities, record_row):
     if command in CC_COMMANDS:
         def run_load():
             if command == "cc-timed-load":
                 return _wait_load(stop, settings["duration_s"])
-            return _measure(session, command, settings, quantities, stop, result, writer)
+            return _measure(session, command, settings, quantities, stop, result, record_row)
 
         _run_cc(session, settings, stop, result, run_load)
     else:
         _check_stop(stop)
         require_trusted_session(session)
         parse_identity(control._query(session, "*IDN?"))
-        result["stop_reason"] = _measure(session, command, settings, quantities, stop, result, writer)
+        result["stop_reason"] = _measure(session, command, settings, quantities, stop, result, record_row)
 
 
 def execute(command, *, mode="live", arguments, model_id=MODEL_ID, backend="system",
@@ -294,7 +307,6 @@ def execute(command, *, mode="live", arguments, model_id=MODEL_ID, backend="syst
     else:
         result.update(sample_count=0, last_measurement=None)
     if command == "cc-discharge":
-        quantities = ("voltage", "current")
         result["capacity_ah"] = 0.0
     elif command == "measure-until":
         quantities = (settings["metric"],)
@@ -318,22 +330,34 @@ def execute(command, *, mode="live", arguments, model_id=MODEL_ID, backend="syst
                 writer = csv.DictWriter(file, fields)
                 writer.writeheader()
                 file.flush()
-                _run(session, command, settings, stop, result, quantities, writer)
+                if command == "cc-discharge":
+                    # Keep the bounded sample rows in memory until OFF cleanup finishes.
+                    rows = []
+                    try:
+                        _run(session, command, settings, stop, result, quantities, rows.append)
+                    finally:
+                        try:
+                            writer.writerows(rows)
+                        except (OSError, csv.Error, KeyboardInterrupt) as exc:
+                            if not isinstance(exc.__context__, LoadError):
+                                raise
+                            exc.__context__.details["csv_export_error"] = type(exc).__name__
+                else:
+                    _run(session, command, settings, stop, result, quantities, writer.writerow)
             result["csv_written"] = True
         else:
             _run(session, command, settings, stop, result, quantities, None)
-    except (LoadError, OSError, KeyboardInterrupt) as exc:
+    except (LoadError, OSError, csv.Error, KeyboardInterrupt) as exc:
         error = exc
-        if isinstance(exc, KeyboardInterrupt):
+        if not isinstance(exc, LoadError) and isinstance(exc.__context__, LoadError):
+            # A CSV failure during unwind must preserve execution and safety evidence.
+            error = exc.__context__
+            error.details["csv_close_error"] = type(exc).__name__
+        elif isinstance(exc, KeyboardInterrupt):
             error = LoadError("interrupted", "Workflow was interrupted.", 3)
-        elif isinstance(exc, OSError):
-            if isinstance(exc.__context__, LoadError):
-                # Keep the original execution or cleanup error if closing CSV also fails.
-                error = exc.__context__
-                error.details["csv_close_error"] = type(exc).__name__
-            else:
-                error = LoadError("workflow_csv_failed", "Could not create or write Workflow CSV.", 3,
-                                  exception_type=type(exc).__name__)
+        elif isinstance(exc, (OSError, csv.Error)):
+            error = LoadError("workflow_csv_failed", "Could not create or write Workflow CSV.", 3,
+                              exception_type=type(exc).__name__)
         cause = error.details.get("original_error") or {}
         reason = {"workflow_timeout": "timeout", "stopping": "stopped", "interrupted": "interrupted"}
         result["stop_reason"] = result["stop_reason"] or reason.get(cause.get("code", error.code), "error")

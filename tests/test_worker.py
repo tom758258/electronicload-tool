@@ -1967,6 +1967,11 @@ def test_workflow_worker_common_jobs_validation_and_simulator_state(worker, caps
     assert call("input-state", {})["input_state"] == "OFF"
 
     assert call("measure-log", arguments["measure-log"])["sample_count"] == 2
+    assert call("measure-log", {"interval_s": 1, "duration_s": 0.02})["stop_reason"] == "duration_elapsed"
+    for options in ({}, {"count": 2, "duration_s": 1}):
+        code, rejection = http(ready["command_url"], request("measure-log", {"interval_s": 1, **options}))
+        assert code == 400 and rejection["error"]["code"] == "argument_error"
+        assert rejection["worker_job_id"] is None
     assert call("measure-until", arguments["measure-until"])["stop_reason"] == "condition_met"
     assert call("cc-timed-load", arguments["cc-timed-load"])["stop_reason"] == "duration_elapsed"
     assert call("cc-discharge", {**arguments["cc-discharge"], "csv": str(path)})["csv_written"]
@@ -2004,6 +2009,34 @@ def test_workflow_worker_stop_waits_for_off_confirmation(trace_worker_with_sessi
     assert not load.input_on
     summary = events.get(timeout=5)
     assert summary["event"] == "summary" and summary["last_job"]["error"] == terminal["error"]
+    assert "workflow_cleanup_failure" not in summary
+
+
+def test_worker_summary_keeps_workflow_cleanup_failure_after_later_success(trace_worker_with_session):
+    from electronicload_tool_core.simulator import ControlSimulator
+
+    class IgnoresInputOff(ControlSimulator):
+        def write(self, command):
+            if command != "INP OFF":
+                super().write(command)
+
+    load = IgnoresInputOff()
+    ready, events = trace_worker_with_session(load)
+    code, accepted = http(ready["command_url"], request(
+        "cc-timed-load", {"current": 0.5, "duration_s": 0.001, "confirm_input_on": True}))
+    assert code == 202
+    failed = wait_finished(events, accepted["worker_job_id"])
+    assert failed["error"]["code"] == "workflow_cleanup_unconfirmed"
+    assert failed["error"]["details"]["manual_action_required"] and load.input_on
+
+    code, accepted = http(ready["command_url"], request("measure"))
+    assert code == 202 and wait_finished(events, accepted["worker_job_id"])["ok"]
+    assert http(ready["stop_url"], {"schema_version": 3})[0] == 202
+    summary = events.get(timeout=5)
+    assert summary["event"] == "summary" and summary["ok"] and summary["exit_code"] == 0
+    assert summary["last_job"]["worker_job_id"] == accepted["worker_job_id"] and load.input_on
+    evidence = summary["workflow_cleanup_failure"]
+    assert evidence["worker_job_id"] == failed["worker_job_id"] and evidence["error"] == failed["error"]
 
 
 def test_workflow_worker_valid_live_jobs_fail_before_fake_visa(capsys, fake_visa):
