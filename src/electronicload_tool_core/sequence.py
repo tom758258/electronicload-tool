@@ -118,6 +118,7 @@ class _Execution:
     def __init__(self, loops, live, stop):
         self.live = live
         self.stop = stop
+        self.identified = False
         self.result = {"loop_count": loops, "completed_loops": 0, "completed_steps": 0,
                        "measurements": [], "input_states": [], "input_state": "UNKNOWN",
                        "cleanup": {"required": False, "attempted": False, "off_confirmed": False}}
@@ -144,6 +145,7 @@ class _Execution:
         _check_stop(self.stop)
         require_trusted_session(session)
         parse_identity(control._query(session, "*IDN?"))
+        self.identified = True
         self.result["input_state"] = read_measurement(session, "input-state")["input_state"]
         if self.result["input_state"] != "OFF":
             raise LoadError("input_not_off", "Sequence requires confirmed Input OFF before the first step.")
@@ -201,8 +203,8 @@ class _Execution:
         if untrusted or self.explicit_off_attempted:
             last_observed_on = self.result["input_state"] == "ON"
             self.result["input_state"] = "UNKNOWN"
-            if (last_observed_on or self.owns_input or self.explicit_off_attempted or self.remote_attempted
-                    or (self.live and self.explicit_off_needs_loop_check)):
+            if ((self.live and self.identified) or last_observed_on or self.owns_input
+                    or self.explicit_off_attempted or self.remote_attempted):
                 cleanup["reason"] = ("session_untrusted" if untrusted
                                      else "explicit_off_unconfirmed")
         elif self.owns_input:

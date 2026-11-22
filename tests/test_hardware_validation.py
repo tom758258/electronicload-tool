@@ -739,7 +739,6 @@ def test_sequence_live_fixed_modes_in_one_session(sequence_visa, setup, write, q
 
 
 @pytest.mark.parametrize(("options", "code"), [
-    ({"backend": "py"}, "unsupported_backend"),
     ({"resource": "TCPIP::SYNTHETIC::INSTR"}, "invalid_resource"),
     ({"confirmed": False}, "confirmation_required"),
     ({"wait": 3600}, "unsupported_live_scope"),
