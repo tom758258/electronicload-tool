@@ -5,8 +5,7 @@ import math
 import operator
 from decimal import Decimal
 from pathlib import Path
-from threading import Event
-from time import monotonic
+from time import monotonic, sleep
 
 from . import control
 from .errors import LoadError
@@ -100,8 +99,17 @@ def validate_arguments(command, arguments, *, mode):
 
 
 def _check_stop(stop):
-    if stop.is_set():
+    if stop is not None and stop.is_set():
         raise LoadError("stopping", "Workflow was stopped.", 3)
+
+
+def _wait(stop, seconds):
+    if stop is None:
+        # Console Ctrl+C can interrupt sleep on Windows Python versions whose locks cannot.
+        sleep(seconds)
+    else:
+        stop.wait(seconds)
+    _check_stop(stop)
 
 
 def _sample(session, quantities):
@@ -122,8 +130,7 @@ def _measure(session, command, settings, quantities, stop, result, writer):
     previous_time = previous_current = None
     while True:
         due = started + tick * interval
-        stop.wait(max(0, min(due, deadline) - monotonic()))
-        _check_stop(stop)
+        _wait(stop, max(0, min(due, deadline) - monotonic()))
         if monotonic() >= deadline:
             break
         reading = _sample(session, quantities)
@@ -240,8 +247,7 @@ def _run_cc(session, settings, stop, result, run_load):
 
 
 def _wait_load(stop, duration_s):
-    stop.wait(float(duration_s))
-    _check_stop(stop)
+    _wait(stop, float(duration_s))
     return "duration_elapsed"
 
 
@@ -277,7 +283,6 @@ def execute(command, *, mode="live", arguments, model_id=MODEL_ID, backend="syst
     if simulator is not None and not isinstance(simulator, ControlSimulator):
         raise LoadError("argument_error", "Workflow execution requires a ControlSimulator.")
     session = simulator if simulator is not None else ControlSimulator()
-    stop = stop if stop is not None else Event()
     result = {"stop_reason": None}
     quantities = tuple(BASIC_MEASUREMENTS)
     if command in CC_COMMANDS:

@@ -120,6 +120,21 @@ def test_cc_timed_load_checks_settings_then_waits_then_verifies_off(clock):
     assert {"sample_count", "capacity_ah", "csv_written"}.isdisjoint(result)
 
 
+def test_standalone_interrupt_during_timed_wait_verifies_off(monkeypatch):
+    load = RecordingLoad()
+
+    def interrupt_wait(seconds):
+        assert seconds == 30 and load.input_on
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(workflows, "sleep", interrupt_wait)
+    with pytest.raises(LoadError) as failed:
+        workflows.execute("cc-timed-load", mode="simulate", simulator=load,
+                          arguments={"current": 0.5, "duration_s": 30, "confirm_input_on": True})
+    assert failed.value.code == "interrupted" and failed.value.details["stop_reason"] == "interrupted"
+    assert failed.value.details["cleanup"]["off_confirmed"] and not load.input_on
+
+
 @pytest.mark.parametrize("scenario", ["initial_on", "readback_mismatch", "csv_exists", "input_timer"])
 def test_cc_preconditions_prevent_input_on(clock, tmp_path, scenario):
     load = RecordingLoad()

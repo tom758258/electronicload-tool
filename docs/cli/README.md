@@ -1196,7 +1196,8 @@ Sequence LIVE。
 Each command runs independently in the CLI or as one Worker job. Use
 `--simulate` to run or `--dry-run` to preview validated arguments without
 waiting, reading the simulator, or creating files. CLI runs return one JSON
-object. These commands are offline only. The simulator uses a fixed 12 V
+object. Press Ctrl+C to interrupt a CLI run. These commands are offline only.
+The simulator uses a fixed 12 V
 source, so a discharge simulation at a 3 V cutoff needs a time or capacity
 limit to stop.
 
@@ -1250,8 +1251,9 @@ For Worker argument names, results and Stop behavior, see the
 
 每條命令可獨立在 CLI 執行，也可提交為一個 Worker 工作。使用
 `--simulate` 執行，或用 `--dry-run` 預覽已驗證的參數。預覽不等待、
-不讀取模擬器，也不建立檔案。CLI 回傳單一 JSON 物件。這些指令僅供
-離線使用。模擬電壓固定為 12 V，因此用 3 V 截止模擬放電時，會由
+不讀取模擬器，也不建立檔案。CLI 回傳單一 JSON 物件，可按 Ctrl+C
+中斷執行。這些指令僅供離線使用。模擬電壓固定為 12 V，因此用 3 V
+截止模擬放電時，會由
 時間或容量限制結束。
 
 | 指令 | 必填選項 | 選填選項 |
