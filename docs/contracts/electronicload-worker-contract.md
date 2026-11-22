@@ -150,14 +150,12 @@ its `error.details` carries the progress fields above, `failed_step` (null
 outside a step), and `original_error`. When Input OFF remains unconfirmed
 after attempting to switch Input or entering Remote during setup or Input ON,
 the terminal uses `sequence_cleanup_unconfirmed` and directs the operator to
-independently switch off the load. It reports `input_state: "ON"` if a post-Remote
-readback observes ON or if Input is observed ON again after the Sequence verified
-its own OFF within the same loop. When a Fixed settings readback observes ON
-and the settings do not match, the terminal also reports ON, gives the same
-manual OFF instruction, and preserves `readback_mismatch` in `original_error`.
-It reports `"UNKNOWN"` when the Input state cannot be determined. If
-communication is lost after the latest Input readback observed ON, the
-terminal gives the same manual OFF instruction and preserves the
+independently switch off the load. Once the initial OFF check succeeds, a
+failure with Input still observed ON gives the same instruction, reports
+`input_state: "ON"` and `cleanup.reason: "input_not_off"`, and preserves the
+original failure. It reports `"UNKNOWN"` when the Input state cannot be
+determined. If communication is lost after the latest Input readback observed
+ON, the terminal gives the same manual OFF instruction and preserves the
 communication error in `original_error`. The Worker emits no per-step events
 and creates no Sequence artifacts.
 

@@ -164,9 +164,14 @@ def test_each_loop_verifies_off_before_running_the_next(monkeypatch):
         return query(command)
 
     monkeypatch.setattr(sim, "query", read)
+    monkeypatch.setattr(sim, "write", lambda _: pytest.fail("read-only Sequence wrote to the load"))
     with pytest.raises(LoadError) as error:
         sequence.execute(document(MEASURE, loops=2), mode="simulate", simulator=sim)
-    assert error.value.code == "input_not_off"
-    assert error.value.details["input_state"] == "ON"
-    assert error.value.details["completed_loops"] == 0
-    assert len(error.value.details["measurements"]) == 1 and sim.input_on
+    assert error.value.code == "sequence_cleanup_unconfirmed"
+    assert "Independently switch off" in str(error.value)
+    details = error.value.details
+    assert details["original_error"]["code"] == "input_not_off"
+    assert details["cleanup"]["reason"] == "input_not_off"
+    assert details["input_state"] == "ON" and not details["cleanup"]["off_confirmed"]
+    assert details["completed_loops"] == 0
+    assert len(details["measurements"]) == 1 and sim.input_on

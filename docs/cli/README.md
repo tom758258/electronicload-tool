@@ -1167,14 +1167,13 @@ and verified OFF. The script requires operator confirmation before each trial
 and enforces a 30 s command deadline and 900 s total deadline. The Core handles
 trusted cleanup on the existing session. The CLI directs the operator to
 switch off the load independently if a Remote transition during setup or Input ON
-ends without a fresh OFF readback, if a mismatched Fixed settings readback
-observes ON, or if Input is observed ON again after a verified OFF within the
-same loop. Once the instrument is identified, loss of trusted communication
-stops further commands. The CLI reports Input `UNKNOWN`, records
-`session_untrusted` as the cleanup reason, preserves the original error, and
-gives the same independent OFF instructions. The script also gives independent
-OFF instructions if the process times out or Input OFF is unconfirmed. Cleanup
-stays within the original session.
+ends without a fresh OFF readback, or if a run fails with Input observed ON
+after the initial OFF check succeeded. Once the instrument is identified,
+loss of trusted communication stops further commands. The CLI reports Input
+`UNKNOWN`, records `session_untrusted` as the cleanup reason, preserves the
+original error, and gives the same independent OFF instructions. The script
+also gives independent OFF instructions if the process times out or Input OFF
+is unconfirmed. Cleanup stays within the original session.
 
 另行授權實機驗證後，單獨選擇 `-Modes sequence` 並使用專用 5 V／0.8 A 電源。
 Script 使用上方 CLI 貢獻者指令，以 USB／System VISA 連接已註冊的 IT8812C。
@@ -1186,8 +1185,8 @@ Sequence LIVE。
 0.10 W CW。每份只有一次 ON、0.25 秒 Wait、量測及確認 OFF。Script 在每次
 試驗前要求操作員確認，並執行單一命令 30 秒與總時限 900 秒的限制。通訊可信時
 由 Core 在原 Session 處理清理。若設定或啟用 Input 時切換 Remote，卻無法重新
-讀回確認 OFF、Fixed 設定讀回不符且同時觀測到 ON，或同一輪已確認 OFF 後又讀到 ON，
-CLI 會要求操作員獨立手動 OFF。識別儀器後若失去可信通訊，便停止發送命令。CLI 將 Input
+讀回確認 OFF，或起始已確認 OFF、執行失敗時仍觀測到 ON，CLI 會要求操作員獨立
+手動 OFF。識別儀器後若失去可信通訊，便停止發送命令。CLI 將 Input
 回報為 `UNKNOWN`、記錄清理原因 `session_untrusted`、保留原始錯誤，並提供相同的獨立
 手動 OFF 指引。程序逾時或無法確認 Input OFF 時，Script 也會提供獨立手動 OFF 指引。
 清理僅使用原 Session。

@@ -119,6 +119,7 @@ class _Execution:
         self.live = live
         self.stop = stop
         self.identified = False
+        self.initial_off_confirmed = False
         self.result = {"loop_count": loops, "completed_loops": 0, "completed_steps": 0,
                        "measurements": [], "input_states": [], "input_state": "UNKNOWN",
                        "cleanup": {"required": False, "attempted": False, "off_confirmed": False}}
@@ -126,7 +127,6 @@ class _Execution:
         self.owns_input = False
         self.remote_attempted = False
         self.explicit_off_attempted = False
-        self.explicit_off_needs_loop_check = False
 
     def _remote_attempt(self):
         self.remote_attempted = True
@@ -149,6 +149,7 @@ class _Execution:
         self.result["input_state"] = read_measurement(session, "input-state")["input_state"]
         if self.result["input_state"] != "OFF":
             raise LoadError("input_not_off", "Sequence requires confirmed Input OFF before the first step.")
+        self.initial_off_confirmed = True
 
         for loop in range(1, self.result["loop_count"] + 1):
             setup = None
@@ -169,8 +170,6 @@ class _Execution:
                 elif action == "input-off":
                     self.explicit_off_attempted = True
                     control._turn_input_off(session)
-                    if self.owns_input:
-                        self.explicit_off_needs_loop_check = True
                     self.explicit_off_attempted = self.owns_input = False
                     self.result["input_state"] = "OFF"
                 elif action == "wait":
@@ -190,7 +189,6 @@ class _Execution:
                 raise LoadError("input_not_off", "Sequence loop did not finish with Input OFF.", 3,
                                 loop_index=loop)
             self.result["cleanup"]["off_confirmed"] = True
-            self.explicit_off_needs_loop_check = False
             self.result["completed_loops"] += 1
         _check_stop(self.stop)
 
@@ -217,9 +215,7 @@ class _Execution:
                                     else {"code": "interrupted", "message": "OFF cleanup was interrupted."})
             else:
                 self.result["input_state"] = "OFF"
-        if self.result["input_state"] == "ON" and (
-            self.remote_attempted or self.explicit_off_needs_loop_check or error.code == "readback_mismatch"
-        ):
+        if self.initial_off_confirmed and self.result["input_state"] == "ON":
             cleanup["reason"] = "input_not_off"
         elif self.remote_attempted and self.result["input_state"] == "UNKNOWN":
             cleanup.setdefault("reason", "remote_input_unconfirmed")
