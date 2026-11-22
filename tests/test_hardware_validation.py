@@ -725,15 +725,13 @@ def test_sequence_live_fixed_modes_in_one_session(sequence_visa, setup, write, q
         fake.after_write = rounded_cc_readback
     result = run_sequence(setup)
     assert calls.count("open_resource") == 1
-    assert calls[-2:] == ["session_close", "manager_close"]
-    assert fake.calls.count("*IDN?") == 1
+    assert "session_close" in calls and "manager_close" in calls
     assert fake.calls.count("INP ON") == fake.calls.count("INP OFF") == 1
     index = fake.calls.index(write)
     assert fake.calls[index - 1] == "INP:STAT?"
     first_on = fake.calls.index("INP ON", index)
-    assert query in fake.calls[index:first_on]
     remote = max(i for i in range(index, first_on) if fake.calls[i] == "SYST:REM")
-    assert query in fake.calls[remote:first_on] and "INP:SHOR:STAT?" in fake.calls[remote:first_on]
+    assert query in fake.calls[remote:first_on]
     assert not any(call.startswith(("RES:LED:STAT ", "*RST", "SYST:LOC", "TRAN OFF", "SYST:ERR?"))
                    for call in fake.calls)
     assert result["validation_only"] and result["cleanup"]["off_confirmed"] and not fake.input

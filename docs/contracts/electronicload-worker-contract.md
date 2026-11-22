@@ -155,8 +155,11 @@ readback observes ON or if Input is observed ON again after the Sequence verifie
 its own OFF within the same loop. When a Fixed settings readback observes ON
 and the settings do not match, the terminal also reports ON, gives the same
 manual OFF instruction, and preserves `readback_mismatch` in `original_error`.
-It reports `"UNKNOWN"` when the Input state cannot be determined. The Worker
-emits no per-step events and creates no Sequence artifacts.
+It reports `"UNKNOWN"` when the Input state cannot be determined. If
+communication is lost after the latest Input readback observed ON, the
+terminal gives the same manual OFF instruction and preserves the
+communication error in `original_error`. The Worker emits no per-step events
+and creates no Sequence artifacts.
 
 ## Configuration readback
 

@@ -131,8 +131,8 @@ class _Execution:
         self.remote_attempted = True
         self.result["input_state"] = "UNKNOWN"
 
-    def _input_off_observed(self):
-        self.result["input_state"] = "OFF"
+    def _observe_input(self, state):
+        self.result["input_state"] = state
 
     def _input_on_attempt(self):
         self.remote_attempted = False
@@ -156,13 +156,13 @@ class _Execution:
                 if action in SETPOINT_FIELDS:
                     sequence_fixed_setup(session, action, arguments, self.stop,
                                          on_remote_attempt=self._remote_attempt,
-                                         on_input_off=self._input_off_observed)
+                                         on_input_state=self._observe_input)
                     self.remote_attempted = False
                     setup = action, arguments
                 elif action == "input-on":
                     sequence_input_on(session, setup, self.stop, on_attempt=self._input_on_attempt,
                                       on_remote_attempt=self._remote_attempt,
-                                      on_input_off=self._input_off_observed)
+                                      on_input_state=self._observe_input)
                     self.result["input_state"] = "ON"
                 elif action == "input-off":
                     self.explicit_off_attempted = True
@@ -199,8 +199,9 @@ class _Execution:
                           and (self.step is None or self.step["action"] != "wait"))
         untrusted = error.code in UNTRUSTED_ERRORS or interrupted_io
         if untrusted or self.explicit_off_attempted:
+            last_observed_on = self.result["input_state"] == "ON"
             self.result["input_state"] = "UNKNOWN"
-            if (self.owns_input or self.explicit_off_attempted or self.remote_attempted
+            if (last_observed_on or self.owns_input or self.explicit_off_attempted or self.remote_attempted
                     or (self.live and self.explicit_off_needs_loop_check)):
                 cleanup["reason"] = ("session_untrusted" if untrusted
                                      else "explicit_off_unconfirmed")
@@ -214,13 +215,9 @@ class _Execution:
                                     else {"code": "interrupted", "message": "OFF cleanup was interrupted."})
             else:
                 self.result["input_state"] = "OFF"
-        elif error.code == "readback_mismatch" and error.details.get("input_state") == "ON":
-            self.result["input_state"] = "ON"
-            cleanup["reason"] = "input_not_off"
-        elif error.code in {"input_not_off", "already_on"}:
-            self.result["input_state"] = "ON"
-        if (self.result["input_state"] == "ON"
-                and (self.remote_attempted or self.explicit_off_needs_loop_check)):
+        if self.result["input_state"] == "ON" and (
+            self.remote_attempted or self.explicit_off_needs_loop_check or error.code == "readback_mismatch"
+        ):
             cleanup["reason"] = "input_not_off"
         elif self.remote_attempted and self.result["input_state"] == "UNKNOWN":
             cleanup.setdefault("reason", "remote_input_unconfirmed")

@@ -222,11 +222,9 @@ def _stopping(stop):
         raise LoadError("stopping", "Validation mutation blocked by Stop.")
 
 
-def _setup_guard(session, stop, *, on_input_off=None):
+def _setup_guard(session, stop, *, on_input_state=None):
     _stopping(stop)
-    c._input_off(session)
-    if on_input_off is not None:
-        on_input_off()
+    c._input_off(session, on_input_state=on_input_state)
     if c._flag(session, "TRAN?") != "OFF" or c._flag(session, "INP:SHOR:STAT?") != "OFF":
         raise LoadError("unsafe_mode", "Setup requires Transient and Short OFF.")
 
@@ -702,14 +700,13 @@ def validate_sequence_trial(loops, steps):
                         "Sequence hardware validation permits only the four fixed trials from live-cli-check.ps1.")
 
 
-def sequence_fixed_setup(session, action, settings, stop, *, on_remote_attempt, on_input_off):
+def sequence_fixed_setup(session, action, settings, stop, *, on_remote_attempt, on_input_state):
     """Apply the authorized Fixed setup without changing other instrument settings."""
     scope = action.removeprefix("set-")
     simulated = isinstance(session, ControlSimulator)
 
-    def guard(*, after_remote=False):
-        c._fixed_setup_guard(session, stop, fixed_only=True,
-                             on_input_off=on_input_off if after_remote else None)
+    def guard():
+        c._fixed_setup_guard(session, stop, fixed_only=True, on_input_state=on_input_state)
         if (c._check_mode_change(session)
                 or ((simulated or scope == "cr") and c._flag(session, c.LED_QUERY) != "OFF")):
             raise LoadError("cr_led_enabled", "Disable CR-LED before Sequence setup.")
@@ -718,18 +715,18 @@ def sequence_fixed_setup(session, action, settings, stop, *, on_remote_attempt, 
         if simulated and c._flag(session, c.LED_QUERY) != "OFF":
             raise LoadError("cr_led_enabled", "Disable CR-LED before Sequence setup.")
         c._set_fixed_cc(session, settings["current"], settings["range"], stop, "sequence",
-                        on_remote_attempt=on_remote_attempt, on_input_off=on_input_off)
+                        on_remote_attempt=on_remote_attempt, on_input_state=on_input_state)
         if simulated and "rise_slew" in settings:
             slew = c.validate_fixed_cc_slew(settings["range"], settings["rise_slew"], settings["fall_slew"])
             c._set_simulated_fixed_cc_slew(session, slew)
     else:
         guard()
-        c._mutation_off(session, stop)
+        c._mutation_off(session, stop, on_input_state=on_input_state)
         on_remote_attempt()
         c._write(session, "SYST:REM")
-        guard(after_remote=True)
+        guard()
         if simulated:
-            c._mutation_off(session, stop)
+            c._mutation_off(session, stop, on_input_state=on_input_state)
             if scope == "cv":
                 session.configure_cv(settings["voltage"], settings["range"])
             elif scope == "cr":
@@ -738,15 +735,15 @@ def sequence_fixed_setup(session, action, settings, stop, *, on_remote_attempt, 
                 session.configure_cw(settings["power"])
         else:
             for write in _sequence(scope, settings):
-                c._fixed_setup_guard(session, stop, fixed_only=True)
+                c._fixed_setup_guard(session, stop, fixed_only=True, on_input_state=on_input_state)
                 if write.startswith(("RES:RANG ", "RES ")) and c._flag(session, c.LED_QUERY) != "OFF":
                     raise LoadError("cr_led_enabled", "Disable CR-LED before Sequence setup.")
-                c._mutation_off(session, stop)
+                c._mutation_off(session, stop, on_input_state=on_input_state)
                 c._write(session, write)
-    _sequence_fixed_readback(session, scope, settings, stop)
+    _sequence_fixed_readback(session, scope, settings, stop, on_input_state=on_input_state)
 
 
-def _sequence_fixed_readback(session, scope, expected, stop):
+def _sequence_fixed_readback(session, scope, expected, stop, *, on_input_state):
     if scope == "cc":
         observed = c._settings(session)
         if isinstance(session, ControlSimulator):
@@ -764,28 +761,28 @@ def _sequence_fixed_readback(session, scope, expected, stop):
                 raise LoadError("readback_mismatch", "CC slew differs from the Sequence setup.", 3)
     else:
         snapshot = _snapshot(session, scope)
+        on_input_state(snapshot["input_state"])
         try:
             _match(snapshot, expected)
         except LoadError as exc:
-            # A settings mismatch skips the final OFF check. Keep the Input reading.
             exc.details["input_state"] = snapshot["input_state"]
             raise
-    c._mutation_off(session, stop)
+    c._mutation_off(session, stop, on_input_state=on_input_state)
 
 
-def sequence_input_on(session, setup, stop, *, on_attempt, on_remote_attempt, on_input_off):
+def sequence_input_on(session, setup, stop, *, on_attempt, on_remote_attempt, on_input_state):
     """Recheck the exact last setup and interlocks before and after Remote."""
     action, settings = setup
     scope = action.removeprefix("set-")
 
     def check():
-        _setup_guard(session, stop, on_input_off=on_input_off)
-        _sequence_fixed_readback(session, scope, settings, stop)
+        _setup_guard(session, stop, on_input_state=on_input_state)
+        _sequence_fixed_readback(session, scope, settings, stop, on_input_state=on_input_state)
         if c._flag(session, "INP:TIM?") != "OFF":
             raise LoadError("input_timer_enabled", "Disable Input Timer before Sequence Input ON.")
         if scope != "cc" and c._flag(session, c.SLOW_RISE_QUERY) != "OFF":
             raise LoadError("current_slow_rise_enabled", "Disable Current Slow Rise before Input ON.")
-        c._mutation_off(session, stop)
+        c._mutation_off(session, stop, on_input_state=on_input_state)
         return {}
 
     c._turn_input_on(session, check, on_attempt=on_attempt, on_remote_attempt=on_remote_attempt)

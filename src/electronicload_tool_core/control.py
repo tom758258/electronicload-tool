@@ -595,8 +595,11 @@ def _flag(session, query: str) -> str:
     return "ON" if raw == "1" else "OFF"
 
 
-def _input_off(session) -> None:
-    if _flag(session, "INP:STAT?") != "OFF":
+def _input_off(session, *, on_input_state=None) -> None:
+    state = _flag(session, "INP:STAT?")
+    if on_input_state is not None:
+        on_input_state(state)
+    if state != "OFF":
         raise LoadError("input_not_off", "Input must be confirmed OFF before configuration.")
 
 
@@ -636,16 +639,14 @@ def _check_mode_change(session, *, fixed_cc=False, force_led_off=False):
     return False
 
 
-def _mutation_off(session, stop, *, on_input_off=None):
-    _input_off(session)
-    if on_input_off is not None:
-        on_input_off()
+def _mutation_off(session, stop, *, on_input_state=None):
+    _input_off(session, on_input_state=on_input_state)
     if stop is not None and stop.is_set():
         raise LoadError("stopping", "Configuration was blocked because Worker is stopping.")
 
 
-def _fixed_setup_guard(session, stop, *, fixed_only=False, on_input_off=None):
-    _mutation_off(session, stop, on_input_off=on_input_off)
+def _fixed_setup_guard(session, stop, *, fixed_only=False, on_input_state=None):
+    _mutation_off(session, stop, on_input_state=on_input_state)
     mode = _query(session, "FUNC:MODE?").upper()
     if mode == "LIST":
         raise LoadError("list_selected", "Exit LIST explicitly before Fixed setup.")
@@ -1020,7 +1021,7 @@ def _check_input_on_conditions(session, stop: Event | None, *, allow_cv: bool,
 
 
 def _set_fixed_cc(session, current, range_name, stop, cc_mode_scope=None, *,
-                  on_remote_attempt=None, on_input_off=None):
+                  on_remote_attempt=None, on_input_state=None):
     requested = validate_current(current, range_name)
     simulated = isinstance(session, ControlSimulator)
     guard_mode = cc_mode_scope is not None or simulated
@@ -1031,7 +1032,7 @@ def _set_fixed_cc(session, current, range_name, stop, cc_mode_scope=None, *,
     def check_origin(*, before_remote):
         if guard_mode:
             _fixed_setup_guard(session, stop, fixed_only=cc_mode_scope == "sequence",
-                               on_input_off=None if before_remote else on_input_off)
+                               on_input_state=on_input_state)
         if cc_mode_scope == "sequence":
             if _check_mode_change(session, fixed_cc=True):
                 raise LoadError("cr_led_enabled", "Disable CR-LED before Sequence setup.")
@@ -1052,9 +1053,9 @@ def _set_fixed_cc(session, current, range_name, stop, cc_mode_scope=None, *,
     try:
         # Remote is a control-state change: never send it for a read-only
         # operation or before a fresh physical Input OFF confirmation.
-        _input_off(session)
+        _input_off(session, on_input_state=on_input_state)
         check_origin(before_remote=True)
-        _mutation_off(session, setup_stop)
+        _mutation_off(session, setup_stop, on_input_state=on_input_state)
         if on_remote_attempt is not None:
             on_remote_attempt()
         _write(session, "SYST:REM")
@@ -1065,8 +1066,8 @@ def _set_fixed_cc(session, current, range_name, stop, cc_mode_scope=None, *,
             completed.append("led_off")
         for action, name in sequence:
             if cc_mode_scope == "sequence":
-                _fixed_setup_guard(session, stop, fixed_only=True)
-            _mutation_off(session, setup_stop)
+                _fixed_setup_guard(session, stop, fixed_only=True, on_input_state=on_input_state)
+            _mutation_off(session, setup_stop, on_input_state=on_input_state)
             _write(session, action)
             completed.append(name)
         settings = _settings(session)
@@ -1079,7 +1080,7 @@ def _set_fixed_cc(session, current, range_name, stop, cc_mode_scope=None, *,
                             requested_range=range_name,
                             observed=settings)
         # A successful readback of settings does not itself prove Input OFF.
-        _input_off(session)
+        _input_off(session, on_input_state=on_input_state)
     except LoadError as exc:
         exc.details["completed_steps"] = completed
         raise
