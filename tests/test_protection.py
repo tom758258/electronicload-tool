@@ -78,6 +78,42 @@ def physical(command, **arguments):
     return protection.execute(command, resource=RESOURCE, hardware_validation=True, **arguments)
 
 
+@pytest.mark.parametrize("query,reply,diagnostic", [
+    ("POW:CONF? MAX", "+2.50E+2", "returned 250"),
+    ("POW:CONF? MAX", "251", "returned 251"),
+    ("POW:CONF? MAX", "NaN", "failed: invalid_response"),
+    ("POW:CONF?", "251", "returned 251"),
+    ("POW:CONF?", "NaN", None),
+])
+def test_hardware_power_readback_keeps_limits_and_private_diagnostics(
+    instrument, caplog, query, reply, diagnostic,
+):
+    instrument.replies[query] = reply
+    with caplog.at_level("DEBUG", logger=protection.__name__):
+        if reply == "+2.50E+2":
+            result = physical("protection-set", arguments={
+                "restore_defaults": "hardware-power", "confirm": True,
+            })
+            assert result["applied"] == {"hardware_power_limit": "250"}
+            assert instrument.writes == ["SYST:REM", "POW:CONF MAX"]
+        else:
+            with pytest.raises(LoadError) as failure:
+                if query.endswith(" MAX"):
+                    physical("protection-set", arguments={
+                        "restore_defaults": "hardware-power", "confirm": True,
+                    })
+                else:
+                    physical("protection-status")
+            assert failure.value.code == "invalid_response"
+            assert failure.value.details["query"] == query
+            assert reply not in str(failure.value.details)
+            assert instrument.writes == []
+    if diagnostic:
+        assert f"Protection {query} {diagnostic}" in caplog.text
+    else:
+        assert not caplog.records
+
+
 def test_protection_status_reads_on_and_consumes_events_only_when_requested(instrument):
     instrument.replies["INP:STAT?"] = "1"
     result = physical("protection-status")

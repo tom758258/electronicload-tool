@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -35,13 +36,32 @@ def run_script(tmp_path):
         directory = tmp_path / name.lower()
         directory.mkdir()
         env[name] = str(directory)
-    def run(extra, *, source_limits=False, mode_array=None, preflight=False, resource=RESOURCE):
-        args = ([str(ROOT / 'scripts/preflight-cli.ps1')] if preflight else
-                [str(ROOT / 'scripts/live-cli-check.ps1'), '-Target', 'itech-it8812c'])
-        if resource is not None and not preflight:
-            args += ['-Resource', resource]
-        if source_limits and not preflight:
-            args += ['-SourceCurrentLimitA', '0.5', '-SourceVoltageLimitV', '12']
+    def run(extra, *, source_limits=False, mode_array=None, preflight=False, resource=RESOURCE,
+            harness=None, extra_env=None):
+        script = ROOT / 'scripts/live-cli-check.ps1'
+        if harness is None:
+            args = ([str(ROOT / 'scripts/preflight-cli.ps1')] if preflight else
+                    [str(script), '-Target', 'itech-it8812c'])
+            if resource is not None and not preflight:
+                args += ['-Resource', resource]
+            if source_limits and not preflight:
+                args += ['-SourceCurrentLimitA', '0.5', '-SourceVoltageLimitV', '12']
+        else:
+            # Run the real function bodies against controlled responses, without an interactive
+            # console or any of the script's hardware-dispatch code.
+            harness_path = tmp_path / 'harness.ps1'
+            harness_path.write_text(
+                "param([string]$Scenario)\n$ErrorActionPreference = 'Stop'\n"
+                f"$source = '{str(script).replace(chr(39), chr(39) * 2)}'\n"
+                "$ast = [System.Management.Automation.Language.Parser]::ParseFile("
+                "$source, [ref]$null, [ref]$null)\n"
+                "foreach ($node in $ast.EndBlock.Statements) {\n"
+                "    if ($node.Name -in @('Invoke-ProtectionValidation','Assert-InputOff',"
+                "'Assert-ReadbackFields','Fail-Case','Invoke-TimerExpiry','Invoke-LiveCommand',"
+                "'Assert-Runtime','Save-Report')) {\n"
+                "        Invoke-Expression $node.Extent.Text\n"
+                "    }\n}\n" + harness, encoding='utf-8')
+            args = [str(harness_path)]
         args += extra
         if mode_array is None:
             invocation = ['-File', *args]
@@ -51,7 +71,8 @@ def run_script(tmp_path):
                       for arg in args]
             invocation = ['-Command', '& ' + ' '.join(quoted) + ' -Modes ' + mode_array]
         result = subprocess.run(
-            [powershell, '-NoProfile', '-NonInteractive', *invocation], cwd=ROOT, env=env,
+            [powershell, '-NoProfile', '-NonInteractive', *invocation], cwd=ROOT,
+            env={**env, **(extra_env or {})},
             stdin=subprocess.DEVNULL, text=True, capture_output=True, timeout=180)
         assert not (tmp_path / 'visa-attempt').exists(), result.stdout + result.stderr
         return result
@@ -185,6 +206,12 @@ def test_protection_preflight_and_explicit_mode_report_without_visa(run_script):
         }
         cases = {case['name']: case for case in report['cases']}
         assert list(cases)[:2] == ['input-state', 'measure-off']
+        assert list(cases)[2:6] == [
+            'protection-start-state', 'protection-prepare-cc',
+            'protection-prepare-cc-readback', 'protection-software-current-original',
+        ]
+        assert cases['protection-prepare-cc']['arguments'] == ['--current', '0.20', '--range', 'low']
+        assert cases['protection-prepare-cc-readback']['arguments'] == ['--hardware-validation', 'readback']
         assert all(name.startswith('protection-') for name in list(cases)[2:])
         assert all(case['status'] == 'NOT RUN' for case in cases.values())
         assert report['summary_counts']['total'] == report['summary_counts']['not_run'] == len(cases)
@@ -222,6 +249,57 @@ def test_protection_precheck_rejects_overrides(run_script, extra):
     result = run_script(['-Modes', 'protection', '-PlanOnly', *extra])
     assert result.returncode == 2
     assert 'Sequence and Protection require a dedicated 5 V / 0.8 A source.' in result.stdout
+
+
+@pytest.mark.parametrize('scenario,calls,code', [
+    ('cw', ['start-state', 'prepare-cc', 'prepare-cc-readback', 'software-current-original'], None),
+    ('readback-cc', ['software-current-original'], None),
+    ('on', ['start-state'], 'input_not_off'),
+    ('short-on', ['start-state'], 'unsafe_mode'),
+    ('readback-short-unknown', [], 'unsafe_mode'),
+    ('list', ['start-state'], 'unsafe_mode'),
+    ('mismatch', ['start-state', 'prepare-cc', 'prepare-cc-readback'], 'readback_mismatch'),
+])
+def test_protection_gates_snapshot_on_fixed_cc_and_input_off(run_script, scenario, calls, code):
+    result = run_script(['-Scenario', scenario], harness="""
+$script:protectionTrials = @(@{name='software-current'})
+$script:calls = @()
+$names = @('start-state','prepare-cc','prepare-cc-readback','software-current-original')
+$script:report = @{protection_trials=@{};results=@(
+    $names | ForEach-Object { [ordered]@{name="protection-$_";status='NOT RUN'} }
+)}
+function Invoke-ProtectionStep([string]$Name) {
+    $script:calls += $Name.Substring('protection-'.Length)
+    switch ($Name) {
+        'protection-start-state' {
+            return @{result=@{
+                active_mode=$(if ($Scenario -eq 'list') { 'list' } else { 'fixed' })
+                function='CW';input_state=$(if ($Scenario -eq 'on') { 'ON' } else { 'OFF' })
+                short_state=$(if ($Scenario -eq 'short-on') { 'ON' } else { 'OFF' })
+            }}
+        }
+        'protection-prepare-cc-readback' {
+            return @{result=@{active_mode='fixed';function='CC';range='low';input_state='OFF'
+                state_source='instrument_readback'
+                current_a=$(if ($Scenario -eq 'mismatch') { '0.3' } else { '0.20' })
+            }}
+        }
+        'protection-software-current-original' { throw 'SNAPSHOT' }
+    }
+}
+$initial = switch ($Scenario) {
+    'readback-cc' { @{active_mode='fixed';function='CC';input_state='OFF';short_state='OFF'} }
+    'readback-short-unknown' { @{active_mode='fixed';function='CV';input_state='OFF'} }
+}
+try { Invoke-ProtectionValidation $initial }
+catch {
+    $failure = $script:report.results | Where-Object { $_.status -eq 'FAIL' }
+    if ($_.Exception.Message -ne 'SNAPSHOT' -and -not $failure) { throw }
+}
+@{calls=$script:calls;error_code=$failure.error_code} | ConvertTo-Json -Compress
+""")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout.splitlines()[-1]) == {'calls': calls, 'error_code': code}
 
 
 def test_cr_led_slow_rise_offline_preflight(run_script):
@@ -297,7 +375,8 @@ def test_default_usb_and_explicit_asrl_full_plan_share_the_matrix(run_script):
 
     expected = ['cc', 'cv', 'cr', 'cw', 'transient-cc', 'transient-cv', 'transient-cr',
                 'transient-cw', 'trace', 'cr-led', 'current-slow-rise', 'trigger', 'input-timer',
-                'protection', 'system-query', 'readback', 'sequence', 'workflow']
+                'protection', 'system-query', 'readback', 'sequence', 'workflow',
+                'measurement-extensions', 'auxiliary-controls', 'list-cc']
     assert reports[0]['modes'] == reports[1]['modes'] == expected
     cases = reports[0]['cases']
     assert cases == reports[1]['cases']
@@ -312,9 +391,13 @@ def test_default_usb_and_explicit_asrl_full_plan_share_the_matrix(run_script):
                  'trigger-hold-on', 'trigger-external-on', 'trigger-restore'):
         assert name in names
     assert names.index('trigger-snapshot') < names.index('scpi-version') < names.index('readback')
-    assert names.index('average-status') < names.index('protection-software-current-cc')
+    assert names.index('average-status') < names.index('protection-start-state')
+    assert names.index('protection-prepare-cc-readback') < names.index('protection-software-current-original')
     assert names.index('protection-default-hardware-power-final') < names.index('sequence-cc')
     assert names.index('sequence-cw') < names.index('set-cc-high')
+    for mode in expected[-3:]:
+        assert names.count(f'{mode}-simulation') == 1
+        assert names.index(f'{mode}-simulation') < names.index('input-state')
 
 
 def test_plan_only_console_summary_and_verbose_steps(run_script):
@@ -498,6 +581,112 @@ def test_input_timer_is_also_selectable_with_modes(run_script):
     assert 'trigger-snapshot' not in names and 'set-cc-high' not in names
     assert report['hardware_touched'] is False
     assert all(case['status'] == 'NOT RUN' for case in report['cases'])
+
+
+@pytest.mark.parametrize('scenario,checks,status,code', [
+    ('off-after-retry', 2, 'PASS', None),
+    ('stays-on', 4, 'FAIL', 'timer_expiry_unconfirmed'),
+    ('invalid', 1, 'FAIL', 'readback_mismatch'),
+    ('late-off', 1, 'FAIL', 'timer_expiry_unconfirmed'),
+    ('late-on-confirmation', 0, 'FAIL', 'timer_expiry_unconfirmed'),
+])
+def test_timer_expiry_requires_off_within_original_window(run_script, scenario, checks, status, code):
+    result = run_script(['-Scenario', scenario], harness="""
+$script:watch = @{ElapsedMilliseconds=$(if ($Scenario -eq 'late-on-confirmation') { 2001 } else { 500 })}
+$script:timerOnStartMs = 0
+$script:timerOnConfirmedMs = 450
+$script:checks = 0
+$script:perCommandDeadlineMs = 30000
+$TimerSeconds = '1'
+$script:report = @{results=@([ordered]@{name='timer-expiry';status='NOT RUN'})}
+function Start-Sleep([int]$Milliseconds) { $script:watch.ElapsedMilliseconds += $Milliseconds }
+function Assert-Runtime($Result, [string]$Name) {}
+function Invoke-LiveCommand([string]$Command, [string]$CaseName, [string[]]$ExtraArgs, [int]$DeadlineMs) {
+    $script:checks++
+    $script:watch.ElapsedMilliseconds += $(if ($Scenario -eq 'late-off') { 1001 } else { 100 })
+    $script:report.results[0]['observed_at_ms'] = $script:watch.ElapsedMilliseconds
+    $off = $Scenario -eq 'late-off' -or ($Scenario -eq 'off-after-retry' -and $script:checks -eq 2)
+    return @{result=@{seconds=1;enabled=(-not $off);input_state=$(
+        if ($off) { 'OFF' } elseif ($Scenario -eq 'invalid') { 'UNKNOWN' } else { 'ON' }
+    )}}
+}
+try { Invoke-TimerExpiry @{name='timer-expiry';command='input-timer-status';args=@()} }
+catch { if ($script:report.results[0].status -ne 'FAIL') { throw } }
+$entry = $script:report.results[0]
+@{checks=$script:checks;status=$entry.status;error_code=$entry.error_code} | ConvertTo-Json -Compress
+""")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout.splitlines()[-1]) == {
+        'checks': checks, 'status': status, 'error_code': code,
+    }
+
+
+@pytest.mark.parametrize('scenario,code', [
+    ('late-readback', 'timer_expiry_unconfirmed'),
+    ('command-timeout', 'deadline_expired'),
+])
+def test_timer_expiry_preserves_cleanup_when_communication_is_trusted(run_script, tmp_path, scenario, code):
+    fake_cli = tmp_path / 'fake_timer_cli.py'
+    fake_cli.write_text(
+        'import json\n'
+        'import sys\n'
+        'import time\n'
+        'command = sys.argv[1]\n'
+        'result = {"visa": {"library": "fake", "manufacturer": "fake"}, "input_state": "OFF"}\n'
+        'if command == "input-timer-status":\n'
+        '    time.sleep(1.2)\n'
+        '    result.update(seconds=1, enabled=True, input_state="ON")\n'
+        'print(json.dumps({"ok": True, "result": result}))\n', encoding='utf-8')
+    result = run_script(['-Scenario', scenario], extra_env={
+        'FAKE_TIMER_PYTHON': sys.executable, 'FAKE_TIMER_CLI': str(fake_cli),
+    }, harness="""
+$script:calls = @()
+$script:report = @{status='NOT RUN';results=@([ordered]@{name='timer-expiry';status='NOT RUN'})}
+$script:perCommandDeadlineMs = 30000
+$script:totalDeadlineMs = if ($Scenario -eq 'command-timeout') { 600 } else { 900000 }
+$script:expectedLibrary = 'fake'
+$script:expectedManufacturer = 'fake'
+$script:triggerSelected = $true
+$script:triggerTrusted = $true
+$inputOnAttempted = $true
+$timerEnableAttempted = $true
+$TimerSeconds = '1'
+$script:timerOnStartMs = -1000
+$script:timerOnConfirmedMs = -750
+function New-CliProcessInfo([string[]]$Arguments) {
+    $command = $Arguments[2]
+    $script:calls += $command
+    $start = [Diagnostics.ProcessStartInfo]::new($env:FAKE_TIMER_PYTHON)
+    $start.Arguments = '\"{0}\" {1}' -f $env:FAKE_TIMER_CLI, $command
+    $start.UseShellExecute = $false
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    return $start
+}
+# Run the outer script's cleanup with the flags left by a dispatched Timer trial.
+$main = $ast.EndBlock.Statements | Where-Object { $null -ne $_.Finally } | Select-Object -Last 1
+$cleanup = $main.Finally.Extent.Text
+$script:watch = [Diagnostics.Stopwatch]::StartNew()
+try { Invoke-TimerExpiry @{name='timer-expiry';command='input-timer-status';args=@()} }
+catch {
+    if ($script:report.results[0].status -ne 'FAIL') { throw }
+    $script:report.status = 'FAIL'
+} finally {
+    . ([scriptblock]::Create($cleanup.Substring(1, $cleanup.Length - 2)))
+}
+@{calls=$script:calls;error_code=$script:report.results[0].error_code;
+  statuses=@($script:report.results | ForEach-Object { $_.status })} | ConvertTo-Json -Compress
+""")
+    assert result.returncode == 0, result.stdout + result.stderr
+    evidence = json.loads(result.stdout.splitlines()[-1])
+    assert evidence['error_code'] == code and evidence['statuses'][0] == 'FAIL'
+    if scenario == 'late-readback':
+        assert evidence['calls'] == ['input-timer-status', 'input-off', 'input-state', 'input-timer-disable']
+        assert evidence['statuses'][1:] == ['PASS'] * 3
+    else:
+        assert evidence['calls'] == ['input-timer-status']
+        assert evidence['statuses'][1:] == ['NOT RUN'] * 3
+        assert 'independent operator action required' in result.stdout
 
 
 def test_input_timer_script_uses_default_source_limits(run_script):
@@ -735,6 +924,70 @@ def test_workflow_only_stays_offline_with_optional_connection(run_script, plan_o
             'completed', 'condition_met', 'duration_elapsed', 'capacity_cutoff',
         ]
         assert all(case['input_state'] == 'OFF' for case in cases[2:])
+
+
+@pytest.mark.parametrize('mode,commands', [
+    ('measurement-extensions', ['measure-min-max', 'measure-discharge', 'set-average']),
+    ('auxiliary-controls', ['set-von', 'short-on', 'short-off', 'set-cc']),
+    ('list-cc', ['set-list-cc', 'list-save', 'list-recall', 'list-exit']),
+])
+def test_new_modes_run_independently_without_a_resource(run_script, mode, commands):
+    result = run_script(['-Modes', mode], resource=None)
+    assert result.returncode == 0, result.stdout + result.stderr
+    path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)[-1])
+    report = json.loads(path.read_text(encoding='utf-8-sig'))
+    assert report['overall_status'] == 'PASS'
+    assert report['validation_mode'] == 'simulate' and report['hardware_touched'] is False
+    assert report['modes'] == [mode]
+    assert [case['command'] for case in report['cases']] == [*commands, 'pytest']
+    assert [case['execution'] for case in report['cases']] == ['dry-run'] * len(commands) + ['simulate']
+    assert all(case['status'] == 'PASS' for case in report['cases'])
+    assert not (path.parents[1] / 'private').exists()
+    assert not list(path.parents[1].rglob('results.xml'))
+
+
+@pytest.mark.parametrize('scenario,status,diagnostic', [
+    ('collect-only', 'NOT RUN', 'tests collected'),
+    ('partly-deselected', 'NOT RUN', 'excluded from the offline test selection'),
+    ('one-skipped', 'SKIP', 'offline test skip probe'),
+])
+def test_new_modes_report_incomplete_simulator_checks(run_script, tmp_path, scenario, status, diagnostic):
+    if scenario == 'collect-only':
+        overrides = {'PYTEST_ADDOPTS': '--collect-only'}
+    elif scenario == 'partly-deselected':
+        overrides = {'PYTEST_ADDOPTS': (
+            '--deselect=tests/test_control_core.py::test_average_native_write_readback_and_query_while_on'
+        )}
+    else:
+        (tmp_path / 'skip_one.py').write_text(
+            'import pytest\n'
+            'def pytest_collection_modifyitems(items):\n'
+            '    items[0].add_marker(pytest.mark.skip(reason="offline test skip probe"))\n',
+            encoding='utf-8')
+        overrides = {'PYTEST_PLUGINS': 'skip_one'}
+    result = run_script(['-Modes', 'measurement-extensions', '-DebugArtifacts'], resource=None,
+                        extra_env=overrides)
+    assert result.returncode == 3, result.stdout + result.stderr
+    path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)[-1])
+    report = json.loads(path.read_text(encoding='utf-8-sig'))
+    assert report['overall_status'] == 'FAIL' and report['hardware_touched'] is False
+    case = report['cases'][-1]
+    assert case['command'] == 'pytest' and case['status'] == status
+    log = (path.parents[1] / 'private' / f"{case['name']}.txt").read_text(encoding='utf-8-sig')
+    assert diagnostic in log
+    assert not list(path.parents[1].rglob('results.xml'))
+
+
+def test_new_modes_deduplicate_and_leave_physical_cases_not_run(run_script):
+    result = run_script(['-Modes', 'list-cc,readback,measurement-extensions,list-cc'])
+    assert result.returncode == 2 and 'requires an interactive console' in result.stdout
+    path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)[-1])
+    report = json.loads(path.read_text(encoding='utf-8-sig'))
+    assert report['overall_status'] == 'BLOCKED' and report['hardware_touched'] is False
+    assert report['modes'] == ['readback', 'measurement-extensions', 'list-cc']
+    assert len({case['name'] for case in report['cases']}) == len(report['cases'])
+    assert {case['status'] for case in report['cases'] if 'execution' in case} == {'PASS'}
+    assert {case['status'] for case in report['cases'] if 'execution' not in case} == {'NOT RUN'}
 
 
 @pytest.mark.parametrize('extra,resource', [

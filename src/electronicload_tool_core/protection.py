@@ -1,5 +1,6 @@
 """IT8812C protection settings and explicitly scoped contributor validation."""
 
+import logging
 import re
 from decimal import Decimal
 from time import sleep
@@ -12,6 +13,7 @@ from .visa import (open_request_session, open_session, require_trusted_session,
                    validate_request_connection)
 
 COMMANDS = ("protection-status", "protection-set", "protection-clear")
+LOGGER = logging.getLogger(__name__)
 # IT8800 Programming Guide V2.1, Questionable group and Source Subsystem.
 CONDITION_BITS = {
     0: "VF", 1: "OC", 2: "RS", 3: "OP", 4: "OT", 7: "RUN", 8: "EPU", 9: "RRV",
@@ -126,7 +128,15 @@ def _read_setting(session, field: str, suffix: str = ""):
         if number not in (0, 1):
             raise LoadError("invalid_response", "Invalid current protection enable state.", 3, query=query)
         return number == 1
-    number = c._decimal_readback(session, query)
+    try:
+        number = c._decimal_readback(session, query)
+    except LoadError as exc:
+        if suffix:
+            LOGGER.debug("Protection %s failed: %s", query, exc.code)
+        raise
+    if suffix or not 0 <= number <= LIMITS[field]:
+        LOGGER.debug("Protection %s returned %s (accepted range 0 to %s)",
+                     query, number, LIMITS[field])
     if not 0 <= number <= LIMITS[field]:
         raise LoadError("invalid_response", "Protection readback is outside the model bounds.", 3, query=query)
     return number
