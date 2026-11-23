@@ -729,11 +729,18 @@ sets low-range Fixed CC, configures/enables Timer, reads status while OFF,
 then confirms Input ON through `--hardware-validation input-timer` with complete
 expected `current`, `range` and integer `seconds`. Before and after remote
 transition Core rechecks physical OFF, CC settings, Short/Transient OFF and Timer
-readback. After the bounded wait the script queries actual Timer/Input state;
-only observed Input OFF passes expiry. It then explicitly sends/verifies Input
+readback. Between the configured duration and one second later, measured
+from dispatch of the Input ON command, the script checks Timer/Input state
+until it observes Input OFF or reaches the deadline. The console records the
+elapsed time, Timer state and Input state. `-DebugArtifacts` also saves those
+observations in the private report directory. It then explicitly sends/verifies Input
 OFF, separately disables Timer and reads final Timer/Input state. Failure stops
 further trials; a possible ON attempt gets one bounded OFF cleanup attempt.
 Timer-disable cleanup is a separate operation after confirmed OFF.
+
+腳本以送出 Input ON 命令的時間為起點，在設定秒數到期後的一秒內讀取 Timer
+與 Input 狀態。只有實際讀到 Input OFF 才通過。主控台會列出經過時間與兩種
+狀態，`-DebugArtifacts` 會另存於私人報告目錄。
 
 The validation-only Core/CLI scope uses `INP:TIM:DEL <seconds>`, `INP:TIM 0|1`,
 `INP:TIM:DEL?` and `INP:TIM?` from the
@@ -1378,6 +1385,9 @@ legacy Transient write and restores them after its trials when safe.
 | `readback` | Existing Fixed CC/CV/CR/CW, CC Slew, Transient, LIST, VON, Short and Average / 獨立查詢現有設定 |
 | `sequence` | Four bounded Fixed CC/CV/CR/CW trials / 四項有界 Fixed 試驗 |
 | `workflow` | Four CLI Workflows in dry-run and simulation / 四條 CLI 流程的離線規劃及模擬 |
+| `measurement-extensions` | Native Min/Max, Discharge and Average setting / 原生極值、放電量測與平均次數設定 |
+| `auxiliary-controls` | VON setting, Short ON/OFF interlocks and Fixed CC Slew / VON 設定、Short 開關互鎖與 Fixed CC 斜率 |
+| `list-cc` | LIST CC setup, Save, Recall and Exit / LIST CC 設定、儲存、載入及退出 |
 
 The System Query case reads one Error Queue entry and records the numeric
 code, including zero for an empty queue. Workflow
@@ -1387,6 +1397,23 @@ in the report. A Workflow-only run needs only `-Target` and `-Modes workflow`.
 System Query 案例只讀取一筆錯誤佇列並記錄數字代碼，空佇列的代碼為零。
 Workflow 案例使用模擬器，報告會標記模擬結果。僅執行 Workflow 時，只需提供
 `-Target` 與 `-Modes workflow`。
+
+The three extension modes use CLI dry-runs and focused Simulator or Fake VISA
+tests from the contributor environment. Run any of them alone or together
+with only `-Target itech-it8812c` and `-Modes`. For example:
+
+```powershell
+.\scripts\live-cli-check.ps1 -Target itech-it8812c -Modes measurement-extensions,auxiliary-controls,list-cc
+```
+
+In a mixed selection, the extension checks run before the physical approval
+gate. If that gate blocks execution, physical cases remain `NOT RUN`.
+`-PlanOnly` validates dry-run requests and leaves case results `NOT RUN`.
+
+三個擴充模式使用 CLI dry-run 與開發環境中既有的 Simulator 或 Fake VISA
+聚焦測試。可用上例組合執行，也可只選其中一個模式，均只需提供 `-Target`
+與 `-Modes`。混合選取時，擴充模式先執行，實機確認被擋下時實機案例維持
+`NOT RUN`。`-PlanOnly` 驗證 dry-run 請求，案例結果維持 `NOT RUN`。
 
 Readback queries the existing configuration with Input OFF before any setup.
 The current mode determines which Fixed, Slew, Transient or LIST case is
@@ -1599,12 +1626,26 @@ Product LIVE support.
 
 Use the separately approved `live-cli-check.ps1 -Modes protection` procedure
 with the exact IT8812C model, an operator-supplied USB or ASRL INSTR resource
-and System VISA. Add `-PlanOnly` for the offline command plan. Start in Fixed CC with
+and System VISA. Add `-PlanOnly` for the offline command plan. Start with
 Input OFF, a dedicated source set at the source to 5 V with a 0.8 A current
 limit, and an independent manual cutoff. The script checks current mode and
 interlocks, saves and restores the original Fixed CC and protection settings,
 and stops at the first failed trial. The temporary Fixed CC setpoint is 0.20 A.
 The operator confirms each Input ON with a fresh Enter.
+
+The script reuses an available independent Readback snapshot. From Fixed CV
+or CW it prepares Fixed CC at 0.20 A Low and verifies the settings independently
+with Input OFF before taking the first Protection snapshot. The prepared Fixed CC
+settings become the trial restore baseline. From Fixed CC the initial settings
+are the baseline. Setup writes are skipped when the settings already match the
+trial. If starting in another mode, select Fixed CC at the panel before
+beginning validation.
+
+若同時選取 Readback，Protection 會沿用該獨立快照。從 Fixed CV 或 CW 開始時，
+腳本會在 Input OFF 下設定 0.20 A Low 的 Fixed CC，獨立讀回確認後才取得第一份
+Protection 快照，並以該 Fixed CC 設定作為試驗還原基準。若原本已是 Fixed CC，
+則沿用原設定作為基準。設定符合試驗條件時會略過寫入。其他模式請在開始驗證前，
+先從面板選取 Fixed CC。
 
 | Trial | Temporary setting | Physical acceptance |
 | --- | --- | --- |
@@ -1632,6 +1673,12 @@ measurement, OFF and restoration results without the VISA resource string.
 When the CLI returns partial write progress, the report's
 `protection_write_progress` records confirmed setting values, unconfirmed
 writes, and settings that were never attempted.
+With `-DebugArtifacts`, Protection MAX replies that parse as numbers and
+their bounds are recorded in the private command stderr. Invalid replies
+still stop the trial before a defaults write.
+
+`-DebugArtifacts` 會將可解析為數字的 Protection MAX 回應及其範圍寫入私人
+命令 stderr。回應無效時，試驗會在寫入預設值前停止。
 The contributor scope does not open Product or Worker LIVE.
 
 The register meanings, Clear behavior and configuration syntax are in the

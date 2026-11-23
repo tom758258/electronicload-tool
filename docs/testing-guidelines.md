@@ -415,6 +415,16 @@ Clear's one bounded OFF attempt. The PowerShell tests exercise
 in PlanOnly and noninteractive mode, with a fictional Resource and a VISA
 blocker. The shareable report leaves physical cases `NOT RUN`.
 
+For Fixed CC preparation, also check a Fixed CW starting state and verify
+that Input ON, an unsupported mode or a readback mismatch stops the trial
+before a Protection snapshot. Use Fake VISA for ordinary and MAX power
+readback, including out-of-range and malformed replies. Check that diagnostic
+values stay in private output.
+
+Fixed CC 前置流程應涵蓋從 Fixed CW 開始，並確認 Input ON、不支援的模式或讀回
+不符會在取得 Protection 快照之前停止。用 Fake VISA 檢查一般與 MAX 功率讀值，
+包含超出範圍及格式無效的回應。診斷數值應留在私人輸出。
+
 Only the separately approved, operator-confirmed
 [Protection procedure](cli/README.md#contributor-protection-validation)
 can establish physical trip, power limit, Clear, defaults and restoration.
@@ -529,3 +539,22 @@ authorized [ASRL procedure](cli/README.md#physical-validation-procedure--實機�
 驗證 ASRL 獨立生命週期、選填設定、逾時切換、身分、清理錯誤、USB 隔離與未許可
 範圍在 VISA 存取前被拒絕。實機測試依據另行授權的
 [ASRL 步驟](cli/README.md#physical-validation-procedure--實機驗證步驟)。
+
+## CLI validation extensions and Timer expiry
+
+Select the affected PowerShell cases in `tests/test_live_validation_script.py`.
+Use fictional resources with VISA blocked to verify the extension modes alone,
+duplicate selections, mixed noninteractive refusal and Full PlanOnly for USB
+and ASRL. The extension modes run focused Core and CLI tests for native
+measurements and Average, VON/Short/CC Slew, or LIST CC setup/Save/Recall/Exit.
+For Timer expiry, use a controlled clock to verify the retry window and
+Input OFF requirement, and select the affected Fake VISA cases in
+`tests/test_input_timer.py`. Physical expiry remains a separately authorized
+check.
+
+從 `tests/test_live_validation_script.py` 選跑受影響的 PowerShell 案例。使用虛構
+資源並封鎖 VISA，檢查單獨擴充模式、重複選取、混合模式的非互動拒絕，以及 USB
+和 ASRL 的 Full PlanOnly。擴充模式沿用 Core 與 CLI 聚焦測試，分別驗證原生量測與
+Average、VON／Short／CC Slew、LIST CC 設定／Save／Recall／Exit。Timer 到期使用
+可控制時鐘驗證重查時間窗與 Input OFF 條件，再選跑 `tests/test_input_timer.py`
+內受影響的 Fake VISA 案例。實機到期仍需另行授權驗證。
