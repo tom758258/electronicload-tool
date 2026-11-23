@@ -6,6 +6,7 @@ trigger and input-timer. Omitted -Modes selects all default modes.
 -Modes protection selects the separate Protection validation procedure.
 -Modes sequence selects four bounded Fixed Software Sequence trials.
 -Modes readback checks existing settings with Input OFF and without changing the instrument.
+-Connection asrl -Modes asrl-readonly checks identity, Input OFF and measurements over RS-232.
 -InputTimerOnly is a backward-compatible shortcut for the input-timer-only trial.
 Requires approved source/DUT limits and interactive confirmation before hardware access.
 -PlanOnly validates every planned CLI request without VISA or hardware access.
@@ -13,7 +14,7 @@ Requires approved source/DUT limits and interactive confirmation before hardware
 [CmdletBinding()]
 param(
     [string]$Target,
-    [ValidateSet('usb')][string]$Connection = 'usb',
+    [ValidateSet('usb', 'asrl')][string]$Connection = 'usb',
     [string]$Resource,
     [ValidateSet('system')][string]$Backend = 'system',
     [string]$Current = '0.1',
@@ -53,7 +54,14 @@ param(
     [decimal]$ExpectedVonThreshold,
     [ValidateSet('on','off')][string]$ExpectedVonLatch,
     [ValidateSet('on','off')][string]$ExpectedShort,
-    [ValidateRange(2,16)][int]$ExpectedAverageCount
+    [ValidateRange(2,16)][int]$ExpectedAverageCount,
+    [string]$SerialBaudRate,
+    [string]$SerialDataBits,
+    [string]$SerialParity,
+    [string]$SerialStopBits,
+    [string]$SerialFlowControl,
+    [string]$SerialReadTermination,
+    [string]$SerialWriteTermination
 )
 
 $ErrorActionPreference = 'Stop'
@@ -66,7 +74,7 @@ if ($InputTimerOnly) {
 } elseif (-not $PSBoundParameters.ContainsKey('Modes')) {
     $Modes = $supportedModes
 }
-$supportedModes += @('protection','readback','sequence')
+$supportedModes += @('protection','readback','sequence','asrl-readonly')
 $requestedModes = @($Modes | ForEach-Object { $_ -split ',' } |
     ForEach-Object { $_.Trim().ToLowerInvariant() })
 # Keep the established trial order and run each selected mode only once.
@@ -78,6 +86,19 @@ $timerSelected = 'input-timer' -in $selectedModes
 $protectionSelected = 'protection' -in $selectedModes
 $readbackSelected = 'readback' -in $selectedModes
 $sequenceSelected = 'sequence' -in $selectedModes
+$asrlSelected = 'asrl-readonly' -in $selectedModes
+$serialFlags = [ordered]@{
+    SerialBaudRate = '--serial-baud-rate'; SerialDataBits = '--serial-data-bits'
+    SerialParity = '--serial-parity'; SerialStopBits = '--serial-stop-bits'
+    SerialFlowControl = '--serial-flow-control'; SerialReadTermination = '--serial-read-termination'
+    SerialWriteTermination = '--serial-write-termination'
+}
+$serialArgs = @(foreach ($parameter in $serialFlags.Keys) {
+    if ($PSBoundParameters.ContainsKey($parameter)) {
+        $serialFlags[$parameter]
+        $PSBoundParameters[$parameter]
+    }
+})
 $featureSelected = @($selectedModes | Where-Object { $_ -in $featureModes }).Count -gt 0
 $featureOnly = $featureSelected -and @($selectedModes | Where-Object { $_ -notin $featureModes }).Count -eq 0
 $traceCommunicationUntrusted = $false
@@ -185,7 +206,7 @@ function Save-Report {
     [void][IO.Directory]::CreateDirectory($shareable)
     $cases = @()
     foreach ($entry in $script:report.results) {
-        if ($entry.name -eq 'identify') { continue }
+        if ($entry.name -eq 'identify' -and -not $script:asrlSelected) { continue }
         $case = [ordered]@{
             name = $entry.name
             command = $entry.command
@@ -296,6 +317,7 @@ function Save-Report {
         cases = $cases
         summary_counts = $counts
     }
+    if ($script:asrlSelected) { $public['validation_scope'] = 'asrl-readonly' }
     if ($script:sequenceSelected) {
         $public['sequence_input_off_unconfirmed'] = $script:report.sequence_input_off_unconfirmed
     }
@@ -328,6 +350,11 @@ function Save-Report {
         "VISA runtime: $($public.prechecks.runtime)"
         "Input OFF precheck: $($public.prechecks.input_off)"
     )
+    if ($script:asrlSelected) {
+        $lines += "Connection: $($public.connection) / $($public.backend)"
+        $lines += "Validation scope: $($public.validation_scope)"
+        $lines += "Product LIVE: $($public.product_live)"
+    }
     if ($public.slow_rise_cleanup_unconfirmed) {
         $lines += 'Current Slow Rise OFF was not confirmed. Independent operator action is required.'
     }
@@ -657,6 +684,9 @@ function Assert-Runtime([object]$Result, [string]$CaseName) {
 
 function Assert-InputOff([object]$Result, [string]$CaseName) {
     if ($Result.result.input_state -cne 'OFF') {
+        if ($script:asrlSelected) {
+            Fail-Case $CaseName 'input_not_off' 'Physical Input OFF was not confirmed; ASRL validation stopped.'
+        }
         if ($script:traceSelected) {
             $script:report.trace_safe_shutdown_unconfirmed = $true
         }
@@ -1372,6 +1402,13 @@ try {
     if ($requestedModes.Count -eq 0 -or @($requestedModes | Where-Object { $_ -notin $supportedModes }).Count -gt 0) {
         throw "Modes must contain one or more of: $($supportedModes -join ', ')."
     }
+    if (($Connection -eq 'asrl' -and (-not $asrlSelected -or $requestedModes.Count -ne 1)) -or
+        ($asrlSelected -and $Connection -ne 'asrl')) {
+        throw 'Use -Connection asrl with -Modes asrl-readonly on its own.'
+    }
+    if ($serialArgs.Count -and -not $asrlSelected) {
+        throw 'Serial parameters require -Connection asrl -Modes asrl-readonly.'
+    }
     if ($sequenceSelected -and ($selectedModes.Count -ne 1 -or
         $SourceVoltageLimitV -ne 5 -or $SourceCurrentLimitA -ne 0.8)) {
         throw 'Select Sequence alone with a dedicated 5 V / 0.8 A source.'
@@ -1398,7 +1435,9 @@ try {
         }
         $report.prechecks.current = 'PASS'
     }
-    $report.script_current_ceiling_a = if ($protectionSelected) { 0.20 } elseif ($sequenceSelected) { 0.10 } else { $scriptCurrentCeilingA }
+    if (-not $asrlSelected) {
+        $report.script_current_ceiling_a = if ($protectionSelected) { 0.20 } elseif ($sequenceSelected) { 0.10 } else { $scriptCurrentCeilingA }
+    }
     if ($timerSelected) {
         & $python -c 'import sys; from electronicload_tool_core.control import validate_input_timer; value=validate_input_timer(int(sys.argv[1])); sys.exit(0 if 3 <= value <= 10 else 2)' $TimerSeconds
         if ($LASTEXITCODE -ne 0) { throw 'Timer validation seconds must be an integer from 3 through 10.' }
@@ -1436,6 +1475,10 @@ try {
         @{name='input-state';command='input-state';args=@()},
         @{name='measure-off';command='measure';args=@()}
     )
+    if ($asrlSelected) {
+        $planned += @{name='final-input-state';command='input-state';args=@()}
+        foreach ($step in $planned) { $step.args = @('--hardware-validation', 'asrl-readonly') + $serialArgs }
+    }
     if ($readbackSelected) {
         $baselineParameters = @{
             'fixed-slew-status' = @{rise_slew_a_per_us='ExpectedRiseSlew';fall_slew_a_per_us='ExpectedFallSlew'}
@@ -1738,7 +1781,11 @@ try {
     Write-Host "Target: $Target | Connection: $Connection | Backend: $Backend | Resource: <redacted>"
     Write-Host "Mode: $(if ($PlanOnly) { 'PLAN ONLY' } else { 'LIVE' })"
     Write-Host "Selected modes: $($selectedModes -join ', ')."
-    Write-Host "Plan: Identify, Input State, Measure."
+    if ($asrlSelected) {
+        Write-Host 'Plan: Identify, confirm Input OFF, measure, then confirm final Input OFF.'
+    } else {
+        Write-Host 'Plan: Identify, Input State, Measure.'
+    }
     if ($readbackSelected) {
         Write-Host 'Readback requires Fixed CC and confirmed Input OFF. It queries existing settings only.'
         Write-Host 'Use known front-panel settings as expected values. Incomplete comparisons are recorded as NOT RUN.'
@@ -1757,7 +1804,7 @@ try {
     if ('cc' -in $selectedModes -or $traceSelected) {
         Write-Host 'CC setup from CR: conditional contributor handoff with Input OFF and the Core LED OFF interlock.'
     }
-    if (-not ($protectionSelected -or $readbackSelected) -and
+    if (-not ($protectionSelected -or $readbackSelected -or $asrlSelected) -and
         @($selectedModes | Where-Object { $_ -ne 'trace' -and $_ -notin $featureModes }).Count -gt 0) {
         Write-Host 'Other selected modes retain explicit ON/OFF and independent OFF confirmation.'
     }
@@ -1772,7 +1819,7 @@ try {
         Write-Host 'Slow Rise requires a non-resistance starting function and expects Fixed CV setup to be refused while enabled.'
         Write-Host 'If the Slow Rise trial stops before confirmed Disable, cleanup requires trusted communication and confirmed Input OFF.'
     }
-    if (-not ($protectionSelected -or $readbackSelected)) {
+    if (-not ($protectionSelected -or $readbackSelected -or $asrlSelected)) {
         Write-Host 'Fixed Auto adds Input OFF setup/readback with the existing values; no extra ON/OFF cycles.'
     }
     if (@($selectedModes | Where-Object { $_.StartsWith('transient-') }).Count -gt 0) {
@@ -1786,9 +1833,13 @@ try {
         Write-Verbose ("  {0}: {1} {2}{3}" -f $step.name, $step.command, ($step.args -join ' '), $condition)
     }
     if ('cc' -in $selectedModes) { Write-Host "CC Current=$currentText A." }
-    Write-Host "Script ceiling=$($report.script_current_ceiling_a) A; USB System VISA."
-    Write-Host 'No reset, SYST:ERR? consumption, automatic local switch, or implicit Input ON.'
-    Write-Host 'An Input ON attempt requires an explicit OFF cleanup; session close does not turn Input OFF.'
+    if ($asrlSelected) {
+        Write-Host 'ASRL System VISA read-only validation.'
+    } else {
+        Write-Host "Script ceiling=$($report.script_current_ceiling_a) A; USB System VISA."
+        Write-Host 'No reset, SYST:ERR? consumption, automatic local switch, or implicit Input ON.'
+        Write-Host 'An Input ON attempt requires an explicit OFF cleanup; session close does not turn Input OFF.'
+    }
     Write-Host 'V/I/P measure queries are separate; power freshness is not guaranteed.'
     if ($PlanOnly) {
         $report.status = 'PLAN ONLY'
@@ -1807,7 +1858,9 @@ try {
     # Focused selections keep their preflight; mixed/all-mode runs check
     # the original base and only the chosen feature-specific offline scopes.
     $preflightScript = Join-Path $PSScriptRoot 'preflight-cli.ps1'
-    if ($sequenceSelected) {
+    if ($asrlSelected) {
+        Write-Host 'ASRL preflight passed using the four offline CLI plans.'
+    } elseif ($sequenceSelected) {
         & $preflightScript -SequenceOnly
     } elseif ($readbackSelected) {
         & $preflightScript -ReadbackOnly
@@ -1841,7 +1894,7 @@ try {
             if ($LASTEXITCODE -ne 0) { throw 'Trigger preflight failed.' }
         }
     }
-    if ($LASTEXITCODE -ne 0) {
+    if (-not $asrlSelected -and $LASTEXITCODE -ne 0) {
         $report.prechecks.preflight = 'FAIL'
         throw 'Preflight failed.'
     }
@@ -1854,7 +1907,7 @@ try {
     if ($triggerSelected) {
         Write-Host '- Confirm external On/Off and analog programming are disabled and external trigger wiring was reviewed while de-energized.'
     }
-    if (-not $readbackSelected) {
+    if (-not ($readbackSelected -or $asrlSelected)) {
         Write-Host '- Selected trials may deliberately turn Input ON; the script explicitly commands and verifies OFF, but cannot guarantee OFF after communication failures.'
     }
     $ack = if ($protectionSelected) {
@@ -1879,7 +1932,7 @@ try {
     if ($null -eq $watch) { $watch = [Diagnostics.Stopwatch]::StartNew() }
     $phase = 'identify'
     Write-Host 'Running Identify precheck...'
-    $identity = Invoke-LiveCommand -Command 'identify' -CaseName 'identify'
+    $identity = Invoke-LiveCommand -Command 'identify' -CaseName 'identify' -ExtraArgs $planned[0].args
     $report.prechecks.identify = 'PASS'
     if ($null -eq $identity.result.visa -or
         [string]::IsNullOrWhiteSpace([string]$identity.result.visa.library)) {
@@ -1937,6 +1990,7 @@ try {
             }
             $report.sequence_input_off_unconfirmed = $true
         }
+        if ($asrlSelected -and $step.name -eq 'input-state') { $report.prechecks.input_off = 'FAIL' }
         $result = Invoke-LiveCommand -Command $step.command -CaseName $step.name `
             -ExtraArgs $step.args -DeadlineMs $commandDeadline -ExpectedError $step.expected_error `
             -AllowCrHandoff:($step.allow_cr_handoff -eq $true)
@@ -2059,7 +2113,7 @@ try {
     Write-Host "Validation did not complete: $($_.Exception.Message)"
 } finally {
     # PowerShell pipeline interruption can bypass catch and the exit after finally.
-    $validationInterrupted = ($triggerSelected -or $protectionSelected -or $sequenceSelected) -and
+    $validationInterrupted = ($triggerSelected -or $protectionSelected -or $sequenceSelected -or $asrlSelected) -and
         $phase -in @('identify','cases') -and $report.status -eq 'NOT RUN'
     if ($validationInterrupted) { $report.status = 'FAIL' }
     if ($inputOnAttempted) {

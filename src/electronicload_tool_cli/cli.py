@@ -17,8 +17,9 @@ from electronicload_tool_core.protection import (ARGUMENTS as PROTECTION_ARGUMEN
                                                 execute as protection_execute)
 from electronicload_tool_core.readback import (COMMANDS as READBACK_COMMANDS,
                                                CONTROL_STATUS_COMMANDS, SCOPE as READBACK_SCOPE)
-from electronicload_tool_core.readonly import (BASIC_MEASUREMENTS, COMMANDS, ERROR_QUEUE_COMMAND, MAX_ERROR_READS,
-                                               NATIVE_MEASUREMENTS, SYSTEM_QUERIES,
+from electronicload_tool_core.readonly import (ASRL_READONLY_COMMANDS, ASRL_READONLY_SCOPE,
+                                               BASIC_MEASUREMENTS, COMMANDS, ERROR_QUEUE_COMMAND,
+                                               MAX_ERROR_READS, NATIVE_MEASUREMENTS, SYSTEM_QUERIES,
                                                execute as read_execute)
 from electronicload_tool_core.sequence import COMMAND as SEQUENCE_COMMAND, execute as sequence_execute
 from electronicload_tool_core.control import (CONTROL_COMMANDS, execute as control_execute,
@@ -29,6 +30,7 @@ from electronicload_tool_core.control import (CONTROL_COMMANDS, execute as contr
 from electronicload_tool_core.trace import (CONFIG_FIELDS, CSV_FIELDS, SAMPLE_FIELDS,
                                            TRACE_COMMANDS, execute as trace_execute)
 from electronicload_tool_core.trigger import TRIGGER_SOURCES
+from electronicload_tool_core.visa import SERIAL_CHOICES, SerialOptions
 from electronicload_tool_core.workflows import (ARGUMENTS as WORKFLOW_ARGUMENTS,
                                                 COMMANDS as WORKFLOW_COMMANDS, MAX_INTERVAL, MAX_SAMPLES,
                                                 MIN_INTERVAL, OPERATORS,
@@ -133,6 +135,8 @@ def main(argv: list[str] | None = None) -> int:
         modes.add_argument("--simulate", action="store_true")
         sub.add_argument("--resource", help=("Optional USB INSTR resource for connection option validation."
                                              if name in WORKFLOW_COMMANDS else
+                                             "Explicit USB INSTR or ASRL INSTR with asrl-readonly."
+                                             if name in ASRL_READONLY_COMMANDS else
                                              "Explicit USB INSTR resource; required for LIVE."))
         sub.add_argument("--backend", default="system")
         sub.add_argument("--model", default=MODEL_ID)
@@ -159,6 +163,14 @@ def main(argv: list[str] | None = None) -> int:
             continue
         sub.add_argument("--validation-allow-pending-live-support", action="store_true",
                          help=argparse.SUPPRESS)
+        if name in ASRL_READONLY_COMMANDS:
+            sub.add_argument("--hardware-validation", choices=(ASRL_READONLY_SCOPE,),
+                             help="Explicit CLI-only IT8812C ASRL read-only validation.")
+            sub.add_argument("--serial-baud-rate", type=int, default=argparse.SUPPRESS)
+            sub.add_argument("--serial-data-bits", type=int, default=argparse.SUPPRESS)
+            for field, choices in SERIAL_CHOICES.items():
+                sub.add_argument("--serial-" + field.replace("_", "-"), choices=tuple(choices),
+                                 default=argparse.SUPPRESS)
         if name == SEQUENCE_COMMAND:
             sub.add_argument("--file", required=True, help="UTF-8 Software Sequence JSON document.")
             sub.add_argument("--hardware-validation", choices=(SEQUENCE_COMMAND,),
@@ -413,12 +425,15 @@ def main(argv: list[str] | None = None) -> int:
                 trigger_interval=getattr(args, "interval_s", None),
             )
         else:
+            serial = {name.removeprefix("serial_"): value for name, value in vars(args).items()
+                      if name.startswith("serial_")}
             result = read_execute(args.command, mode=mode, resource=args.resource,
                                   backend=args.backend, model_id=args.model,
                                   validation=args.validation_allow_pending_live_support,
                                   metric=getattr(args, "metric", None),
                                   all_errors=getattr(args, "all", False),
-                                  hardware_validation=getattr(args, "hardware_validation", None))
+                                  hardware_validation=getattr(args, "hardware_validation", None),
+                                  serial_options=SerialOptions(**serial) if serial else None)
     except LoadError as exc:
         return _emit_error(exc, command, mode, json_output)
     except KeyboardInterrupt:

@@ -35,7 +35,7 @@ and version separately from `--json`.
 
 `--dry-run` and `--simulate` are mutually exclusive. There is no `--live` flag
 and no implicit simulation. For example, `measure` alone fails because the
-resource is missing. Read-only LIVE requests require an explicit USB INSTR
+resource is missing. Product LIVE read-only requests require an explicit USB INSTR
 resource and exact IT8812C identity. Set the operator-selected VISA resource
 once in PowerShell and pass it explicitly to every LIVE command:
 
@@ -64,7 +64,7 @@ input-state and measurement queries.
 
 ### VISA resource discovery
 
-`list-resources` lists all resource types returned by System VISA (`@ivi`),
+`list-resources` lists all resource types returned by System VISA (`@ivi`), including ASRL INSTR,
 including possibly stale entries. It does not open devices or send SCPI.
 `list-resources --live-only` explicitly opens **only USB INSTR** resources
 and sends `*IDN?`; it lists only responders with structurally valid IDN,
@@ -77,6 +77,8 @@ Both commands support `--json` (one success/error object). Text output uses
 `Resources:` or `Live resources:` and displays `IDN:` for live responders.
 Discovery text and JSON may contain **real resource names and IDN serials**:
 use them only as local diagnostics; do not publish unredacted output.
+To verify one operator-selected ASRL INSTR resource, use `identify` with the
+[ASRL read-only validation scope](#asrl-read-only-validation--asrl-唯讀驗證).
 
 ### Results and exits
 
@@ -136,7 +138,7 @@ Core owns the following query sequences, based on the
 | `input-state` | `*IDN?`, then `INP:STAT?`; only `0` means OFF and `1` means ON. |
 | `measure` | `*IDN?`, then `MEAS:VOLT?`, `MEAS:CURR?`, `FETC:POW?`. |
 
-LIVE uses USB INSTR and System VISA only, with a 5000 ms I/O timeout and
+USB Product LIVE uses System VISA with a 5000 ms I/O timeout and
 LF read/write termination. The VISA open call also receives 5000 ms, although
 that parameter does not guarantee a connection deadline on every runtime.
 The target runtime is Keysight IO Libraries Suite.
@@ -1363,6 +1365,7 @@ for focused verification.
 | `input-timer` | Bounded Fixed CC Input Timer, expiry and explicit disable | Yes |
 | `protection` | Software current trip, software power trip, hardware power limiting and separate defaults | Explicit selection only |
 | `readback` | Fixed CC, Slew, VON, Short and Average with Input OFF and existing settings | Explicit selection only |
+| `asrl-readonly` | RS-232 identity, initial Input OFF, V/I/P and final Input OFF | Explicit ASRL selection only |
 
 `-InputTimerOnly` remains a compatible shortcut for the single
 `-Modes input-timer` trial and **cannot** be combined with `-Modes`.
@@ -1389,10 +1392,10 @@ with the settings of their existing trials.
 | Parameter | Required / default | Purpose |
 | --- | --- | --- |
 | `-Target` | Required: `itech-it8812c` | Exact registered model ID |
-| `-Resource` | Required | Explicit USB INSTR VISA Resource, also for PlanOnly; never guessed |
-| `-Connection` | `usb` | USB only |
+| `-Resource` | Required | Explicit USB INSTR or ASRL INSTR resource matching `-Connection`, including PlanOnly |
+| `-Connection` | `usb` | Use `asrl` with `-Modes asrl-readonly` alone |
 | `-Backend` | `system` | System VISA (`@ivi`) only |
-| `-Modes` | All default modes | Single or comma-separated selection from above. Select Protection separately. |
+| `-Modes` | Default USB modes | Single or comma-separated selection from above. Select Protection and ASRL read-only separately. |
 | `-InputTimerOnly` | Off | Backward-compatible Timer-only shortcut, incompatible with `-Modes` |
 | `-SourceVoltageLimitV` | **5 V** | Operator-declared external source voltage, override >0 to 18 V |
 | `-SourceCurrentLimitA` | **0.8 A** | Operator-declared external source current limit, override >0 to 2 A |
@@ -1460,6 +1463,72 @@ an interactive Windows console with the **real** Resource and remove
 ```powershell
 .\scripts\live-cli-check.ps1 -Target itech-it8812c -Connection usb -Resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" -Backend system -Modes cc
 ```
+
+## ASRL read-only validation / ASRL 唯讀驗證
+
+Use `--hardware-validation asrl-readonly` with `identify`, `input-state`, or
+`measure`, an explicit `ASRL<number>::INSTR` resource and System VISA.
+The scope requires the IT8812C profile and matching instrument identity.
+Add `--dry-run` for a hardware-free plan. The CLI and script accept the
+following optional overrides. Omitted options leave the session settings
+provided by VISA and PyVISA in effect.
+
+CLI 的 `identify`、`input-state`、`measure` 可搭配
+`--hardware-validation asrl-readonly`、明確的 `ASRL<number>::INSTR` 資源和
+System VISA。此範圍要求 IT8812C 設定檔與相符的儀器身分。
+加上 `--dry-run` 可離線查看計畫。下列 CLI 與腳本參數均為選填，省略時沿用
+VISA 與 PyVISA 提供的設定。
+
+| CLI | PowerShell | Value / 值 |
+| --- | --- | --- |
+| `--serial-baud-rate` | `-SerialBaudRate` | Positive 32-bit unsigned integer / 32 位元無號正整數 |
+| `--serial-data-bits` | `-SerialDataBits` | 5–8 |
+| `--serial-parity` | `-SerialParity` | `none`, `odd`, `even`, `mark`, `space` |
+| `--serial-stop-bits` | `-SerialStopBits` | `1`, `1.5`, `2` |
+| `--serial-flow-control` | `-SerialFlowControl` | `none`, `xon_xoff`, `rts_cts`, `dtr_dsr` |
+| `--serial-read-termination` | `-SerialReadTermination` | `CR`, `LF`, `CRLF` |
+| `--serial-write-termination` | `-SerialWriteTermination` | `CR`, `LF`, `CRLF` |
+
+Use a fictional resource for the offline preview. Both examples below use
+System VISA and leave the serial settings as provided by the session.
+
+離線預覽請使用虛構資源。以下兩例皆使用 System VISA，並沿用 session 的序列埠設定。
+
+```powershell
+$resource = 'ASRL999::INSTR'
+.\.venv\Scripts\electronicload-tool.exe identify --resource $resource --hardware-validation asrl-readonly --dry-run --json
+.\scripts\live-cli-check.ps1 -Target itech-it8812c -Connection asrl -Resource $resource -Modes asrl-readonly -PlanOnly
+```
+
+### Physical validation procedure / 實機驗證步驟
+
+1. Obtain separate authorization for the instrument, resource and bounded
+   source/DUT. Confirm the RS-232 wiring and both ends' serial settings,
+   verify physical Input OFF, and confirm that no other process controls the
+   instrument. Keep an independent manual OFF procedure available.
+2. Review all four cases in `-PlanOnly`. For the approved run, pass the exact
+   operator-selected ASRL INSTR resource, omit `-PlanOnly`, and confirm in an
+   interactive console. Select `asrl-readonly` by itself.
+3. Verify the report shows successful identity, initial Input OFF, V/I/P
+   readback, and final Input OFF. If Input is initially ON or unknown, the script
+   stops before measurement. Any communication failure stops further cases.
+   The script only queries and leaves the instrument state under operator control.
+4. Review the redacted report under `.tmp_tests/` before sharing it. CLI
+   dry-run, PlanOnly, Fake VISA and CI cover offline behavior. Record actual
+   instrument evidence separately.
+
+1. 取得特定儀器、資源與受限電源及待測物的實機驗證授權。核對 RS-232 接線及兩端
+   設定，確認面板顯示 Input OFF、無其他程式控制儀器，並準備獨立的手動關閉方式。
+2. 用 `-PlanOnly` 檢查四個案例。獲准後填入操作者選定的 ASRL INSTR 資源，移除
+   `-PlanOnly`，在互動式主控台確認。`asrl-readonly` 須單獨選擇。
+3. 確認報告的身分、初始 Input OFF、V/I/P 讀值與最終 Input OFF 皆通過。若初始
+   Input 為 ON 或無法確認，腳本會在量測前停止。通訊失敗也會停止後續案例。腳本僅查詢，
+   儀器狀態由操作者管理。
+4. 分享前檢查 `.tmp_tests/` 下已遮蔽的報告。CLI dry-run、PlanOnly、Fake VISA 和
+   CI 用於驗證離線行為。實機證據另行記錄。
+
+See the [Core transport and LIVE support policy](../visa-connections.md).
+傳輸與 LIVE 支援規則請參閱 [Core 設計](../visa-connections.md)。
 
 ## Controlled instrument validation
 
