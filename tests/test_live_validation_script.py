@@ -221,7 +221,7 @@ def test_protection_preflight_and_explicit_mode_report_without_visa(run_script):
 def test_protection_precheck_rejects_overrides(run_script, extra):
     result = run_script(['-Modes', 'protection', '-PlanOnly', *extra])
     assert result.returncode == 2
-    assert 'Select Protection alone with a dedicated 5 V / 0.8 A source.' in result.stdout
+    assert 'Sequence and Protection require a dedicated 5 V / 0.8 A source.' in result.stdout
 
 
 def test_cr_led_slow_rise_offline_preflight(run_script):
@@ -275,32 +275,50 @@ def test_hardware_script_mode_plans(run_script, selection, modes):
     assert_report(run_script(extra), 'PLAN ONLY', modes)
 
 
-def test_hardware_script_default_runs_every_mode_in_plan_only(run_script):
-    result = run_script(['-PlanOnly'])
-    assert result.returncode == 0, result.stdout + result.stderr
-    expected = ('cc', 'cv', 'cr', 'cw', 'transient-cc', 'transient-cv', 'transient-cr',
-                'transient-cw', 'trace', 'cr-led', 'current-slow-rise', 'trigger', 'input-timer')
-    assert f"Selected modes: {', '.join(expected)}." in result.stdout
-    report_path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)[-1])
-    text = report_path.read_text(encoding='utf-8-sig')
-    report = json.loads(text)
-    names = [item['name'] for item in report['cases']]
-    assert report['overall_status'] == 'PLAN ONLY' and report['hardware_touched'] is False
+def test_default_usb_and_explicit_asrl_full_plan_share_the_matrix(run_script):
+    usb = run_script(['-PlanOnly'])
+    asrl = run_script(['-Connection', 'asrl', '-Modes', 'full', '-PlanOnly'], resource=ASRL)
+    reports = []
+    for result, connection, resource in ((usb, 'usb', RESOURCE), (asrl, 'asrl', ASRL)):
+        assert result.returncode == 0, result.stdout + result.stderr
+        path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)[-1])
+        report_text = path.read_text(encoding='utf-8-sig')
+        assert resource not in report_text + result.stdout and str(ROOT) not in report_text
+        report = json.loads(report_text)
+        assert report['connection'] == connection and report['resource'] == '<redacted>'
+        assert report['overall_status'] == 'PLAN ONLY' and report['hardware_touched'] is False
+        assert report['prechecks']['identify'] == 'NOT RUN'
+        for case in report['cases']:
+            arguments = case.get('arguments', [])
+            for index, argument in enumerate(arguments):
+                if argument in ('--validation-settings-json', '--arguments-json'):
+                    arguments[index + 1] = json.loads(arguments[index + 1])
+        reports.append(report)
+
+    expected = ['cc', 'cv', 'cr', 'cw', 'transient-cc', 'transient-cv', 'transient-cr',
+                'transient-cw', 'trace', 'cr-led', 'current-slow-rise', 'trigger', 'input-timer',
+                'protection', 'system-query', 'readback', 'sequence', 'workflow']
+    assert reports[0]['modes'] == reports[1]['modes'] == expected
+    cases = reports[0]['cases']
+    assert cases == reports[1]['cases']
+    names = [case['name'] for case in cases]
     assert len(names) == len(set(names))
-    # Identify is a precheck, not a shareable result case.
-    assert report['prechecks']['identify'] == 'NOT RUN'
-    assert names[:4] == ['input-state', 'measure-off', 'trigger-snapshot', 'set-cc-high']
-    assert names.index('trigger-snapshot') < names.index('set-cc-high')
+    assert reports[0]['summary_counts'] == reports[1]['summary_counts'] == {
+        'total': len(names), 'passed': 0, 'failed': 0, 'skipped': 0, 'not_run': len(names),
+    }
+    assert all(case['status'] == 'NOT RUN' for case in cases)
     assert not any(name.startswith('trigger-manual-') for name in names)
     for name in ('timer-on', 'trace-powered-on', 'cr-led-set', 'slow-rise-enable',
                  'trigger-hold-on', 'trigger-external-on', 'trigger-restore'):
         assert name in names
-    assert all(item['status'] == 'NOT RUN' for item in report['cases'])
-    assert RESOURCE not in text
+    assert names.index('trigger-snapshot') < names.index('scpi-version') < names.index('readback')
+    assert names.index('average-status') < names.index('protection-software-current-cc')
+    assert names.index('protection-default-hardware-power-final') < names.index('sequence-cc')
+    assert names.index('sequence-cw') < names.index('set-cc-high')
 
 
 def test_plan_only_console_summary_and_verbose_steps(run_script):
-    normal = run_script(['-PlanOnly'])
+    normal = run_script(['-PlanOnly', '-Modes', 'cc,transient-cc'])
     assert normal.returncode == 0, normal.stdout + normal.stderr
     assert 'Selected modes:' in normal.stdout
     assert 'transient-continuous-auto-setup:' not in normal.stdout
@@ -319,11 +337,11 @@ def test_hardware_script_powershell_mode_array(run_script):
     assert_report(result, 'PLAN ONLY', ('cc', 'transient-cc'))
 
 
-@pytest.mark.parametrize('selection', ['unknown', 'cc,unknown', ''])
+@pytest.mark.parametrize('selection', ['unknown', 'cc,unknown', '', 'full,cc'])
 def test_hardware_script_invalid_modes(run_script, selection):
     result = run_script(['-PlanOnly', '-Modes', selection])
     assert result.returncode == 2, result.stdout + result.stderr
-    assert 'Modes must contain one or more of:' in result.stdout
+    assert 'Select full or one or more of:' in result.stdout
     assert 'Report:' not in result.stdout  # Rejected before planning any cases.
 
 
@@ -583,8 +601,10 @@ def test_configuration_readback_script_plan_preflight_and_noninteractive_refusal
     assert preflight.returncode == 0, preflight.stdout + preflight.stderr
     assert 'PASS: Readback preflight' in preflight.stdout
 
-    expected = ['input-state', 'measure-off', 'readback', 'fixed-status',
-                'fixed-slew-status', 'von-status', 'short-status', 'average-status']
+    expected = ['input-state', 'measure-off', 'readback',
+                *(f'fixed-status-{mode}' for mode in ('cc', 'cv', 'cr', 'cw')),
+                'transient-status', 'list-status', 'fixed-slew-status', 'von-status',
+                'short-status', 'average-status']
     baseline = ['-ExpectedRiseSlew', '0.1', '-ExpectedFallSlew', '0.2',
                 '-ExpectedVonThreshold', '0', '-ExpectedVonLatch', 'OFF',
                 '-ExpectedShort', 'on', '-ExpectedAverageCount', '8']
@@ -600,6 +620,9 @@ def test_configuration_readback_script_plan_preflight_and_noninteractive_refusal
         assert report['overall_status'] == status and report['hardware_touched'] is False
         assert [case['command'] for case in report['cases'][:1]] == ['input-state']
         assert [case['name'] for case in report['cases']] == expected
+        assert [case['command'] for case in report['cases'][3:7]] == ['fixed-status'] * 4
+        assert all(case['arguments'] == ['--hardware-validation', 'readback']
+                   for case in report['cases'][2:])
         assert all(case['status'] == 'NOT RUN' for case in report['cases'])
         for case in report['cases'][-4:]:
             assert case['readback_comparison'] == 'NOT RUN'
@@ -644,42 +667,83 @@ def test_sequence_focused_preflight(run_script):
 
 
 @pytest.mark.parametrize('plan_only,serial', [
-    (True, []),
     (True, ['-SerialBaudRate', '19200', '-SerialDataBits', '7', '-SerialParity', 'even',
             '-SerialStopBits', '2', '-SerialFlowControl', 'none', '-SerialReadTermination', 'CRLF',
             '-SerialWriteTermination', 'LF']),
     (False, ['-SerialWriteTermination', 'CR']),
 ])
-def test_asrl_script_plan_and_noninteractive_refusal(run_script, plan_only, serial):
-    result = run_script(['-Connection', 'asrl', '-Modes', 'asrl-readonly', *serial,
-                         *(['-PlanOnly'] if plan_only else [])], resource=ASRL)
+def test_asrl_mixed_mode_plan_and_noninteractive_refusal(run_script, plan_only, serial):
+    result = run_script(['-Connection', 'asrl', '-Modes', 'cc,system-query,readback,sequence',
+                         *serial, *(['-PlanOnly'] if plan_only else [])], resource=ASRL)
     assert result.returncode == (0 if plan_only else 2), result.stdout + result.stderr
     path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)[-1])
-    text = path.read_text(encoding='utf-8')
-    report = json.loads(text)
+    report_text = path.read_text(encoding='utf-8-sig')
+    report = json.loads(report_text)
     assert report['overall_status'] == ('PLAN ONLY' if plan_only else 'BLOCKED')
-    assert report['connection'] == 'asrl' and report['validation_scope'] == 'asrl-readonly'
-    assert 'USB/System VISA' in report['product_live']
+    assert report['connection'] == 'asrl' and report['modes'] == [
+        'cc', 'system-query', 'readback', 'sequence',
+    ]
+    assert report['serial_overrides'] == (
+        {'baud_rate': '19200', 'data_bits': '7', 'parity': 'even', 'stop_bits': '2',
+         'flow_control': 'none', 'read_termination': 'CRLF', 'write_termination': 'LF'}
+        if plan_only else {'write_termination': 'CR'}
+    )
     assert report['prechecks']['plan'] == 'PASS' and not report['hardware_touched']
-    assert report['summary_counts'] == {'total': 4, 'passed': 0, 'failed': 0, 'skipped': 0, 'not_run': 4}
-    assert ASRL not in text + result.stdout and str(ROOT) not in text
+    cases = {case['name']: case for case in report['cases']}
+    assert {'set-cc-high', 'fixed-status-cv', 'sequence-cv', 'scpi-error-next'} <= cases.keys()
+    assert all(case['status'] == 'NOT RUN' for case in cases.values())
+    assert report['summary_counts']['total'] == report['summary_counts']['not_run'] == len(cases)
+    assert report['resource'] == '<redacted>'
+    summary = path.with_name('summary.md').read_text(encoding='utf-8-sig')
+    assert ASRL not in report_text + summary + result.stdout and str(ROOT) not in report_text
     assert not (path.parents[1] / 'private').exists()
-    assert [case['name'] for case in report['cases']] == ['identify', 'input-state', 'measure-off', 'final-input-state']
-    for case in report['cases']:
-        assert case['arguments'] == ['--hardware-validation', 'asrl-readonly', *[
-            re.sub(r'(?<=[a-z])(?=[A-Z])', '-', arg).lower().replace('-serial-', '--serial-', 1)
-            if arg.startswith('-Serial') else arg for arg in serial
-        ]]
+    if not plan_only:
+        assert 'requires an interactive console' in result.stdout
+
+
+def test_system_query_focused_plan_and_preflight(run_script):
+    preflight = run_script(['-SystemQueryOnly'], preflight=True)
+    assert preflight.returncode == 0, preflight.stdout + preflight.stderr
+    result = run_script(['-Modes', 'system-query', '-PlanOnly'])
+    assert result.returncode == 0, result.stdout + result.stderr
+    path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)[-1])
+    report = json.loads(path.read_text(encoding='utf-8-sig'))
+    cases = report['cases'][2:]
+    assert [case['command'] for case in cases] == ['scpi-version', 'display-mode', 'scpi-error-next']
+    assert all(case['arguments'] == ['--hardware-validation', 'system-query'] for case in cases)
+
+
+@pytest.mark.parametrize('plan_only', [True, False])
+@pytest.mark.parametrize('connection,resource', [('usb', None), ('usb', RESOURCE), ('asrl', ASRL)])
+def test_workflow_only_stays_offline_with_optional_connection(run_script, plan_only, connection, resource):
+    result = run_script(['-Connection', connection, '-Modes', 'workflow',
+                         *(['-PlanOnly'] if plan_only else [])], resource=resource)
+    assert result.returncode == 0, result.stdout + result.stderr
+    path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)[-1])
+    report = json.loads(path.read_text(encoding='utf-8-sig'))
+    assert report['overall_status'] == ('PLAN ONLY' if plan_only else 'PASS')
+    assert report['validation_mode'] == ('plan-only' if plan_only else 'simulate')
+    assert report['hardware_touched'] is False
+    cases = report['cases']
+    assert [case['command'] for case in cases] == [
+        'measure-log', 'measure-until', 'cc-timed-load', 'cc-discharge',
+    ]
+    assert all(case['execution'] == 'simulate' for case in cases)
+    assert all(case['status'] == ('NOT RUN' if plan_only else 'PASS') for case in cases)
+    if not plan_only:
+        assert [case['stop_reason'] for case in cases] == [
+            'completed', 'condition_met', 'duration_elapsed', 'capacity_cutoff',
+        ]
+        assert all(case['input_state'] == 'OFF' for case in cases[2:])
 
 
 @pytest.mark.parametrize('extra,resource', [
-    (['-Connection', 'asrl'], ASRL),
-    (['-Connection', 'asrl', '-Modes', 'asrl-readonly,cc'], ASRL),
-    (['-Connection', 'asrl', '-Modes', 'asrl-readonly'], None),
-    (['-Connection', 'asrl', '-Modes', 'asrl-readonly'], RESOURCE),
+    (['-Connection', 'asrl', '-Modes', 'cc'], None),
+    (['-Connection', 'asrl', '-Modes', 'readback'], RESOURCE),
+    (['-Modes', 'cc'], ASRL),
     (['-Modes', 'asrl-readonly'], RESOURCE),
     (['-Modes', 'cc', '-SerialBaudRate', '19200'], RESOURCE),
-    (['-Connection', 'asrl', '-Modes', 'asrl-readonly', '-SerialStopBits', '3'], ASRL),
+    (['-Connection', 'asrl', '-Modes', 'system-query', '-SerialStopBits', '3'], ASRL),
 ])
 def test_asrl_script_rejects_unsafe_or_invalid_selection(run_script, extra, resource):
     result = run_script(['-PlanOnly', *extra], resource=resource)

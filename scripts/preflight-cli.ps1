@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param([switch]$TransientOnly, [switch]$FixedAutoOnly, [switch]$FixedSlewVonShortOnly,
       [switch]$InputTimerOnly, [switch]$TraceOnly, [switch]$CrLedSlowRiseOnly, [switch]$TriggerOnly,
-      [switch]$ProtectionOnly, [switch]$ReadbackOnly, [switch]$SequenceOnly)
+      [switch]$ProtectionOnly, [switch]$ReadbackOnly, [switch]$SequenceOnly,
+      [switch]$SystemQueryOnly, [switch]$BaseOnly)
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -21,16 +22,36 @@ function Invoke-PreflightCli {
 }
 
 try {
-    if (@($TransientOnly, $FixedAutoOnly, $FixedSlewVonShortOnly, $InputTimerOnly, $TraceOnly, $CrLedSlowRiseOnly, $TriggerOnly, $ProtectionOnly, $ReadbackOnly, $SequenceOnly |
+    if (@($TransientOnly, $FixedAutoOnly, $FixedSlewVonShortOnly, $InputTimerOnly, $TraceOnly, $CrLedSlowRiseOnly, $TriggerOnly, $ProtectionOnly, $ReadbackOnly, $SequenceOnly, $SystemQueryOnly, $BaseOnly |
             Where-Object { $_ }).Count -gt 1) {
         throw 'Select only one focused preflight switch.'
     }
     if (-not (Test-Path -LiteralPath $cli)) {
         throw 'Sync the repository .venv with uv before running preflight.'
     }
+    if ($SystemQueryOnly) {
+        $asrl = @('--resource','ASRL999::INSTR','--validation-connection','asrl')
+        foreach ($command in @('scpi-version','display-mode','scpi-error-next')) {
+            $options = @($command,'--hardware-validation','system-query','--dry-run')
+            $usb = Invoke-PreflightCli $options
+            $serial = Invoke-PreflightCli ($options + $asrl)
+            $simulated = Invoke-PreflightCli @($command,'--simulate')
+            $queries = @{'scpi-version'='SYST:VERS?';'display-mode'='DISP:MODE?';'scpi-error-next'='SYST:ERR?'}
+            if ($serial.result.transport -cne 'asrl' -or $serial.result.validation_only -ne $true -or
+                ($usb.result.queries -join ',') -cne "*IDN?,$($queries[$command])" -or
+                ($serial.result.queries -join ',') -cne ($usb.result.queries -join ',') -or
+                $null -ne $serial.result.max_reads -or $simulated.ok -ne $true) {
+                throw "System Query preflight failed: $command."
+            }
+        }
+        $refused = Invoke-PreflightCli (@('set-cv','--voltage','3','--range','low') + $asrl) 2
+        if ($refused.error.code -cne 'unsupported_live_scope') { throw 'ASRL contributor scope was not enforced.' }
+        Write-Host 'PASS: System Query and ASRL offline preflight'
+        exit 0
+    }
     if ($SequenceOnly -or -not ($TransientOnly -or $FixedAutoOnly -or $FixedSlewVonShortOnly -or
         $InputTimerOnly -or $TraceOnly -or $CrLedSlowRiseOnly -or $TriggerOnly -or
-        $ProtectionOnly -or $ReadbackOnly)) {
+        $ProtectionOnly -or $ReadbackOnly -or $BaseOnly)) {
         $scratch = Join-Path $repo ('.tmp_tests/sequence-preflight-' + [Guid]::NewGuid())
         [void][IO.Directory]::CreateDirectory($scratch)
         $file = Join-Path $scratch 'sequence.json'
@@ -65,17 +86,21 @@ try {
         if ($SequenceOnly) { exit 0 }
     }
     if ($ReadbackOnly -or -not ($TransientOnly -or $FixedAutoOnly -or $FixedSlewVonShortOnly -or
-        $InputTimerOnly -or $TraceOnly -or $CrLedSlowRiseOnly -or $TriggerOnly -or $ProtectionOnly)) {
+        $InputTimerOnly -or $TraceOnly -or $CrLedSlowRiseOnly -or $TriggerOnly -or $ProtectionOnly -or $BaseOnly)) {
         $manifest = Invoke-PreflightCli @('manifest')
-        foreach ($command in @('readback','fixed-status','fixed-slew-status','trace-status')) {
+        foreach ($command in @('readback','fixed-status','fixed-slew-status','transient-status',
+                                'list-status','von-status','short-status','average-status','trace-status')) {
             $scope = if ($command -eq 'trace-status') { 'trace' } else { 'readback' }
             $plan = Invoke-PreflightCli @($command,'--dry-run','--hardware-validation',$scope)
+            $asrlPlan = Invoke-PreflightCli @($command,'--dry-run','--hardware-validation',$scope,
+                '--resource','ASRL999::INSTR','--validation-connection','asrl')
             $simulated = Invoke-PreflightCli @($command,'--simulate')
             $refused = Invoke-PreflightCli @($command,'--validation-allow-pending-live-support',
                 '--resource','USB0::0xFFFF::0x0001::SYNTHETIC::INSTR') 2
             if ($manifest.commands.$command.kind -cne 'async_job' -or
                 $plan.result.hardware_access -ne $false -or $plan.result.planned_writes.Count -ne 0 -or
-                $simulated.result.state_source -cne 'simulate' -or $simulated.command -cne $command -or
+                $asrlPlan.result.transport -cne 'asrl' -or $asrlPlan.result.planned_writes.Count -ne 0 -or
+                $simulated.mode -cne 'simulate' -or $simulated.command -cne $command -or
                 $refused.error.code -cne 'unsupported_live_scope') {
                 throw "Readback preflight failed: $command."
             }
@@ -198,7 +223,7 @@ try {
         Write-Host 'PASS: TRACE-only offline preflight; no VISA opened.'
         exit 0
     }
-    if (-not ($TransientOnly -or $FixedAutoOnly -or $FixedSlewVonShortOnly)) {
+    if (-not ($TransientOnly -or $FixedAutoOnly -or $FixedSlewVonShortOnly -or $BaseOnly)) {
         foreach ($mode in @('--simulate', '--dry-run')) {
             foreach ($seconds in @('1', '60000')) {
                 $result = Invoke-PreflightCli @('set-input-timer', '--seconds', $seconds, $mode)

@@ -56,7 +56,7 @@ Preflight exercises offline CLI modes, JSON, and basic refusal behavior; it does
 not repeat pytest or run VISA discovery. Discovery tests use an injected fake
 VISA manager and must never call real `list-resources`. Check
 `live-cli-check.ps1 -PlanOnly` and noninteractive refusal without hardware.
-Use only an explicitly fictional USB resource for offline script verification, and never reuse it for real validation. Real runs follow
+Use an explicitly fictional USB INSTR or ASRL INSTR resource for offline script verification. Real runs follow
 the authorization, interaction, runtime-review, and deadline requirements in
 the [README](cli/README.md#controlled-instrument-validation).
 
@@ -78,12 +78,14 @@ affected CLI parser/help/version and read-only CLI contracts:
 
 Worker integration uses a real local simulated subprocess, HTTP and JSONL,
 but never physical hardware. The **single** `live-cli-check.ps1` defaults to
-the established validation modes: CC/CV/CR/CW, Transient CC/CV/CR/CW,
-TRACE, CR-LED, Current Slow Rise, Trigger and Input Timer. `-Modes` selects one or more
-modes while retaining common read-only safety prechecks and each selected
-mode's explicit Input ON/OFF flow. Test its `-PlanOnly` operation and unattended
-LIVE refusal with a **fictional** USB Resource. In noninteractive LIVE runs, verify it refuses before opening any VISA
-session or sending SCPI. The Script supplies the CLI's per-command
+FULL for USB and ASRL. See the [CLI validation modes](cli/README.md#available-validation-modes--驗證模式)
+for the complete matrix. Use `-Modes` to focus checks on affected behavior.
+Hardware modes retain the common read-only safety prechecks and any explicit
+Input ON/OFF flow. Test `-PlanOnly` and unattended LIVE refusal with a fictional
+resource matching the selected connection. Verify noninteractive hardware
+requests are refused before opening VISA or sending SCPI. Workflow cases run
+offline in dry-run and simulation, including when a valid connection is
+supplied to a Workflow-only invocation. The script supplies the CLI's per-command
 `input-on --confirm` during approved interactive execution. CC defaults to 0.1 A, with a 2 A script-only hard ceiling and a
 default operator-declared source limit of 0.8 A at 5 V.
 Verify redacted shareable case totals and normal mode's lack of private raw
@@ -416,7 +418,7 @@ blocker. The shareable report leaves physical cases `NOT RUN`.
 Only the separately approved, operator-confirmed
 [Protection procedure](cli/README.md#contributor-protection-validation)
 can establish physical trip, power limit, Clear, defaults and restoration.
-Use the selected Protection mode by itself.
+For focused checks select Protection by itself.
 
 ## Configuration readback focused checks
 
@@ -503,14 +505,16 @@ Verify LIVE refusal before VISA with the recording fake.
 The basic workflows run offline and require no release or physical-device
 acceptance.
 
-## ASRL read-only focused checks
+## USB and ASRL validation matrix focused checks
 
 Run `tests/test_asrl.py`, `tests/test_readonly_core.py`,
 `tests/test_readonly_cli.py`, `tests/test_discovery.py`,
 `tests/test_discovery_cli.py` and `tests/test_foundation.py` from the repository
-root. Select the ASRL, existing USB default-plan and unattended refusal cases
-in `tests/test_live_validation_script.py`. Use a fictional ASRL INSTR resource
-and block both PyVISA library and resource-manager access in offline plans.
+root as applicable to the change. Compare USB and ASRL FULL plans, and
+exercise mixed mode selection, report redaction and unattended refusal in
+`tests/test_live_validation_script.py`. Use fictional resources and block
+both PyVISA library and resource-manager access in offline plans.
+Use `preflight-cli.ps1 -SystemQueryOnly` for scoped System Query and ASRL checks.
 Run Ruff on changed Python files.
 
 Verify the independent ASRL lifetime, omitted and explicit settings, timeout
@@ -518,9 +522,10 @@ transition, identity, cleanup errors, USB isolation, and refusal before VISA
 for unapproved scopes. Reserve physical validation for the separately
 authorized [ASRL procedure](cli/README.md#physical-validation-procedure--實機驗證步驟).
 
-從 repo 根目錄執行上述 Core、CLI、探索與基礎測試。PowerShell 選跑 ASRL、既有
-USB 預設計畫與非互動拒絕案例。離線計畫使用虛構的 ASRL INSTR 資源，封鎖 PyVISA
-函式庫和 Resource Manager 的存取，且只對修改的 Python 檔案執行 Ruff。
+從 repo 根目錄選跑受影響的 Core、CLI、探索與基礎測試。PowerShell 比對 USB
+及 ASRL 的 FULL 計畫，並檢查混合模式、報告遮蔽和非互動拒絕。離線計畫使用
+虛構資源，封鎖 PyVISA 函式庫與 Resource Manager。System Query 和 ASRL
+可使用 `preflight-cli.ps1 -SystemQueryOnly` 驗證。只對修改的 Python 檔案執行 Ruff。
 驗證 ASRL 獨立生命週期、選填設定、逾時切換、身分、清理錯誤、USB 隔離與未許可
 範圍在 VISA 存取前被拒絕。實機測試依據另行授權的
 [ASRL 步驟](cli/README.md#physical-validation-procedure--實機驗證步驟)。

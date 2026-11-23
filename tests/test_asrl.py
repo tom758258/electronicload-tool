@@ -1,10 +1,13 @@
-"""Read-only ASRL validation through PyVISA's serial resource and a fake IVI library."""
+"""Contributor ASRL validation through PyVISA and a fake IVI library."""
+
+import json
 
 from contextlib import nullcontext
 
 import pytest
 from pyvisa import constants, errors, highlevel
 
+from electronicload_tool_cli.cli import main
 from electronicload_tool_core import visa
 from electronicload_tool_core.errors import LoadError
 from electronicload_tool_core.readonly import execute
@@ -228,3 +231,51 @@ def test_asrl_scope_refuses_before_visa(command, extra):
     with pytest.raises(LoadError) as failure:
         execute(command, **(ASRL_SCOPE | extra))
     assert failure.value.exit_code == 2
+
+
+@pytest.mark.parametrize("command,arguments,replies,traffic", [
+    ("input-off", [], {}, ["SYST:REM", "INP OFF", "INP:STAT?"]),
+    ("input-off", ["--hardware-validation", "cv"], {}, ["*IDN?", "SYST:REM", "INP OFF", "INP:STAT?"]),
+    ("scpi-error-next", ["--hardware-validation", "system-query"],
+     {"SYST:ERR?": '-120,"entry"'}, ["SYST:ERR?"]),
+    ("short-status", ["--hardware-validation", "readback"],
+     {"INP:SHOR:STAT?": "0"}, ["INP:SHOR:STAT?"]),
+])
+def test_asrl_contributor_reuses_command_after_timed_identity(
+    asrl_library, capsys, command, arguments, replies, traffic,
+):
+    asrl_library.replies.update(replies)
+    assert main([command, "--resource", ASRL_SCOPE["resource"], "--validation-connection", "asrl",
+                 "--serial-baud-rate", "19200", "--json", *arguments]) == 0
+    result = json.loads(capsys.readouterr().out)["result"]
+    assert result["transport"] == "asrl" and result["validation_only"] is True
+    assert [event[1:] for event in asrl_library.events if event[0] == "query"] == [
+        ("*IDN?", 1000), *((token, 5000) for token in traffic),
+    ]
+    assert asrl_library.attributes[ATTR.asrl_baud_rate] == 19200
+    assert asrl_library.events[-2:] == [("close", 11), ("close", 10)]
+
+
+def test_asrl_contributor_refuses_late_identity_before_control_writes(asrl_library, capsys):
+    asrl_library.latency_ms.update(query=570, read=570)
+    assert main(["input-off", "--resource", ASRL_SCOPE["resource"], "--validation-connection", "asrl",
+                 "--json"]) == 3
+    error = json.loads(capsys.readouterr().out)["error"]
+    assert error["code"] == "query_failed"
+    assert [event[1] for event in asrl_library.events if event[0] == "query"] == ["*IDN?"]
+    assert asrl_library.events[-2:] == [("close", 11), ("close", 10)]
+
+
+@pytest.mark.parametrize("command,args,code", [
+    ("input-off", [], "invalid_resource"),
+    ("input-on", ["--validation-connection", "asrl"], "confirmation_required"),
+    ("set-cv", ["--voltage", "3", "--range", "low", "--validation-connection", "asrl"],
+     "unsupported_live_scope"),
+    ("trace-status", ["--validation-connection", "asrl"], "unsupported_live_scope"),
+    ("measure-log", ["--interval-s", "1", "--count", "1", "--validation-connection", "asrl"],
+     "argument_error"),
+])
+def test_asrl_contributor_keeps_product_and_workflow_refusals(asrl_library, capsys, command, args, code):
+    assert main([command, "--resource", ASRL_SCOPE["resource"], "--json", *args]) == 2
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == code
+    assert asrl_library.events == []

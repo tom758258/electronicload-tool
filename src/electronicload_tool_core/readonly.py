@@ -9,8 +9,8 @@ from .identity import MODEL_ID, parse_identity
 from .readback import COMMANDS as READBACK_COMMANDS, execute as execute_readback
 from .simulator import Simulator
 from .visa import (ASRL_IDN_TIMEOUT_MS, ASRL_OPEN_TIMEOUT_MS, TERMINATION, TIMEOUT_MS,
-                   SerialOptions, open_asrl_session, open_session, query as _query,
-                   require_trusted_session, validate_connection)
+                   SerialOptions, open_asrl_session, open_request_session, open_session, query as _query,
+                   require_trusted_session, validate_connection, validate_request_connection)
 
 BASIC_MEASUREMENTS = {
     "voltage": ("voltage_v", "MEAS:VOLT?"),
@@ -183,6 +183,7 @@ def execute(
     resource: str | None = None, backend: str = "system", validation: bool = False,
     metric: str | None = None, simulator=None, all_errors: bool = False,
     hardware_validation: str | None = None, serial_options: SerialOptions | None = None,
+    asrl=None,
 ) -> dict:
     """Run one request; the legacy validation flag never opens offline-only commands."""
     if command not in COMMANDS or mode not in ("live", "dry-run", "simulate"):
@@ -191,14 +192,18 @@ def execute(
     validate_error_queue_all(all_errors)
     if all_errors and command != ERROR_QUEUE_COMMAND:
         raise LoadError("argument_error", "Only scpi-error-next accepts all.")
+    if asrl is not None and hardware_validation is None and command in ASRL_READONLY_COMMANDS:
+        return _execute_asrl_readonly(command, mode, model_id, resource, backend, asrl)
     if hardware_validation == ASRL_READONLY_SCOPE:
+        if asrl is not None:
+            raise LoadError("argument_error", "Select one ASRL contributor option.")
         return _execute_asrl_readonly(command, mode, model_id, resource, backend, serial_options)
     if serial_options is not None:
         raise LoadError("argument_error", "Serial options require the ASRL read-only validation scope.")
     if command in READBACK_COMMANDS:
         return execute_readback(command, mode=mode, resource=resource, backend=backend,
                                 model_id=model_id, simulator=simulator,
-                                hardware_validation=hardware_validation)
+                                hardware_validation=hardware_validation, asrl=asrl)
     if hardware_validation is not None and (
             hardware_validation != "system-query" or command not in SYSTEM_QUERIES or mode == "simulate"):
         raise LoadError("argument_error", "System Query contributor validation requires live or dry-run.")
@@ -206,13 +211,15 @@ def execute(
                          if hardware_validation else {})
     if model_id != MODEL_ID:
         raise LoadError("unsupported_model", "The requested model profile is not registered.")
-    validate_connection(resource, backend, required=mode == "live")
+    validate_request_connection(resource, backend, mode=mode, asrl=asrl,
+                                allowed=hardware_validation == "system-query")
     if mode == "dry-run":
         return {
             "queries": (["*IDN?", NATIVE_MEASUREMENTS[command][metric][1]]
                         if metric is not None else list(QUERIES[command])),
-            "backend": "system", "transport": "usb", "timeout_ms": TIMEOUT_MS,
-            "read_termination": TERMINATION, "write_termination": TERMINATION,
+            "backend": "system", "transport": "asrl" if asrl is not None else "usb", "timeout_ms": TIMEOUT_MS,
+            "read_termination": asrl.read_termination if asrl is not None else TERMINATION,
+            "write_termination": asrl.write_termination if asrl is not None else TERMINATION,
             "live_access": "product" if command in PRODUCT_LIVE_COMMANDS else "blocked",
             "resource_required_for_live": True,
             **({"max_reads": MAX_ERROR_READS} if all_errors else {}),
@@ -224,7 +231,7 @@ def execute(
         if mode == "simulate":
             require_trusted_session(simulator)
             return _read(simulator or Simulator(), command, metric, all_errors)
-        with open_session(resource) as (session, runtime):
+        with open_request_session(resource, asrl, open_session) as (session, runtime):
             require_trusted_session(session)
             result = {**_read(session, command, metric, all_errors), "visa": runtime, **validation_result}
         return result

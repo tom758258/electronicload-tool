@@ -12,7 +12,8 @@ from time import monotonic, sleep
 
 from .errors import LoadError, communication_error
 from .identity import MODEL_ID, parse_identity
-from .visa import open_session, require_trusted_session, validate_connection
+from .visa import (open_request_session, open_session, require_trusted_session,
+                   validate_request_connection)
 from .simulator import ControlSimulator, list_settings, transient_settings
 from .trigger import TRIGGER_COMMANDS, software_trigger, validate_setup as validate_trigger_setup
 
@@ -1205,12 +1206,16 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
             rise_slew: object | None = None, fall_slew: object | None = None,
             latch: str | None = None, seconds: int | None = None,
             count: int | None = None, vdrop: object | None = None,
-            trigger_source: str | None = None, trigger_interval: object | None = None) -> dict:
+            trigger_source: str | None = None, trigger_interval: object | None = None,
+            asrl=None) -> dict:
     if command not in CONTROL_COMMANDS or mode not in {"live", "simulate", "dry-run"}:
         raise LoadError("argument_error", "Unknown control command or mode.")
     if model_id != MODEL_ID:
         raise LoadError("unsupported_model", "The requested profile is not registered.")
-    validate_connection(resource, backend, required=mode == "live")
+    validate_request_connection(resource, backend, mode=mode, asrl=asrl,
+                                allowed=hardware_validation is not None or command in PRODUCT_LIVE_COMMANDS)
+    if asrl is not None and mode == "live" and command == "input-on" and not confirmed:
+        raise LoadError("confirmation_required", "Input ON needs explicit confirmation.")
     if mode == "simulate":
         require_trusted_session(simulator)
     if hardware_validation == "readback":
@@ -1222,7 +1227,7 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
                     fall_slew, latch, seconds, count, vdrop, trigger_source, trigger_interval))):
             raise LoadError("argument_error", "Readback validation accepts only status commands without arguments.")
         return execute_readback(command, mode=mode, resource=resource,
-                                hardware_validation=hardware_validation)
+                                hardware_validation=hardware_validation, asrl=asrl)
     if command in TRIGGER_COMMANDS or hardware_validation == "trigger":
         if any(value is not None for value in (current, voltage, resistance, power,
                 range_name, slot, rise_slew, fall_slew, latch, seconds, count, vdrop)):
@@ -1235,7 +1240,7 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
             return execute_trigger(command, mode=mode, resource=resource, source=trigger_source,
                                    interval=trigger_interval, transient=transient,
                                    list_configuration=list_configuration, expected=validation_settings,
-                                   confirmed=confirmed, stop=stop)
+                                   confirmed=confirmed, stop=stop, asrl=asrl)
         if (hardware_validation is not None or validation_settings is not None or confirmed
                 or transient is not None or list_configuration is not None):
             raise LoadError("argument_error", "Unexpected Trigger Setup arguments.")
@@ -1304,7 +1309,7 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
 
         return execute_input_timer(command, mode=mode, resource=resource, seconds=seconds,
                                    current=current, range_name=range_name, expected=validation_settings,
-                                   confirmed=confirmed, stop=stop)
+                                   confirmed=confirmed, stop=stop, asrl=asrl)
     if command in INPUT_TIMER_COMMANDS:
         if mode == "live":
             raise LoadError("unsupported_live_scope", "Input Timer is offline only.")
@@ -1385,7 +1390,7 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
                                  resource=resource, current=current, voltage=voltage,
                                  resistance=resistance, power=power, range_name=range_name,
                                  transient=transient, expected=validation_settings,
-                                 confirmed=confirmed, stop=stop, vdrop=vdrop)
+                                 confirmed=confirmed, stop=stop, vdrop=vdrop, asrl=asrl)
     if validation_settings is not None:
         raise LoadError("argument_error", "Validation settings require --hardware-validation.")
     if command in TRANSIENT_COMMANDS:
@@ -1470,7 +1475,7 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
             simulated.transient_configuration = None
             simulated.last_trigger = None
         return result
-    with open_session(resource) as (session, runtime):
+    with open_request_session(resource, asrl, open_session) as (session, runtime):
         result = _perform(session, command, current=current, voltage=voltage,
                           resistance=resistance, power=power,
                           range_name=range_name, confirmed=confirmed,

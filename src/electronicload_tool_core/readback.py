@@ -6,7 +6,7 @@ from . import control as c
 from .errors import LoadError
 from .identity import MODEL_ID, parse_identity
 from .simulator import ControlSimulator, transient_settings
-from .visa import require_trusted_session, validate_connection
+from .visa import open_request_session, require_trusted_session, validate_request_connection
 
 SCOPE = "readback"
 COMMANDS = ("readback", "fixed-status", "fixed-slew-status")
@@ -264,12 +264,14 @@ def snapshot(session, command):
 
 
 def execute(command, *, mode, resource, backend="system", model_id=MODEL_ID,
-            simulator=None, hardware_validation=None):
+            simulator=None, hardware_validation=None,
+            asrl=None):
     if command not in (*COMMANDS, *CONTROL_STATUS_COMMANDS) or mode not in ("live", "simulate", "dry-run"):
         raise LoadError("argument_error", "Unknown readback command or execution mode.")
     if model_id != MODEL_ID:
         raise LoadError("unsupported_model", "The requested model profile is not registered.")
-    validate_connection(resource, backend, required=mode == "live")
+    validate_request_connection(resource, backend, mode=mode, asrl=asrl,
+                                allowed=hardware_validation == SCOPE)
     if hardware_validation not in (None, SCOPE) or (hardware_validation and mode == "simulate"):
         raise LoadError("argument_error", "Readback contributor validation requires live or dry-run.")
     if mode == "live" and hardware_validation != SCOPE:
@@ -280,7 +282,7 @@ def execute(command, *, mode, resource, backend="system", model_id=MODEL_ID,
     if mode == "simulate":
         require_trusted_session(simulator)
         return {**snapshot(simulator or ControlSimulator(), command), "state_source": "simulate"}
-    with c.open_session(resource) as (session, runtime):
+    with open_request_session(resource, asrl, c.open_session) as (session, runtime):
         require_trusted_session(session)
         parse_identity(c._query(session, "*IDN?"))
         result = snapshot(session, command)

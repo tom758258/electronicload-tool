@@ -16,7 +16,7 @@ from .identity import MODEL_ID, parse_identity
 from .simulator import ControlSimulator, TRACE_BUFFER_FULL
 from .visa import (TraceSessionLost, mark_session_untrusted, open_session,
                    require_trusted_session,
-                   validate_connection)
+                   open_request_session, validate_request_connection)
 
 TRACE_COMMANDS = ("trace-configure", "trace-start", "trace-status")
 CONFIG_FIELDS = frozenset({"source", "points", "interval_s"})
@@ -414,13 +414,15 @@ def _capture_with_csv(session, config, expected, stop, cancel, csv_options):
 
 def execute(command, *, mode="live", resource=None, backend="system", model_id=MODEL_ID,
             arguments=None, simulator=None, stop: Event | None = None,
-            cancel: Event | None = None, hardware_validation: str | None = None):
+            cancel: Event | None = None, hardware_validation: str | None = None,
+            asrl=None):
     """Run offline TRACE or explicitly authorized contributor validation."""
     if command not in TRACE_COMMANDS or mode not in ("live", "simulate", "dry-run"):
         raise LoadError("argument_error", "Unknown TRACE command or execution mode.")
     if model_id != MODEL_ID:
         raise LoadError("unsupported_model", "The requested model profile is not registered.")
-    validate_connection(resource, backend, required=mode == "live")
+    validate_request_connection(resource, backend, mode=mode, asrl=asrl,
+                                allowed=hardware_validation == "trace")
     arguments = arguments if arguments is not None else {}
     if not isinstance(arguments, dict):
         raise LoadError("argument_error", "TRACE arguments must be an object.")
@@ -469,7 +471,7 @@ def execute(command, *, mode="live", resource=None, backend="system", model_id=M
     if mode == "live":
         # Contributor-only: no permission change to Worker or Product LIVE.
         # Closing VISA never implies Input OFF.
-        with open_session(resource) as (session, runtime):
+        with open_request_session(resource, asrl, open_session) as (session, runtime):
             result = run(session)
         return {**result, **marker, "visa": runtime}
     return run(simulator if simulator is not None else ControlSimulator())

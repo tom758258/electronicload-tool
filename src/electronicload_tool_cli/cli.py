@@ -135,9 +135,7 @@ def main(argv: list[str] | None = None) -> int:
         modes.add_argument("--simulate", action="store_true")
         sub.add_argument("--resource", help=("Optional USB INSTR resource for connection option validation."
                                              if name in WORKFLOW_COMMANDS else
-                                             "Explicit USB INSTR or ASRL INSTR with asrl-readonly."
-                                             if name in ASRL_READONLY_COMMANDS else
-                                             "Explicit USB INSTR resource; required for LIVE."))
+                                             "Explicit USB INSTR, or ASRL INSTR for contributor validation."))
         sub.add_argument("--backend", default="system")
         sub.add_argument("--model", default=MODEL_ID)
         sub.add_argument("--json", action="store_true")
@@ -163,14 +161,16 @@ def main(argv: list[str] | None = None) -> int:
             continue
         sub.add_argument("--validation-allow-pending-live-support", action="store_true",
                          help=argparse.SUPPRESS)
+        sub.add_argument("--validation-connection", choices=("asrl",),
+                         help="Use explicit ASRL INSTR for standalone contributor validation.")
+        sub.add_argument("--serial-baud-rate", type=int, default=argparse.SUPPRESS)
+        sub.add_argument("--serial-data-bits", type=int, default=argparse.SUPPRESS)
+        for field, choices in SERIAL_CHOICES.items():
+            sub.add_argument("--serial-" + field.replace("_", "-"), choices=tuple(choices),
+                             default=argparse.SUPPRESS)
         if name in ASRL_READONLY_COMMANDS:
             sub.add_argument("--hardware-validation", choices=(ASRL_READONLY_SCOPE,),
                              help="Explicit CLI-only IT8812C ASRL read-only validation.")
-            sub.add_argument("--serial-baud-rate", type=int, default=argparse.SUPPRESS)
-            sub.add_argument("--serial-data-bits", type=int, default=argparse.SUPPRESS)
-            for field, choices in SERIAL_CHOICES.items():
-                sub.add_argument("--serial-" + field.replace("_", "-"), choices=tuple(choices),
-                                 default=argparse.SUPPRESS)
         if name == SEQUENCE_COMMAND:
             sub.add_argument("--file", required=True, help="UTF-8 Software Sequence JSON document.")
             sub.add_argument("--hardware-validation", choices=(SEQUENCE_COMMAND,),
@@ -338,6 +338,13 @@ def main(argv: list[str] | None = None) -> int:
             code, response = worker_request(args.url, url_path, body)
             print(json.dumps(response, allow_nan=False))
             return 0 if 200 <= code < 300 else 2 if code in (400, 409, 429) else 3
+        serial = {name.removeprefix("serial_"): value for name, value in vars(args).items()
+                  if name.startswith("serial_")}
+        asrl = (SerialOptions(**serial) if getattr(args, "validation_connection", None) == "asrl"
+                else None)
+        scope = getattr(args, "hardware_validation", None)
+        if serial and asrl is None and scope != ASRL_READONLY_SCOPE:
+            raise LoadError("argument_error", "Serial options require ASRL contributor validation.")
         if args.command == "list-resources":
             result = discover_resources(live_only=args.live_only)
         elif args.command == SEQUENCE_COMMAND:
@@ -347,7 +354,8 @@ def main(argv: list[str] | None = None) -> int:
                 raise LoadError("argument_error", "Cannot read a valid Sequence JSON document.") from exc
             result = sequence_execute(document, mode=mode, model_id=args.model,
                                       backend=args.backend, resource=args.resource,
-                                      confirmed=args.confirm, hardware_validation=args.hardware_validation)
+                                      confirmed=args.confirm,
+                                      hardware_validation=args.hardware_validation, asrl=asrl)
             args.json = True
         elif args.command in WORKFLOW_COMMANDS:
             required, optional = WORKFLOW_ARGUMENTS[args.command]
@@ -368,13 +376,13 @@ def main(argv: list[str] | None = None) -> int:
                 args.command, mode=mode, resource=args.resource, backend=args.backend, model_id=args.model,
                 arguments=arguments, hardware_validation=args.hardware_validation == "protection",
                 snapshot=getattr(args, "validation_snapshot", False),
-                trial=getattr(args, "protection_trial", None),
+                trial=getattr(args, "protection_trial", None), asrl=asrl,
             )
         elif args.command in TRACE_COMMANDS:
             fields = CONFIG_FIELDS if args.command == "trace-configure" else CSV_FIELDS
             result = trace_execute(args.command, mode=mode, resource=args.resource,
                                    backend=args.backend, model_id=args.model,
-                                   hardware_validation=args.hardware_validation,
+                                   hardware_validation=args.hardware_validation, asrl=asrl,
                                    arguments={key: value for key, value in vars(args).items()
                                               if key in fields})
         elif args.command in CONTROL_COMMANDS:
@@ -423,22 +431,24 @@ def main(argv: list[str] | None = None) -> int:
                 count=getattr(args, "count", None),
                 trigger_source=getattr(args, "source", None),
                 trigger_interval=getattr(args, "interval_s", None),
+                asrl=asrl,
             )
         else:
-            serial = {name.removeprefix("serial_"): value for name, value in vars(args).items()
-                      if name.startswith("serial_")}
             result = read_execute(args.command, mode=mode, resource=args.resource,
                                   backend=args.backend, model_id=args.model,
                                   validation=args.validation_allow_pending_live_support,
                                   metric=getattr(args, "metric", None),
                                   all_errors=getattr(args, "all", False),
                                   hardware_validation=getattr(args, "hardware_validation", None),
-                                  serial_options=SerialOptions(**serial) if serial else None)
+                                  serial_options=SerialOptions(**serial) if serial and asrl is None else None,
+                                  asrl=asrl)
     except LoadError as exc:
         return _emit_error(exc, command, mode, json_output)
     except KeyboardInterrupt:
         return _emit_error(LoadError("interrupted", "Request interrupted.", 3),
                            command, mode, json_output)
+    if asrl is not None:
+        result = {**result, "transport": "asrl", "validation_only": True}
     if args.json:
         payload = {"ok": True, "command": args.command, "mode": mode, "result": result}
         if args.command != "list-resources":
