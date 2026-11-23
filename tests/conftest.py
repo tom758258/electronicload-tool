@@ -12,6 +12,7 @@ def no_hardware(monkeypatch):
         pytest.fail("A test attempted to create a real VISA ResourceManager.")
 
     monkeypatch.setattr(pyvisa, "ResourceManager", refuse)
+    monkeypatch.setattr(pyvisa.highlevel, "open_visa_library", refuse)
 
 
 @pytest.fixture

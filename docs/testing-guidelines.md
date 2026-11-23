@@ -502,3 +502,25 @@ Worker, including retention of cleanup failure evidence across subsequent jobs.
 Verify LIVE refusal before VISA with the recording fake.
 The basic workflows run offline and require no release or physical-device
 acceptance.
+
+## ASRL read-only focused checks
+
+Run `tests/test_asrl.py`, `tests/test_readonly_core.py`,
+`tests/test_readonly_cli.py`, `tests/test_discovery.py`,
+`tests/test_discovery_cli.py` and `tests/test_foundation.py` from the repository
+root. Select the ASRL, existing USB default-plan and unattended refusal cases
+in `tests/test_live_validation_script.py`. Use a fictional ASRL INSTR resource
+and block both PyVISA library and resource-manager access in offline plans.
+Run Ruff on changed Python files.
+
+Verify the independent ASRL lifetime, omitted and explicit settings, timeout
+transition, identity, cleanup errors, USB isolation, and refusal before VISA
+for unapproved scopes. Reserve physical validation for the separately
+authorized [ASRL procedure](cli/README.md#physical-validation-procedure--實機驗證步驟).
+
+從 repo 根目錄執行上述 Core、CLI、探索與基礎測試。PowerShell 選跑 ASRL、既有
+USB 預設計畫與非互動拒絕案例。離線計畫使用虛構的 ASRL INSTR 資源，封鎖 PyVISA
+函式庫和 Resource Manager 的存取，且只對修改的 Python 檔案執行 Ruff。
+驗證 ASRL 獨立生命週期、選填設定、逾時切換、身分、清理錯誤、USB 隔離與未許可
+範圍在 VISA 存取前被拒絕。實機測試依據另行授權的
+[ASRL 步驟](cli/README.md#physical-validation-procedure--實機驗證步驟)。

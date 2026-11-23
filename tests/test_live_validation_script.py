@@ -11,6 +11,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 RESOURCE = 'USB0::0xFFFF::0x0001::SYNTHETIC::INSTR'
+ASRL = 'ASRL999::INSTR'
 
 
 @pytest.fixture
@@ -27,16 +28,18 @@ def run_script(tmp_path):
         'def forbidden(*args, **kwargs):\n'
         f'    Path({str(tmp_path / "visa-attempt")!r}).touch()\n'
         '    raise AssertionError("Physical VISA forbidden in script tests")\n'
-        'pyvisa.ResourceManager = forbidden\n', encoding='utf-8')
+        'pyvisa.ResourceManager = forbidden\n'
+        'pyvisa.highlevel.open_visa_library = forbidden\n', encoding='utf-8')
     env = dict(os.environ, PYTHONPATH=str(tmp_path))
     for name in ('XDG_CACHE_HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME'):
         directory = tmp_path / name.lower()
         directory.mkdir()
         env[name] = str(directory)
-    def run(extra, *, source_limits=False, mode_array=None, preflight=False):
+    def run(extra, *, source_limits=False, mode_array=None, preflight=False, resource=RESOURCE):
         args = ([str(ROOT / 'scripts/preflight-cli.ps1')] if preflight else
-                [str(ROOT / 'scripts/live-cli-check.ps1'), '-Target', 'itech-it8812c',
-                 '-Resource', RESOURCE])
+                [str(ROOT / 'scripts/live-cli-check.ps1'), '-Target', 'itech-it8812c'])
+        if resource is not None and not preflight:
+            args += ['-Resource', resource]
         if source_limits and not preflight:
             args += ['-SourceCurrentLimitA', '0.5', '-SourceVoltageLimitV', '12']
         args += extra
@@ -638,3 +641,46 @@ def test_sequence_plan_or_noninteractive_refusal(run_script, plan_only):
 def test_sequence_focused_preflight(run_script):
     checked = run_script(["-SequenceOnly"], preflight=True)
     assert checked.returncode == 0, checked.stdout + checked.stderr
+
+
+@pytest.mark.parametrize('plan_only,serial', [
+    (True, []),
+    (True, ['-SerialBaudRate', '19200', '-SerialDataBits', '7', '-SerialParity', 'even',
+            '-SerialStopBits', '2', '-SerialFlowControl', 'none', '-SerialReadTermination', 'CRLF',
+            '-SerialWriteTermination', 'LF']),
+    (False, ['-SerialWriteTermination', 'CR']),
+])
+def test_asrl_script_plan_and_noninteractive_refusal(run_script, plan_only, serial):
+    result = run_script(['-Connection', 'asrl', '-Modes', 'asrl-readonly', *serial,
+                         *(['-PlanOnly'] if plan_only else [])], resource=ASRL)
+    assert result.returncode == (0 if plan_only else 2), result.stdout + result.stderr
+    path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)[-1])
+    text = path.read_text(encoding='utf-8')
+    report = json.loads(text)
+    assert report['overall_status'] == ('PLAN ONLY' if plan_only else 'BLOCKED')
+    assert report['connection'] == 'asrl' and report['validation_scope'] == 'asrl-readonly'
+    assert 'USB/System VISA' in report['product_live']
+    assert report['prechecks']['plan'] == 'PASS' and not report['hardware_touched']
+    assert report['summary_counts'] == {'total': 4, 'passed': 0, 'failed': 0, 'skipped': 0, 'not_run': 4}
+    assert ASRL not in text + result.stdout and str(ROOT) not in text
+    assert not (path.parents[1] / 'private').exists()
+    assert [case['name'] for case in report['cases']] == ['identify', 'input-state', 'measure-off', 'final-input-state']
+    for case in report['cases']:
+        assert case['arguments'] == ['--hardware-validation', 'asrl-readonly', *[
+            re.sub(r'(?<=[a-z])(?=[A-Z])', '-', arg).lower().replace('-serial-', '--serial-', 1)
+            if arg.startswith('-Serial') else arg for arg in serial
+        ]]
+
+
+@pytest.mark.parametrize('extra,resource', [
+    (['-Connection', 'asrl'], ASRL),
+    (['-Connection', 'asrl', '-Modes', 'asrl-readonly,cc'], ASRL),
+    (['-Connection', 'asrl', '-Modes', 'asrl-readonly'], None),
+    (['-Connection', 'asrl', '-Modes', 'asrl-readonly'], RESOURCE),
+    (['-Modes', 'asrl-readonly'], RESOURCE),
+    (['-Modes', 'cc', '-SerialBaudRate', '19200'], RESOURCE),
+    (['-Connection', 'asrl', '-Modes', 'asrl-readonly', '-SerialStopBits', '3'], ASRL),
+])
+def test_asrl_script_rejects_unsafe_or_invalid_selection(run_script, extra, resource):
+    result = run_script(['-PlanOnly', *extra], resource=resource)
+    assert result.returncode == 2 and 'Report:' not in result.stdout, result.stdout + result.stderr

@@ -172,6 +172,43 @@ def test_product_live_readonly_flow(fake_visa, capsys):
     assert json.loads(capsys.readouterr().out)["result"]["power_w"] == 6.0
 
 
+def test_asrl_cli_preview_is_validation_only_and_keeps_omitted_options(capsys):
+    assert main(["measure", "--resource", "asrl999::instr", "--hardware-validation", "asrl-readonly",
+                 "--serial-baud-rate", "19200", "--serial-write-termination", "CRLF",
+                 "--dry-run", "--json"]) == 0
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)["result"]
+    assert captured.err == "" and "asrl999" not in captured.out
+    assert result["transport"] == "asrl" and result["live_access"] == "blocked"
+    assert result["validation_scope"] == "asrl-readonly" and result["validation_only"] is True
+    assert result["serial_options"] == {"baud_rate": 19200, "write_termination": "\r\n"}
+    assert result["open_timeout_ms"] == result["idn_timeout_ms"] == 1000
+    assert result["timeout_ms"] == 5000
+
+
+@pytest.mark.parametrize("args,code", [
+    (["identify", "--resource", "ASRL999::INSTR"], "invalid_resource"),
+    (["identify", "--resource", "ASRL999::RAW", "--hardware-validation", "asrl-readonly"], "invalid_resource"),
+    (["measure", "--resource", "TCPIP0::example.invalid::INSTR", "--hardware-validation", "asrl-readonly"],
+     "invalid_resource"),
+    (["measure", "--resource", RESOURCE, "--serial-baud-rate", "19200"], "argument_error"),
+    (["input-on", "--resource", "ASRL999::INSTR", "--confirm"], "invalid_resource"),
+    (["input-on", "--resource", "ASRL999::INSTR", "--hardware-validation", "asrl-readonly", "--confirm"],
+     "argument_error"),
+])
+def test_asrl_cli_refusals_before_visa(capsys, args, code):
+    assert main([*args, "--json"]) == 2
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["error"]["code"] == code
+    assert captured.err == ""
+
+
+def test_asrl_worker_live_resource_is_refused_before_startup(capsys):
+    assert main(["worker", "--mode", "live", "--resource", "ASRL999::INSTR", "--allow-input-on"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == "" and "invalid_resource" in captured.err
+
+
 def test_runtime_error_json(fake_visa, capsys):
     fake_visa.responses["INP:STAT?"] = TimeoutError("PRIVATE-RESOURCE")
     assert main(["input-state", "--resource", RESOURCE, "--json"]) == 3

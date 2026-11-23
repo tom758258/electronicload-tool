@@ -1,8 +1,13 @@
-"""Explicit System VISA discovery; only USB INSTR receives read-only IDN probes."""
+"""Passively list VISA resources and identify explicitly selected instruments."""
 
 from .errors import LoadError, communication_error
-from .identity import MODEL_ID, parse_identity
+from .identity import MODEL_ID, Identity, parse_identity
 from .visa import open_session, validate_connection
+
+
+def verify_asrl_identity(session) -> Identity:
+    """Verify one explicitly opened ASRL session using its short IDN timeout."""
+    return parse_identity(session.query_identity("*IDN?"))
 
 
 def _listed_resources() -> tuple[str, ...]:

@@ -14,6 +14,7 @@ deliberate confirmation. Simulation and dry-run never grant hardware authorizati
 ## Features
 
 - Read-only identification, Input state and measurements for the exact supported IT8812C Product LIVE scope.
+- [RS-232 contributor validation](docs/cli/README.md#asrl-read-only-validation--asrl-唯讀驗證) for IT8812C identification, Input state and measurements over an explicit ASRL INSTR resource.
 - Fixed CC and deliberate Input ON/OFF with the existing hardware safety gates.
 - Offline Fixed CV/CR/CW and software Auto Range for Fixed CC/CV/CR.
 - Offline Fixed CC paired optional Slew, standalone VON setup/status, and Fixed-mode Short ON/OFF/status.
@@ -42,7 +43,7 @@ CLI. WebUI is not implemented. The bundled Worker is part of the CLI package and
 | --- | --- |
 | Python 3.10+ | Runtime |
 | [PyVISA](https://pyvisa.readthedocs.io/) | VISA communication |
-| System VISA (PyVISA `@ivi`) | Required external runtime for authorized USB INSTR LIVE commands |
+| System VISA (PyVISA `@ivi`) | Required external runtime for authorized USB INSTR LIVE commands and ASRL INSTR contributor validation |
 | [uv](https://docs.astral.sh/uv/) | Locked local development environment |
 | pytest / Ruff / build | Optional development tools declared in `pyproject.toml` |
 
@@ -120,6 +121,7 @@ is implied by a documentation change.
 ## Documentation
 
 - [CLI README — detailed commands and validation](docs/cli/README.md)
+- [Core VISA transport and LIVE support policy](docs/visa-connections.md)
 - [Electronic Load Worker Contract](docs/contracts/electronicload-worker-contract.md)
 - [Common Worker Protocol](docs/contracts/common-worker-protocol.md)
 - [Common CLI JSON / JSONL Contract](docs/contracts/common-cli-jsonl-contract.md)

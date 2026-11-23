@@ -3,11 +3,14 @@
 import math
 import re
 
-from .errors import LoadError, communication_error
+from .discovery import verify_asrl_identity
+from .errors import LoadError
 from .identity import MODEL_ID, parse_identity
 from .readback import COMMANDS as READBACK_COMMANDS, execute as execute_readback
 from .simulator import Simulator
-from .visa import TERMINATION, TIMEOUT_MS, open_session, require_trusted_session, validate_connection
+from .visa import (ASRL_IDN_TIMEOUT_MS, ASRL_OPEN_TIMEOUT_MS, TERMINATION, TIMEOUT_MS,
+                   SerialOptions, open_asrl_session, open_session, query as _query,
+                   require_trusted_session, validate_connection)
 
 BASIC_MEASUREMENTS = {
     "voltage": ("voltage_v", "MEAS:VOLT?"),
@@ -45,6 +48,8 @@ QUERIES.update({command: ("*IDN?", query) for command, query in SYSTEM_QUERIES.i
 COMMANDS = (*QUERIES, *READBACK_COMMANDS)
 # Exact Product LIVE command allowlist; model, USB and backend checks remain mandatory.
 PRODUCT_LIVE_COMMANDS = frozenset({"identify", "input-state", "measure"})
+ASRL_READONLY_SCOPE = "asrl-readonly"
+ASRL_READONLY_COMMANDS = frozenset({"identify", "input-state", "measure"})
 
 
 def validate_metric(command: str, metric: object) -> None:
@@ -56,15 +61,6 @@ def validate_metric(command: str, metric: object) -> None:
 def validate_error_queue_all(all_errors: object) -> None:
     if type(all_errors) is not bool:
         raise LoadError("argument_error", "Error Queue all must be a boolean.")
-
-
-def _query(session, query: str) -> str:
-    try:
-        return session.query(query)
-    except Exception as exc:
-        error = communication_error("query_failed", f"Query {query} failed.", exc)
-        error.details["query"] = query
-        raise error from exc
 
 
 def _error_queue_entry(session, query: str) -> dict:
@@ -152,11 +148,41 @@ def read_measurement(session, command: str, metric: str | None = None, *,
     return result
 
 
+def _execute_asrl_readonly(command, mode, model_id, resource, backend, serial_options) -> dict:
+    if command not in ASRL_READONLY_COMMANDS or mode == "simulate":
+        raise LoadError("unsupported_live_scope", "ASRL read-only validation requires an eligible live or dry-run command.")
+    if model_id != MODEL_ID:
+        raise LoadError("unsupported_model", "The requested model profile is not registered.")
+    validate_connection(resource, backend, required=True, asrl=True)
+    overrides = serial_options.overrides() if serial_options is not None else {}
+    scope = {"transport": "asrl", "validation_only": True, "validation_scope": ASRL_READONLY_SCOPE}
+    if mode == "dry-run":
+        return {
+            **scope, "queries": list(QUERIES[command]), "backend": backend,
+            "open_timeout_ms": ASRL_OPEN_TIMEOUT_MS, "idn_timeout_ms": ASRL_IDN_TIMEOUT_MS,
+            "timeout_ms": TIMEOUT_MS, "serial_options": overrides,
+            "live_access": "blocked", "resource_required_for_live": True,
+        }
+    try:
+        with open_asrl_session(resource, overrides) as (session, runtime):
+            identity = verify_asrl_identity(session)
+            if command == "identify":
+                result = identity.public_result()
+            else:
+                session.set_io_timeout(TIMEOUT_MS)
+                result = read_measurement(session, command)
+            return {**result, "visa": runtime, **scope}
+    except LoadError as exc:
+        if command == "input-state":
+            exc.details["input_state"] = "UNKNOWN"
+        raise
+
+
 def execute(
     command: str, *, mode: str = "live", model_id: str = MODEL_ID,
     resource: str | None = None, backend: str = "system", validation: bool = False,
     metric: str | None = None, simulator=None, all_errors: bool = False,
-    hardware_validation: str | None = None,
+    hardware_validation: str | None = None, serial_options: SerialOptions | None = None,
 ) -> dict:
     """Run one request; the legacy validation flag never opens offline-only commands."""
     if command not in COMMANDS or mode not in ("live", "dry-run", "simulate"):
@@ -165,6 +191,10 @@ def execute(
     validate_error_queue_all(all_errors)
     if all_errors and command != ERROR_QUEUE_COMMAND:
         raise LoadError("argument_error", "Only scpi-error-next accepts all.")
+    if hardware_validation == ASRL_READONLY_SCOPE:
+        return _execute_asrl_readonly(command, mode, model_id, resource, backend, serial_options)
+    if serial_options is not None:
+        raise LoadError("argument_error", "Serial options require the ASRL read-only validation scope.")
     if command in READBACK_COMMANDS:
         return execute_readback(command, mode=mode, resource=resource, backend=backend,
                                 model_id=model_id, simulator=simulator,
