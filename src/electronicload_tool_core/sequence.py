@@ -13,7 +13,8 @@ from .hardware_validation import (
 from .identity import MODEL_ID, parse_identity
 from .readonly import read_measurement
 from .simulator import ControlSimulator
-from .visa import open_session, require_trusted_session, validate_connection
+from .visa import (open_request_session, open_session, require_trusted_session,
+                   validate_request_connection)
 
 COMMAND = "sequence"
 SETPOINT_FIELDS = {"set-cc": "current", "set-cv": "voltage", "set-cr": "resistance",
@@ -250,7 +251,8 @@ class _Execution:
 
 
 def execute(document, *, mode="live", model_id=MODEL_ID, backend="system", resource=None,
-            confirmed=False, simulator=None, stop=None, hardware_validation=None):
+            confirmed=False, simulator=None, stop=None, hardware_validation=None,
+            asrl=None):
     loops, steps, contains_on = validate_document(document)
     if mode not in {"dry-run", "simulate", "live"} or type(confirmed) is not bool:
         raise LoadError("argument_error", "Invalid Sequence mode or Input ON confirmation.")
@@ -260,7 +262,8 @@ def execute(document, *, mode="live", model_id=MODEL_ID, backend="system", resou
         raise LoadError("argument_error", "Sequence hardware validation requires live or dry-run.")
     if mode == "live" and hardware_validation is None:
         raise LoadError("unsupported_live_scope", "Product LIVE is not open for Sequence.")
-    validate_connection(resource, backend, required=mode == "live")
+    validate_request_connection(resource, backend, mode=mode, asrl=asrl,
+                                allowed=hardware_validation == COMMAND)
     marker = {"validation_only": True, "validation_scope": COMMAND} if hardware_validation else {}
     if hardware_validation:
         validate_sequence_trial(loops, steps)
@@ -279,7 +282,7 @@ def execute(document, *, mode="live", model_id=MODEL_ID, backend="system", resou
     _check_stop(execution.stop)
     result = None
     try:
-        with open_session(resource) as (session, runtime):
+        with open_request_session(resource, asrl, open_session) as (session, runtime):
             result = execution.run(session, steps)
     except LoadError as exc:
         if result is not None:

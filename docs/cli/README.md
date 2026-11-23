@@ -78,7 +78,7 @@ Both commands support `--json` (one success/error object). Text output uses
 Discovery text and JSON may contain **real resource names and IDN serials**:
 use them only as local diagnostics; do not publish unredacted output.
 To verify one operator-selected ASRL INSTR resource, use `identify` with the
-[ASRL read-only validation scope](#asrl-read-only-validation--asrl-唯讀驗證).
+[ASRL contributor validation scope](#asrl-contributor-validation--asrl-貢獻者驗證).
 
 ### Results and exits
 
@@ -174,7 +174,7 @@ selected query, with `max_reads` for `--all`. Product LIVE and Worker LIVE
 are blocked.
 
 For separately approved hardware validation, run each query manually using
-the contributor CLI scope, an operator-supplied USB INSTR resource, and
+the contributor CLI scope, an operator-supplied USB or ASRL INSTR resource, and
 System VISA. Confirm physical Input OFF before querying. The CLI verifies
 the exact IT8812C identity before sending the query. Use `scpi-error-next`
 only when removing the returned queue entry is intended, and choose `--all`
@@ -296,7 +296,7 @@ columns derive from the configured sample interval.
 Normal TRACE Product LIVE and Worker LIVE remain **disabled**. For a separately
 approved, interactive instrument trial, the existing CLI has a narrow
 `--hardware-validation trace` scope on `trace-configure` and `trace-start`.
-Only this explicit scope opens the exact user-supplied USB INSTR Resource with
+This explicit scope uses the exact operator-supplied USB or ASRL INSTR Resource with
 System VISA, validates the exact IT8812C identity, and follows the same
 Configure/Start prechecks, single trigger, timeout and CSV rules as Offline TRACE.
 The result includes `validation_only: true`, `validation_scope: "trace"` and
@@ -541,7 +541,7 @@ standalone CLI contributor scopes. Use `--hardware-validation readback` for
 `average-status`, `transient-status`, and `list-status`. Use
 `--hardware-validation trace` for `trace-status`. CR-LED, Current Slow Rise,
 Input Timer, Trigger, and Protection use their existing scopes. These requests
-require the exact IT8812C identity and an explicit USB INSTR Resource with
+require the exact IT8812C identity and an explicit USB or ASRL INSTR Resource with
 System VISA. The new contributor readbacks identify their source as
 `instrument_readback`. Query failures and invalid replies return errors.
 `fixed-slew-status` checks both rates against the current CC Range.
@@ -1155,10 +1155,11 @@ Worker 使用 `arguments.document` 與 `arguments.confirm_input_on`。
 
 ### Contributor Software Sequence validation / 貢獻者實機驗證
 
-For separately authorized physical runs, select `-Modes sequence` on its own
-with a dedicated 5 V / 0.8 A source. The script uses the contributor CLI command
+For separately authorized physical runs, select `-Modes sequence` or include
+Sequence in a combined run with a dedicated 5 V / 0.8 A source. The script uses
 `sequence --file <file> --hardware-validation sequence --resource <USB-INSTR> --backend system --confirm --json`
-with the registered IT8812C over USB/System VISA. Each trial uses one session.
+with the registered IT8812C over System VISA. For ASRL, use the explicit
+[contributor transport option](#asrl-contributor-validation--asrl-貢獻者驗證). Each trial uses one session.
 Fixed setup and Input switching verify the applicable interlocks and settings.
 Use an exclusive instrument and an independent manual OFF method. Ordinary CLI
 and Worker LIVE are closed for Sequence.
@@ -1177,8 +1178,9 @@ original error, and gives the same independent OFF instructions. The script
 also gives independent OFF instructions if the process times out or Input OFF
 is unconfirmed. Cleanup stays within the original session.
 
-另行授權實機驗證後，單獨選擇 `-Modes sequence` 並使用專用 5 V／0.8 A 電源。
-Script 使用上方 CLI 貢獻者指令，以 USB／System VISA 連接已註冊的 IT8812C。
+另行授權實機驗證後，可單獨選擇 `-Modes sequence` 或與其他模式一起執行，並使用
+專用 5 V／0.8 A 電源。腳本以 System VISA 連接已註冊的 IT8812C。
+ASRL 需指定[貢獻者連線參數](#asrl-contributor-validation--asrl-貢獻者驗證)。
 每次試驗使用一個 Session，確認 Fixed 設定與 Input 切換的適用安全條件。
 實機操作需獨占儀器，並備妥獨立手動 OFF 手段。一般 CLI 與 Worker 維持拒絕
 Sequence LIVE。
@@ -1336,66 +1338,82 @@ does not authorize physical instrument operation.
 
 | Script | Purpose | Real hardware |
 | --- | --- | --- |
-| `scripts/preflight-cli.ps1` | Offline CLI, simulator, refusal and Manifest checks; focused switches: `-TransientOnly`, `-FixedAutoOnly`, `-FixedSlewVonShortOnly`, `-InputTimerOnly`, `-TraceOnly`, `-CrLedSlowRiseOnly`, `-TriggerOnly`, `-ProtectionOnly`, `-ReadbackOnly` | Never |
+| `scripts/preflight-cli.ps1` | Offline CLI, simulator, refusal and Manifest checks. Focused switches include `-BaseOnly`, `-SystemQueryOnly`, `-ReadbackOnly`, `-ProtectionOnly` and `-SequenceOnly` | Never |
 | `scripts/live-cli-check.ps1 -PlanOnly` | Validate command plans; reported physical cases remain `NOT RUN` | Never |
 | `scripts/live-cli-check.ps1` | Separately approved interactive IT8812C validation, including deliberate Input ON/OFF | With operator approval |
 
-### Available validation modes
+### Available validation modes / 驗證模式
 
-`-Modes` accepts one mode or a comma-separated list. If omitted, it executes
-every default mode once in the established order. Unselected modes
-produce no test cases or PASS counts. The normal default includes the
-formerly separate Input Timer trial; `-Modes trigger` remains available
-for focused verification.
+`-Modes full` selects every mode in the table. Omitting `-Modes` also selects
+FULL. A single name or a comma-separated list such as `cc,readback` selects
+each named mode once. USB and ASRL use the same modes and acceptance checks.
+`-InputTimerOnly` is a shortcut for `-Modes input-timer` and cannot be combined
+with `-Modes`. Hardware selections first identify the instrument, confirm
+Input OFF and measure V/I/P. Trigger snapshots Source and Timer before any
+legacy Transient write and restores them after its trials when safe.
 
-| `-Modes` value | Coverage | Default |
-| --- | --- | --- |
-| `cc` | Fixed CC High, Auto, Low and one Input ON/OFF | Yes |
-| `cv` | Fixed CV Low, Auto, High | Yes |
-| `cr` | Fixed CR Low, Auto, High | Yes |
-| `cw` | Fixed CW | Yes |
-| `transient-cc` | Continuous, Pulse, Toggle; Low/High/Auto | Yes |
-| `transient-cv` | Continuous Auto, Pulse Low, Toggle High | Yes |
-| `transient-cr` | Continuous Auto, Pulse High, Toggle High | Yes |
-| `transient-cw` | Continuous, Pulse, Toggle; no Range | Yes |
-| `trace` | Five bounded TRACE captures, including powered CC and Full CSV | Yes |
-| `cr-led` | Fixed CR-LED at 50 Ω and 1 V Vdrop, plain CR and exit to CC, all with Input OFF | Yes |
-| `current-slow-rise` | Fixed CC enable, retention after explicit OFF and CC setup, disable and readback | Yes |
-| `trigger` | Four physical sources (HOLD, TIMER, BUS, EXTERNAL), using Transient CC Pulse and finite LIST CC with observation and Trigger Setup restoration; MANUAL powered validation is excluded | Yes |
-| `input-timer` | Bounded Fixed CC Input Timer, expiry and explicit disable | Yes |
-| `protection` | Software current trip, software power trip, hardware power limiting and separate defaults | Explicit selection only |
-| `readback` | Fixed CC, Slew, VON, Short and Average with Input OFF and existing settings | Explicit selection only |
-| `asrl-readonly` | RS-232 identity, initial Input OFF, V/I/P and final Input OFF | Explicit ASRL selection only |
+`-Modes full` 或省略 `-Modes` 都會選取下表所有模式。可指定單一模式或以逗號結合
+多個模式，例如 `cc,readback`。每個選取的模式執行一次。USB 和 ASRL 共用模式與
+驗收條件。`-InputTimerOnly` 等同 `-Modes input-timer`，兩個參數不可並用。實機
+驗證會先識別儀器、確認 Input OFF 並量測 V/I/P。Trigger 會在原有 Transient 寫入
+前讀取 Source 和 Timer，並在試驗後於安全條件下還原。
 
-`-InputTimerOnly` remains a compatible shortcut for the single
-`-Modes input-timer` trial and **cannot** be combined with `-Modes`.
-When Trigger and legacy Transient are both selected, the original Trigger
-Source and Timer Interval are captured before any mutating mode command and
-restored after Trigger validation where safe. All selections keep Identify,
-physical Input OFF and V/I/P prechecks. Invalid or empty mode
-names are rejected.
+| `-Modes` | FULL coverage / 完整驗證範圍 |
+| --- | --- |
+| `cc` | Fixed CC High, Auto, Low and one Input ON/OFF / 三種檔位與一次 Input ON/OFF |
+| `cv` | Fixed CV Low, Auto, High / 三種檔位 |
+| `cr` | Fixed CR Low, Auto, High / 三種檔位 |
+| `cw` | Fixed CW |
+| `transient-cc` | Continuous, Pulse, Toggle with Low/High/Auto / 三種波形及檔位 |
+| `transient-cv` | Continuous Auto, Pulse Low, Toggle High |
+| `transient-cr` | Continuous Auto, Pulse High, Toggle High |
+| `transient-cw` | Continuous, Pulse, Toggle / 三種波形 |
+| `trace` | Five captures, including powered CC and Full CSV / 五次擷取，含 CC 帶載和 Full CSV |
+| `cr-led` | CR-LED, plain CR and return to CC with Input OFF / Input OFF 下驗證 CR-LED、一般 CR 與切回 CC |
+| `current-slow-rise` | Fixed CC enable, retention, interlock and disable / 啟用、保留設定、互鎖及停用 |
+| `trigger` | HOLD, TIMER, BUS and EXTERNAL with Transient CC and finite LIST CC / 四種觸發來源、Transient CC、有限次 LIST CC 與還原 |
+| `input-timer` | Fixed CC timer, expiry and disable / 計時、到期與停用 |
+| `protection` | Current and power trips, hardware power limit and defaults / 保護觸發、硬體功率限制與預設值 |
+| `system-query` | SCPI version, display mode and one Error Queue entry / SCPI 版本、顯示模式及單筆錯誤佇列 |
+| `readback` | Existing Fixed CC/CV/CR/CW, CC Slew, Transient, LIST, VON, Short and Average / 獨立查詢現有設定 |
+| `sequence` | Four bounded Fixed CC/CV/CR/CW trials / 四項有界 Fixed 試驗 |
+| `workflow` | Four CLI Workflows in dry-run and simulation / 四條 CLI 流程的離線規劃及模擬 |
 
-Select `-Modes readback` on its own and start in Fixed CC with Input OFF.
-Supply known front-panel settings for the cases you want to verify. Use
-`-ExpectedRiseSlew` and `-ExpectedFallSlew` together (A/µs),
-`-ExpectedVonThreshold` (V) and `-ExpectedVonLatch` (`on` or `off`) together,
-`-ExpectedShort` (`on` or `off`), and `-ExpectedAverageCount` (2–16).
-The report records expected and observed values. A comparison passes when
-they match. Without a complete baseline for a command, its comparison is
-`NOT RUN` and the report retains the observed values. A successful run with
-any observation-only case has overall status `OBSERVED ONLY`. Fixed,
-Transient, Trigger and TRACE selections compare independent status queries
-with the settings of their existing trials.
+The System Query case reads one Error Queue entry and records the numeric
+code, including zero for an empty queue. Workflow
+cases use no connection arguments and record simulated results separately
+in the report. A Workflow-only run needs only `-Target` and `-Modes workflow`.
+
+System Query 案例只讀取一筆錯誤佇列並記錄數字代碼，空佇列的代碼為零。
+Workflow 案例使用模擬器，報告會標記模擬結果。僅執行 Workflow 時，只需提供
+`-Target` 與 `-Modes workflow`。
+
+Readback queries the existing configuration with Input OFF before any setup.
+The current mode determines which Fixed, Slew, Transient or LIST case is
+applicable. Other selections are marked `SKIP`. To cover them, repeat
+`-Modes readback` with the relevant settings already present on the instrument.
+For comparisons with known panel settings, use `-ExpectedRiseSlew` and
+`-ExpectedFallSlew` together (A/µs), `-ExpectedVonThreshold` (V) and
+`-ExpectedVonLatch` (`on` or `off`) together, `-ExpectedShort` (`on` or
+`off`), and `-ExpectedAverageCount` (2–16). Incomplete baselines leave the case
+`NOT RUN` with observed values and the overall result `OBSERVED ONLY`.
+Fixed, Transient, Trigger and TRACE also keep their own post-setup comparisons.
+
+Readback 在任何設定寫入前，以 Input OFF 查詢儀器的現有設定。腳本依目前模式判斷
+適用的 Fixed、Slew、Transient 或 LIST 案例，其他案例標示 `SKIP`。若要涵蓋
+其餘案例，可在儀器已有相應設定時另跑 `-Modes readback`。使用上列參數可比對
+已知的面板設定。預期值不足時，案例記為 `NOT RUN` 並保留觀測值，整體結果為
+`OBSERVED ONLY`。各 Fixed、Transient、Trigger、TRACE 試驗也保留設定後比對。
 
 ### Script parameters
 
 | Parameter | Required / default | Purpose |
 | --- | --- | --- |
 | `-Target` | Required: `itech-it8812c` | Exact registered model ID |
-| `-Resource` | Required | Explicit USB INSTR or ASRL INSTR resource matching `-Connection`, including PlanOnly |
-| `-Connection` | `usb` | Use `asrl` with `-Modes asrl-readonly` alone |
+| `-Resource` | Required for hardware modes, including PlanOnly | Explicit USB INSTR or ASRL INSTR resource matching `-Connection` |
+| `-Connection` | `usb` | `usb` for USB INSTR or `asrl` for RS-232 ASRL INSTR |
 | `-Backend` | `system` | System VISA (`@ivi`) only |
-| `-Modes` | Default USB modes | Single or comma-separated selection from above. Select Protection and ASRL read-only separately. |
+| `-Modes` | `full` | FULL, a single mode or a comma-separated selection |
 | `-InputTimerOnly` | Off | Backward-compatible Timer-only shortcut, incompatible with `-Modes` |
 | `-SourceVoltageLimitV` | **5 V** | Operator-declared external source voltage, override >0 to 18 V |
 | `-SourceCurrentLimitA` | **0.8 A** | Operator-declared external source current limit, override >0 to 2 A |
@@ -1403,7 +1421,8 @@ with the settings of their existing trials.
 | `-DebugArtifacts` | Off | Additionally retain raw private diagnostics |
 | `-Verbose` | Off | Print individual planned CLI steps and arguments |
 
-**Both Source parameters are optional.** The standard external supply setup
+Both Source parameters are optional. Protection and Sequence require the
+standard values whenever selected. The standard external supply setup
 is **5 V with a 0.8 A current limit** (nominal 4 W envelope). The script
 **does not set, query or verify** this supply. The operator must configure
 and verify it, along with wiring and the DUT, before a physical run. A declared
@@ -1445,7 +1464,7 @@ only uses the explicit `-Resource` argument.
 ```powershell
 $env:ELECTRONICLOAD_TOOL_RESOURCE = "USB0::...::INSTR"
 
-# Preview the default modes without opening VISA.
+# Preview the full matrix without opening VISA.
 .\scripts\live-cli-check.ps1 -Target itech-it8812c -Resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" -PlanOnly
 
 # Preview selected modes.
@@ -1464,20 +1483,21 @@ an interactive Windows console with the **real** Resource and remove
 .\scripts\live-cli-check.ps1 -Target itech-it8812c -Connection usb -Resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" -Backend system -Modes cc
 ```
 
-## ASRL read-only validation / ASRL 唯讀驗證
+## ASRL contributor validation / ASRL 貢獻者驗證
 
-Use `--hardware-validation asrl-readonly` with `identify`, `input-state`, or
-`measure`, an explicit `ASRL<number>::INSTR` resource and System VISA.
-The scope requires the IT8812C profile and matching instrument identity.
-Add `--dry-run` for a hardware-free plan. The CLI and script accept the
-following optional overrides. Omitted options leave the session settings
-provided by VISA and PyVISA in effect.
+Use `-Connection asrl`, an explicit `ASRL<number>::INSTR` resource and System
+VISA (`@ivi`) with the same FULL or focused matrix as USB. Standalone contributor
+commands use `--validation-connection asrl` alongside any command-specific
+`--hardware-validation` scope. The original three read-only CLI commands also
+accept their existing `--hardware-validation asrl-readonly` option.
+The following serial overrides are optional. Omitted values come from VISA
+and PyVISA.
 
-CLI 的 `identify`、`input-state`、`measure` 可搭配
-`--hardware-validation asrl-readonly`、明確的 `ASRL<number>::INSTR` 資源和
-System VISA。此範圍要求 IT8812C 設定檔與相符的儀器身分。
-加上 `--dry-run` 可離線查看計畫。下列 CLI 與腳本參數均為選填，省略時沿用
-VISA 與 PyVISA 提供的設定。
+以 `-Connection asrl`、明確的 `ASRL<number>::INSTR` 資源及 System VISA
+（`@ivi`）執行與 USB 共用的 FULL 或個別模式。獨立 CLI 的貢獻者指令使用
+`--validation-connection asrl`，並保留命令所需的 `--hardware-validation` 範圍。
+原有三條唯讀 CLI 仍接受 `--hardware-validation asrl-readonly`。序列埠參數可
+選填，省略時沿用 VISA 與 PyVISA 的設定。
 
 | CLI | PowerShell | Value / 值 |
 | --- | --- | --- |
@@ -1496,36 +1516,30 @@ System VISA and leave the serial settings as provided by the session.
 
 ```powershell
 $resource = 'ASRL999::INSTR'
-.\.venv\Scripts\electronicload-tool.exe identify --resource $resource --hardware-validation asrl-readonly --dry-run --json
-.\scripts\live-cli-check.ps1 -Target itech-it8812c -Connection asrl -Resource $resource -Modes asrl-readonly -PlanOnly
+.\.venv\Scripts\electronicload-tool.exe identify --resource $resource --validation-connection asrl --dry-run --json
+.\scripts\live-cli-check.ps1 -Target itech-it8812c -Connection asrl -Resource $resource -Modes full -PlanOnly
 ```
 
 ### Physical validation procedure / 實機驗證步驟
 
 1. Obtain separate authorization for the instrument, resource and bounded
-   source/DUT. Confirm the RS-232 wiring and both ends' serial settings,
-   verify physical Input OFF, and confirm that no other process controls the
-   instrument. Keep an independent manual OFF procedure available.
-2. Review all four cases in `-PlanOnly`. For the approved run, pass the exact
-   operator-selected ASRL INSTR resource, omit `-PlanOnly`, and confirm in an
-   interactive console. Select `asrl-readonly` by itself.
-3. Verify the report shows successful identity, initial Input OFF, V/I/P
-   readback, and final Input OFF. If Input is initially ON or unknown, the script
-   stops before measurement. Any communication failure stops further cases.
-   The script only queries and leaves the instrument state under operator control.
-4. Review the redacted report under `.tmp_tests/` before sharing it. CLI
-   dry-run, PlanOnly, Fake VISA and CI cover offline behavior. Record actual
-   instrument evidence separately.
+   source/DUT. Verify RS-232 wiring and both ends' serial settings, confirm
+   physical Input OFF, and prepare an independent manual OFF procedure.
+2. Review FULL or focused cases in `-PlanOnly`. Use the exact authorized ASRL
+   INSTR resource in an interactive console for the approved physical run.
+   Apply the same scope-specific confirmations and acceptance rules as USB.
+3. Review redacted reports under `.tmp_tests/`. ASRL Product and Worker LIVE
+   require separate physical evidence for each scope being opened. Complete
+   conditional Readback coverage with focused runs as needed. Record
+   instrument evidence separately from simulated and planned cases.
 
-1. 取得特定儀器、資源與受限電源及待測物的實機驗證授權。核對 RS-232 接線及兩端
-   設定，確認面板顯示 Input OFF、無其他程式控制儀器，並準備獨立的手動關閉方式。
-2. 用 `-PlanOnly` 檢查四個案例。獲准後填入操作者選定的 ASRL INSTR 資源，移除
-   `-PlanOnly`，在互動式主控台確認。`asrl-readonly` 須單獨選擇。
-3. 確認報告的身分、初始 Input OFF、V/I/P 讀值與最終 Input OFF 皆通過。若初始
-   Input 為 ON 或無法確認，腳本會在量測前停止。通訊失敗也會停止後續案例。腳本僅查詢，
-   儀器狀態由操作者管理。
-4. 分享前檢查 `.tmp_tests/` 下已遮蔽的報告。CLI dry-run、PlanOnly、Fake VISA 和
-   CI 用於驗證離線行為。實機證據另行記錄。
+1. 取得特定儀器、資源與受限電源及待測物的實機驗證授權。核對 RS-232 接線及
+   兩端設定，確認 Input OFF，並準備獨立的手動 OFF 方式。
+2. 用 `-PlanOnly` 檢查 FULL 或個別模式。獲准後，在互動式主控台填入指定的
+   ASRL INSTR 資源，依 USB 共用的模式確認與驗收規則執行。
+3. 檢查 `.tmp_tests/` 下已遮蔽的報告。ASRL Product 與 Worker LIVE 的開放
+   需要各對應範圍的實機證據。依需要用個別模式補齊 Readback 的條件式案例，並
+   將實機證據與模擬、規劃案例分開記錄。
 
 See the [Core transport and LIVE support policy](../visa-connections.md).
 傳輸與 LIVE 支援規則請參閱 [Core 設計](../visa-connections.md)。
@@ -1563,8 +1577,8 @@ operator action is required. After a Slow Rise Enable attempt without normal
 OFF readback, the script attempts one bounded Disable and status check only
 with trusted communication and a fresh Input OFF readback. It retains the
 trial failure and reports when independent operator action is required.
-No automatic Reset, `SYST:LOC`, protection clear,
-error-queue read or reconnect is added. VISA Close alone does not imply OFF.
+Protection Clear and the single System Query Error Queue read belong to
+their selected cases. VISA Close alone does not imply OFF.
 
 | Existing deadline | Value |
 | --- | --- |
@@ -1574,9 +1588,7 @@ error-queue read or reconnect is added. VISA Close alone does not imply OFF.
 | Any other mode total I/O | 900 s |
 | Cleanup commands | Separate 30 s allowance |
 
-The default plan includes the modes listed as default above. It retains the existing
-900-second total deadline; slow hardware or operator observations may exhaust
-that budget. Select a smaller `-Modes` set if necessary. V/I/P are separate queries, with no guarantee
+FULL uses a 900-second total deadline. Slow hardware or operator observations may consume that budget. Select a smaller `-Modes` set if necessary. V/I/P are separate queries, with no guarantee
 of power freshness, synchronization, waveform timing or accuracy. This
 contributor-only CLI validation **does not** enable Worker LIVE or expand
 Product LIVE support.
@@ -1584,8 +1596,8 @@ Product LIVE support.
 ### Contributor Protection validation
 
 Use the separately approved `live-cli-check.ps1 -Modes protection` procedure
-with the exact IT8812C model, an operator-supplied USB INSTR resource and System
-VISA. Add `-PlanOnly` for the offline command plan. Start in Fixed CC with
+with the exact IT8812C model, an operator-supplied USB or ASRL INSTR resource
+and System VISA. Add `-PlanOnly` for the offline command plan. Start in Fixed CC with
 Input OFF, a dedicated source set at the source to 5 V with a 0.8 A current
 limit, and an independent manual cutoff. The script checks current mode and
 interlocks, saves and restores the original Fixed CC and protection settings,
@@ -1630,7 +1642,7 @@ for the IT8812C measurement specifications.
 ### Contributor Trigger validation
 
 Select `live-cli-check.ps1 -Modes trigger` with the usual approved model,
-explicit USB Resource, source/DUT limits and independent manual OFF procedure.
+explicit USB or ASRL INSTR Resource, source/DUT limits and independent manual OFF procedure.
 Add `-PlanOnly` to check the command plan without VISA access. Trigger uses
 built-in preset settings by default: 0.1/0.2 A levels, 0.1 A/µs slews,
 2 s pulse, 5 s TIMER interval, 2/2 s LIST dwell, one LIST repeat,

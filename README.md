@@ -14,7 +14,7 @@ deliberate confirmation. Simulation and dry-run never grant hardware authorizati
 ## Features
 
 - Read-only identification, Input state and measurements for the exact supported IT8812C Product LIVE scope.
-- [RS-232 contributor validation](docs/cli/README.md#asrl-read-only-validation--asrl-唯讀驗證) for IT8812C identification, Input state and measurements over an explicit ASRL INSTR resource.
+- [RS-232 contributor validation](docs/cli/README.md#asrl-contributor-validation--asrl-貢獻者驗證) for the shared IT8812C validation matrix over an explicit ASRL INSTR resource.
 - Fixed CC and deliberate Input ON/OFF with the existing hardware safety gates.
 - Offline Fixed CV/CR/CW and software Auto Range for Fixed CC/CV/CR.
 - Offline Fixed CC paired optional Slew, standalone VON setup/status, and Fixed-mode Short ON/OFF/status.

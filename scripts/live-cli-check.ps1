@@ -6,7 +6,8 @@ trigger and input-timer. Omitted -Modes selects all default modes.
 -Modes protection selects the separate Protection validation procedure.
 -Modes sequence selects four bounded Fixed Software Sequence trials.
 -Modes readback checks existing settings with Input OFF and without changing the instrument.
--Connection asrl -Modes asrl-readonly checks identity, Input OFF and measurements over RS-232.
+-Modes full (default) selects all trials. USB and ASRL use the same matrix.
+-Modes workflow runs only dry-run and simulation, without an instrument.
 -InputTimerOnly is a backward-compatible shortcut for the input-timer-only trial.
 Requires approved source/DUT limits and interactive confirmation before hardware access.
 -PlanOnly validates every planned CLI request without VISA or hardware access.
@@ -67,18 +68,18 @@ param(
 $ErrorActionPreference = 'Stop'
 $featureModes = @('cr-led', 'current-slow-rise')
 $supportedModes = @('cc', 'cv', 'cr', 'cw', 'transient-cc', 'transient-cv', 'transient-cr', 'transient-cw',
-                    'trace') + $featureModes + @('trigger', 'input-timer')
+                    'trace') + $featureModes + @('trigger', 'input-timer', 'protection', 'system-query',
+                                              'readback', 'sequence', 'workflow')
 if ($InputTimerOnly) {
     if ($PSBoundParameters.ContainsKey('Modes')) { throw 'InputTimerOnly cannot be combined with Modes.' }
     $Modes = @('input-timer')
 } elseif (-not $PSBoundParameters.ContainsKey('Modes')) {
-    $Modes = $supportedModes
+    $Modes = @('full')
 }
-$supportedModes += @('protection','readback','sequence','asrl-readonly')
 $requestedModes = @($Modes | ForEach-Object { $_ -split ',' } |
     ForEach-Object { $_.Trim().ToLowerInvariant() })
 # Keep the established trial order and run each selected mode only once.
-$selectedModes = @($supportedModes | Where-Object { $_ -in $requestedModes })
+$selectedModes = @($supportedModes | Where-Object { $_ -in $requestedModes -or 'full' -in $requestedModes })
 $hasValidationModes = @($selectedModes | Where-Object { $_ -ne 'cc' }).Count -gt 0
 $traceSelected = 'trace' -in $selectedModes
 $triggerSelected = 'trigger' -in $selectedModes
@@ -86,7 +87,10 @@ $timerSelected = 'input-timer' -in $selectedModes
 $protectionSelected = 'protection' -in $selectedModes
 $readbackSelected = 'readback' -in $selectedModes
 $sequenceSelected = 'sequence' -in $selectedModes
-$asrlSelected = 'asrl-readonly' -in $selectedModes
+$asrlSelected = $Connection -eq 'asrl'
+$workflowSelected = 'workflow' -in $selectedModes
+$workflowOnly = $workflowSelected -and $selectedModes.Count -eq 1
+$systemQuerySelected = 'system-query' -in $selectedModes
 $serialFlags = [ordered]@{
     SerialBaudRate = '--serial-baud-rate'; SerialDataBits = '--serial-data-bits'
     SerialParity = '--serial-parity'; SerialStopBits = '--serial-stop-bits'
@@ -99,8 +103,10 @@ $serialArgs = @(foreach ($parameter in $serialFlags.Keys) {
         $PSBoundParameters[$parameter]
     }
 })
+$connectionArgs = @('--backend', $Backend, '--model', $Target)
+if ($Resource) { $connectionArgs += @('--resource', $Resource) }
+if ($asrlSelected) { $connectionArgs += @('--validation-connection', 'asrl') + $serialArgs }
 $featureSelected = @($selectedModes | Where-Object { $_ -in $featureModes }).Count -gt 0
-$featureOnly = $featureSelected -and @($selectedModes | Where-Object { $_ -notin $featureModes }).Count -eq 0
 $traceCommunicationUntrusted = $false
 $traceFeedStopUnconfirmed = $false
 $traceStartDeadlineMs = 120000
@@ -168,14 +174,13 @@ $report = [ordered]@{
         current = 'NOT RUN'; input_off = 'NOT RUN'
     }
     artifact_mode = $(if ($DebugArtifacts) { 'debug' } else { 'minimal' })
-    validation_mode = $(if ($PlanOnly) { 'plan-only' } else { 'live' })
+    validation_mode = $(if ($PlanOnly) { 'plan-only' } elseif ($workflowOnly) { 'simulate' } else { 'live' })
     product_live = 'IT8812C USB/System VISA read-only and fixed CC/Input LIVE open'
     per_command_deadline_ms = $perCommandDeadlineMs
     total_deadline_ms = $totalDeadlineMs
     script_current_ceiling_a = $null
     includes_validation_modes = $hasValidationModes
     declared_source_limits = $null
-    plans = @()
     results = @()
 }
 
@@ -206,12 +211,13 @@ function Save-Report {
     [void][IO.Directory]::CreateDirectory($shareable)
     $cases = @()
     foreach ($entry in $script:report.results) {
-        if ($entry.name -eq 'identify' -and -not $script:asrlSelected) { continue }
+        if ($entry.name -eq 'identify') { continue }
         $case = [ordered]@{
             name = $entry.name
             command = $entry.command
             status = $entry.status
         }
+        if ($entry.Contains('execution')) { $case.execution = $entry.execution }
         if ($entry.Contains('arguments')) {
             $safeArguments = @($entry.arguments)
             if ($script:traceSelected -and $entry.command -eq 'trace-start') {
@@ -262,7 +268,8 @@ function Save-Report {
             }
             foreach ($field in @('configuration', 'seconds', 'enabled', 'state_source', 'validation_only', 'validation_scope',
                                   'trigger_dispatched_at_utc', 'waveform_completion_known',
-                                  'fixed_cr', 'led_enabled', 'vdrop_v', 'vdrop_max_v', 'resistance_ohm')) {
+                                  'fixed_cr', 'led_enabled', 'vdrop_v', 'vdrop_max_v', 'resistance_ohm',
+                                  'scpi_version', 'display_mode', 'stop_reason', 'sample_count')) {
                 if ($null -ne $entry.response.result.$field) {
                     $case[$field] = $entry.response.result.$field
                 }
@@ -277,6 +284,12 @@ function Save-Report {
                         $case[$field] = $entry.response.result.$field
                     }
                 }
+            }
+            if ($entry.command -eq 'scpi-error-next') {
+                $case.scpi_error_code = $entry.response.result.error_code
+            }
+            if ($entry.execution -eq 'simulate' -and $entry.response.result.input_state) {
+                $case.input_state = $entry.response.result.input_state
             }
             if ($entry.command -eq 'measure') {
                 $case.values = [ordered]@{
@@ -301,6 +314,7 @@ function Save-Report {
     $public = [ordered]@{
         target = $script:report.target
         connection = $script:report.connection
+        modes = $script:selectedModes
         backend = $script:report.backend
         resource = '<redacted>'
         validation_mode = $script:report.validation_mode
@@ -317,7 +331,6 @@ function Save-Report {
         cases = $cases
         summary_counts = $counts
     }
-    if ($script:asrlSelected) { $public['validation_scope'] = 'asrl-readonly' }
     if ($script:sequenceSelected) {
         $public['sequence_input_off_unconfirmed'] = $script:report.sequence_input_off_unconfirmed
     }
@@ -352,7 +365,6 @@ function Save-Report {
     )
     if ($script:asrlSelected) {
         $lines += "Connection: $($public.connection) / $($public.backend)"
-        $lines += "Validation scope: $($public.validation_scope)"
         $lines += "Product LIVE: $($public.product_live)"
     }
     if ($public.slow_rise_cleanup_unconfirmed) {
@@ -399,10 +411,12 @@ function New-CliProcessInfo([string[]]$Arguments) {
     return $start
 }
 
-function Invoke-PlanCommand([string]$Command, [string[]]$ExtraArgs) {
+function Invoke-OfflineCommand([string]$Command, [string[]]$ExtraArgs, [switch]$Workflow, [switch]$Simulate) {
+    $mode = if ($Simulate) { '--simulate' } else { '--dry-run' }
     $arguments = @('-c', 'from electronicload_tool_cli.cli import main; raise SystemExit(main())',
-        $Command, '--resource', $Resource, '--backend', $Backend, '--model', $Target,
-        '--dry-run', '--json') + $ExtraArgs
+        $Command, $mode, '--json') + $ExtraArgs
+    if ($Workflow) { $arguments += @('--model', $Target) }
+    else { $arguments += $script:connectionArgs }
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = New-CliProcessInfo $arguments
     $started = $false
@@ -411,12 +425,12 @@ function Invoke-PlanCommand([string]$Command, [string[]]$ExtraArgs) {
         $started = $true
         $stdout = $process.StandardOutput.ReadToEndAsync()
         $stderr = $process.StandardError.ReadToEndAsync()
-        if (-not $process.WaitForExit($script:perCommandDeadlineMs)) { throw 'Offline CLI plan timed out.' }
+        if (-not $process.WaitForExit($script:perCommandDeadlineMs)) { throw 'Offline CLI command timed out.' }
         $output = $stdout.GetAwaiter().GetResult()
         [void]$stderr.GetAwaiter().GetResult()
         $plan = $output | ConvertFrom-Json -ErrorAction Stop
         if ($process.ExitCode -ne 0 -or $plan.ok -ne $true) {
-            throw "Offline plan failed for $Command ($($plan.error.code))."
+            throw "Offline command failed for $Command ($($plan.error.code))."
         }
         return $plan
     } finally {
@@ -474,8 +488,7 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
     }
     if ($remaining -le 0) { throw 'Total CLI validation deadline expired.' }
     $arguments = @('-c', 'from electronicload_tool_cli.cli import main; raise SystemExit(main())',
-        $Command, '--resource', $Resource, '--backend', $Backend, '--model', $Target,
-        '--json') + $ExtraArgs
+        $Command, '--json') + $script:connectionArgs + $ExtraArgs
     $start = New-CliProcessInfo $arguments
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = $start
@@ -684,9 +697,6 @@ function Assert-Runtime([object]$Result, [string]$CaseName) {
 
 function Assert-InputOff([object]$Result, [string]$CaseName) {
     if ($Result.result.input_state -cne 'OFF') {
-        if ($script:asrlSelected) {
-            Fail-Case $CaseName 'input_not_off' 'Physical Input OFF was not confirmed; ASRL validation stopped.'
-        }
         if ($script:traceSelected) {
             $script:report.trace_safe_shutdown_unconfirmed = $true
         }
@@ -1399,33 +1409,28 @@ function Assert-TraceResult([object]$Result, [hashtable]$Step) {
 }
 
 try {
-    if ($requestedModes.Count -eq 0 -or @($requestedModes | Where-Object { $_ -notin $supportedModes }).Count -gt 0) {
-        throw "Modes must contain one or more of: $($supportedModes -join ', ')."
-    }
-    if (($Connection -eq 'asrl' -and (-not $asrlSelected -or $requestedModes.Count -ne 1)) -or
-        ($asrlSelected -and $Connection -ne 'asrl')) {
-        throw 'Use -Connection asrl with -Modes asrl-readonly on its own.'
+    if ($requestedModes.Count -eq 0 -or
+        @($requestedModes | Where-Object { $_ -notin ($supportedModes + 'full') }).Count -gt 0 -or
+        ('full' -in $requestedModes -and $requestedModes.Count -ne 1)) {
+        throw "Select full or one or more of: $($supportedModes -join ', ')."
     }
     if ($serialArgs.Count -and -not $asrlSelected) {
-        throw 'Serial parameters require -Connection asrl -Modes asrl-readonly.'
+        throw 'Serial parameters require -Connection asrl.'
     }
-    if ($sequenceSelected -and ($selectedModes.Count -ne 1 -or
-        $SourceVoltageLimitV -ne 5 -or $SourceCurrentLimitA -ne 0.8)) {
-        throw 'Select Sequence alone with a dedicated 5 V / 0.8 A source.'
+    if (($sequenceSelected -or $protectionSelected) -and
+        ($SourceVoltageLimitV -ne 5 -or $SourceCurrentLimitA -ne 0.8)) {
+        throw 'Sequence and Protection require a dedicated 5 V / 0.8 A source.'
     }
-    if ($readbackSelected -and $selectedModes.Count -ne 1) {
-        throw 'Select the readback-only trial on its own.'
-    }
-    if ($protectionSelected -and ($selectedModes.Count -ne 1 -or
-        $SourceVoltageLimitV -ne 5 -or $SourceCurrentLimitA -ne 0.8)) {
-        throw 'Select Protection alone with a dedicated 5 V / 0.8 A source.'
-    }
-    if (-not $Target -or -not $Resource) {
-        Write-Host 'BLOCKED: explicit -Target and -Resource are required.'
+    if (-not $Target -or (-not $Resource -and -not $workflowOnly)) {
+        Write-Host 'BLOCKED: explicit -Target and, for hardware cases, -Resource are required.'
         exit 2
     }
     if (-not (Test-Path -LiteralPath $python) -or -not (Test-Path -LiteralPath $cli)) {
         throw 'Sync the repository .venv with uv before running validation.'
+    }
+    if ($workflowOnly -and ($Resource -or $serialArgs.Count)) {
+        # Validate any supplied connection without including it in Workflow commands.
+        $null = Invoke-OfflineCommand 'identify'
     }
     if ('cc' -in $selectedModes -or $traceSelected -or $timerSelected -or $featureSelected) {
         # Preserve the original token; both manual trials and the script ceiling must pass.
@@ -1435,8 +1440,9 @@ try {
         }
         $report.prechecks.current = 'PASS'
     }
-    if (-not $asrlSelected) {
-        $report.script_current_ceiling_a = if ($protectionSelected) { 0.20 } elseif ($sequenceSelected) { 0.10 } else { $scriptCurrentCeilingA }
+    if (-not $workflowOnly) {
+        $report.script_current_ceiling_a = if ($selectedModes.Count -eq 1 -and $protectionSelected) { 0.20 }
+            elseif ($selectedModes.Count -eq 1 -and $sequenceSelected) { 0.10 } else { $scriptCurrentCeilingA }
     }
     if ($timerSelected) {
         & $python -c 'import sys; from electronicload_tool_core.control import validate_input_timer; value=validate_input_timer(int(sys.argv[1])); sys.exit(0 if 3 <= value <= 10 else 2)' $TimerSeconds
@@ -1475,9 +1481,11 @@ try {
         @{name='input-state';command='input-state';args=@()},
         @{name='measure-off';command='measure';args=@()}
     )
-    if ($asrlSelected) {
-        $planned += @{name='final-input-state';command='input-state';args=@()}
-        foreach ($step in $planned) { $step.args = @('--hardware-validation', 'asrl-readonly') + $serialArgs }
+    if ($workflowOnly) { $planned = @() }
+    if ($systemQuerySelected) {
+        foreach ($command in @('scpi-version','display-mode','scpi-error-next')) {
+            $planned += @{name=$command;command=$command;args=@('--hardware-validation','system-query')}
+        }
     }
     if ($readbackSelected) {
         $baselineParameters = @{
@@ -1486,32 +1494,53 @@ try {
             'short-status' = @{short_state='ExpectedShort'}
             'average-status' = @{average_count='ExpectedAverageCount'}
         }
-        foreach ($command in @('readback','fixed-status','fixed-slew-status','von-status','short-status','average-status')) {
-            $expected = @{state_source='instrument_readback'}
-            if ($command -in @('readback','fixed-status','fixed-slew-status')) {
+        $planned += @{name='readback';command='readback';args=$readbackScope;independent_snapshot=$true;
+                      readback_expected=@{input_state='OFF'}}
+        foreach ($function in @('CC','CV','CR','CW')) {
+            $planned += @{name="fixed-status-$($function.ToLowerInvariant())";command='fixed-status';args=$readbackScope;
+                          readback_mode='fixed';readback_function=$function;
+                          readback_expected=@{active_mode='fixed';function=$function;input_state='OFF'};
+                          condition="Existing Fixed $function selection"}
+        }
+        $planned += @(
+            @{name='transient-status';command='transient-status';args=$readbackScope;readback_mode='transient';
+              readback_expected=@{enabled=$true;input_state='OFF'};condition='Existing Transient selection'},
+            @{name='list-status';command='list-status';args=$readbackScope;readback_mode='list';
+              readback_expected=@{selected=$true;input_state='OFF'};condition='Existing LIST selection'}
+        )
+        foreach ($command in @('fixed-slew-status','von-status','short-status','average-status')) {
+            $expected = @{}
+            $step = @{name=$command;command=$command;args=$readbackScope;readback_expected=$expected;
+                      check_readback_settings=$true}
+            if ($command -eq 'fixed-slew-status') {
+                $step.readback_mode = 'fixed'
+                $step.readback_function = 'CC'
+                $step.condition = 'Existing Fixed CC selection'
                 $expected += @{active_mode='fixed';function='CC';input_state='OFF'}
+                $step.readback_expected = $expected
             }
-            $step = @{name=$command;command=$command;args=$readbackScope;readback_expected=$expected}
-            if ($baselineParameters.ContainsKey($command)) {
-                $baseline = @{}
-                foreach ($field in $baselineParameters[$command].Keys) {
-                    $parameter = $baselineParameters[$command][$field]
-                    if ($PSBoundParameters.ContainsKey($parameter)) { $baseline[$field] = $PSBoundParameters[$parameter] }
-                }
-                if ($baseline.Count -eq $baselineParameters[$command].Count) {
-                    if ($baseline.ContainsKey('latch')) { $baseline.latch = $baseline.latch.ToLowerInvariant() }
-                    if ($baseline.ContainsKey('short_state')) { $baseline.short_state = $baseline.short_state.ToUpperInvariant() }
-                    $expected += $baseline
-                    $step.readback_expected = $expected
-                    $step.expected_readback = $baseline
-                } else {
-                    $step.condition = 'Settings are observed only without all expected values for this command.'
-                }
-                $step.check_readback_settings = $true
+            $baseline = @{}
+            foreach ($field in $baselineParameters[$command].Keys) {
+                $parameter = $baselineParameters[$command][$field]
+                if ($PSBoundParameters.ContainsKey($parameter)) { $baseline[$field] = $PSBoundParameters[$parameter] }
+            }
+            if ($baseline.Count -eq $baselineParameters[$command].Count) {
+                if ($baseline.ContainsKey('latch')) { $baseline.latch = $baseline.latch.ToLowerInvariant() }
+                if ($baseline.ContainsKey('short_state')) { $baseline.short_state = $baseline.short_state.ToUpperInvariant() }
+                $expected += $baseline
+                $step.readback_expected = $expected
+                $step.expected_readback = $baseline
+            } else {
+                $step.condition = (@($step.condition, 'Settings are observed only without all expected values') |
+                    Where-Object { $_ }) -join '; '
             }
             $planned += $step
         }
     }
+    # Read existing configuration before any powered or setup case. Protection needs the
+    # original Fixed CC settings, so finish its restore before Sequence can change function.
+    $beforeSetup = $planned.Count
+    if ($sequenceSelected) { $planned += @(New-SequencePlan) }
     if ('cc' -in $selectedModes) {
         $planned += @(
             @{name='set-cc-high';command='set-cc';args=$highArgs;allow_cr_handoff=$true},
@@ -1725,21 +1754,34 @@ try {
               condition='Cleanup Disable confirmed with Input OFF'}
         )
     }
-    if ($sequenceSelected) { $planned += @(New-SequencePlan) }
     if ($triggerSelected) { New-TriggerPlan }
     if ($protectionSelected) { New-ProtectionPlan }
     foreach ($step in ($planned | Where-Object { $_.ContainsKey('cr_handoff_after') })) {
         $step.condition = "$($step.cr_handoff_after) refused a resistance origin before remote"
     }
-    # Preserve the original Source/Timer before any legacy Transient can write HOLD.
-    $allSteps = $planned + $slowRiseCleanup + $protectionPlans
-    if ($triggerSelected) {
-        $allSteps = @($planned | Select-Object -First 3) + @($triggerPlans | Select-Object -First 1) +
-            @($planned | Select-Object -Skip 3) + $slowRiseCleanup +
-            @($triggerPlans | Select-Object -Skip 1)
+    $workflowPlans = @()
+    if ($workflowSelected) {
+        $workflowPlans = @(
+            @{name='workflow-measure-log';command='measure-log';args=@('--interval-s','0.01','--count','1');
+              stop_reason='completed';sample_count=1},
+            @{name='workflow-measure-until';command='measure-until';args=@('--interval-s','0.01','--metric','voltage',
+              '--operator','ge','--threshold','1','--timeout-s','1');stop_reason='condition_met';sample_count=1},
+            @{name='workflow-cc-timed-load';command='cc-timed-load';args=@('--current','0.1','--duration-s','0.01','--confirm');
+              stop_reason='duration_elapsed';confirm_off=$true},
+            @{name='workflow-cc-discharge';command='cc-discharge';args=@('--current','0.1','--cutoff-voltage','3',
+              '--cutoff-capacity-ah','0.00000001','--interval-s','0.01','--timeout-s','2','--confirm');
+              stop_reason='capacity_cutoff';confirm_off=$true}
+        )
     }
+    # Capture Trigger before any legacy Transient can write HOLD.
+    $allSteps = $workflowPlans + @($planned | Select-Object -First 3) +
+        @($triggerPlans | Select-Object -First 1) +
+        @($planned | Select-Object -Skip 3 -First ([Math]::Max(0, $beforeSetup - 3))) +
+        $protectionPlans + @($planned | Select-Object -Skip $beforeSetup) + $slowRiseCleanup +
+        @($triggerPlans | Select-Object -Skip 1)
     $report.results = @($allSteps | ForEach-Object {
         $entry = [ordered]@{name=$_.name;command=$_.command;arguments=$_.args;status='NOT RUN'}
+        if ($_.name -like 'workflow-*') { $entry['execution'] = 'simulate' }
         if ($_.ContainsKey('expected_error')) { $entry['expected_error'] = $_.expected_error }
         if ($_.ContainsKey('condition')) { $entry['condition'] = $_.condition }
         if ($_.ContainsKey('expected_readback')) { $entry['expected_readback'] = $_.expected_readback }
@@ -1747,10 +1789,15 @@ try {
         $entry
     })
     $plannedRanges = @{}
+    $offlinePlans = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
     foreach ($step in $allSteps) {
         if ($step.command -eq 'operator-observation') { continue }
         $extras = @($step.args)
-        $plan = Invoke-PlanCommand $step.command $extras
+        $key = ConvertTo-Json -InputObject (@($step.command) + $extras) -Compress
+        if (-not $offlinePlans.ContainsKey($key)) {
+            $offlinePlans[$key] = Invoke-OfflineCommand $step.command $extras -Workflow:($step.name -like 'workflow-*')
+        }
+        $plan = $offlinePlans[$key]
         if ($step.command -in @('set-cc', 'set-cv', 'set-cr', 'set-cr-led',
                                 'set-transient-cc', 'set-transient-cv', 'set-transient-cr') -and 'auto' -in $step.args) {
             # The Core plan owns selection; the script only compares later physical readback.
@@ -1772,22 +1819,19 @@ try {
             $entry = $report.results | Where-Object { $_.name -eq $step.name } | Select-Object -First 1
             $entry.sequence_plan = $plan.result.steps
         }
-        $report.plans += $plan
     }
     $report.prechecks.plan = 'PASS'
     $reportDirectory = Join-Path $repo ".tmp_tests/$traceRunName"
     [void][IO.Directory]::CreateDirectory($reportDirectory)
     Write-Host "ElectronicLoad Tool - CLI Validation"
     Write-Host "Target: $Target | Connection: $Connection | Backend: $Backend | Resource: <redacted>"
-    Write-Host "Mode: $(if ($PlanOnly) { 'PLAN ONLY' } else { 'LIVE' })"
+    Write-Host "Mode: $(if ($PlanOnly) { 'PLAN ONLY' } elseif ($workflowOnly) { 'SIMULATE' } else { 'LIVE' })"
     Write-Host "Selected modes: $($selectedModes -join ', ')."
-    if ($asrlSelected) {
-        Write-Host 'Plan: Identify, confirm Input OFF, measure, then confirm final Input OFF.'
-    } else {
-        Write-Host 'Plan: Identify, Input State, Measure.'
-    }
+    if (-not $workflowOnly) { Write-Host 'Plan: Identify, confirm Input OFF and measure before physical trials.' }
+    if ($workflowSelected) { Write-Host 'Workflow: four simulated cases with no VISA or source access.' }
+    if ($systemQuerySelected) { Write-Host 'System Query: read version, display mode and one Error Queue entry.' }
     if ($readbackSelected) {
-        Write-Host 'Readback requires Fixed CC and confirmed Input OFF. It queries existing settings only.'
+        Write-Host 'Readback queries existing settings with Input OFF before any setup. Inapplicable modes are skipped.'
         Write-Host 'Use known front-panel settings as expected values. Incomplete comparisons are recorded as NOT RUN.'
     }
     if ($sequenceSelected) {
@@ -1804,8 +1848,7 @@ try {
     if ('cc' -in $selectedModes -or $traceSelected) {
         Write-Host 'CC setup from CR: conditional contributor handoff with Input OFF and the Core LED OFF interlock.'
     }
-    if (-not ($protectionSelected -or $readbackSelected -or $asrlSelected) -and
-        @($selectedModes | Where-Object { $_ -ne 'trace' -and $_ -notin $featureModes }).Count -gt 0) {
+    if (@($selectedModes | Where-Object { $_ -in @('cc','cv','cr','cw','input-timer') -or $_ -like 'transient-*' }).Count -gt 0) {
         Write-Host 'Other selected modes retain explicit ON/OFF and independent OFF confirmation.'
     }
     if ($featureSelected) {
@@ -1819,34 +1862,62 @@ try {
         Write-Host 'Slow Rise requires a non-resistance starting function and expects Fixed CV setup to be refused while enabled.'
         Write-Host 'If the Slow Rise trial stops before confirmed Disable, cleanup requires trusted communication and confirmed Input OFF.'
     }
-    if (-not ($protectionSelected -or $readbackSelected -or $asrlSelected)) {
+    if (@($selectedModes | Where-Object { $_ -in @('cc','cv','cr') }).Count -gt 0) {
         Write-Host 'Fixed Auto adds Input OFF setup/readback with the existing values; no extra ON/OFF cycles.'
     }
     if (@($selectedModes | Where-Object { $_.StartsWith('transient-') }).Count -gt 0) {
         Write-Host 'Transient: Continuous/Pulse/Toggle, Low/High/Auto, repeated triggers, control status and separate disable.'
         Write-Host 'Trigger/status/measure do not establish waveform shape, timing or completion.'
     }
-    Write-Host "External source (operator-managed): $SourceVoltageLimitV V / $SourceCurrentLimitA A current limit."
-    Write-Host 'The script does not configure, measure or verify the external source.'
+    if (-not $workflowOnly) {
+        Write-Host "External source (operator-managed): $SourceVoltageLimitV V / $SourceCurrentLimitA A current limit."
+        Write-Host 'The script does not configure, measure or verify the external source.'
+    }
     foreach ($step in $allSteps) {
         $condition = $(if ($step.condition) { " [if $($step.condition)]" } else { '' })
         Write-Verbose ("  {0}: {1} {2}{3}" -f $step.name, $step.command, ($step.args -join ' '), $condition)
     }
     if ('cc' -in $selectedModes) { Write-Host "CC Current=$currentText A." }
-    if ($asrlSelected) {
-        Write-Host 'ASRL System VISA read-only validation.'
-    } else {
-        Write-Host "Script ceiling=$($report.script_current_ceiling_a) A; USB System VISA."
-        Write-Host 'No reset, SYST:ERR? consumption, automatic local switch, or implicit Input ON.'
+    if (-not $workflowOnly) {
+        Write-Host "Script ceiling=$($report.script_current_ceiling_a) A; $Connection System VISA."
+        Write-Host 'No reset, automatic local switch, or implicit Input ON.'
         Write-Host 'An Input ON attempt requires an explicit OFF cleanup; session close does not turn Input OFF.'
+        Write-Host 'V/I/P measure queries are separate; power freshness is not guaranteed.'
     }
-    Write-Host 'V/I/P measure queries are separate; power freshness is not guaranteed.'
     if ($PlanOnly) {
         $report.status = 'PLAN ONLY'
         Save-Report
         Show-Summary
         Write-Host 'PLAN ONLY COMPLETE: no hardware accessed.'
         exit 0
+    }
+    if ($workflowOnly -or (-not [Console]::IsInputRedirected -and [Environment]::UserInteractive)) {
+        foreach ($step in $workflowPlans) {
+            $phase = 'cases'
+            $entry = $report.results | Where-Object { $_.name -ceq $step.name }
+            try {
+                $result = Invoke-OfflineCommand $step.command $step.args -Workflow -Simulate
+                if ($result.result.stop_reason -cne $step.stop_reason -or
+                    ($step.ContainsKey('sample_count') -and $result.result.sample_count -ne $step.sample_count) -or
+                    ($step.confirm_off -and ($result.result.input_state -cne 'OFF' -or
+                                            -not $result.result.cleanup.off_confirmed))) {
+                    Fail-Case $step.name 'workflow_result_mismatch' 'Simulation did not match the expected completion.'
+                }
+                $entry['response'] = $result
+                $entry.status = 'PASS'
+            } catch {
+                $entry.status = 'FAIL'
+                throw
+            }
+        }
+        if ($workflowOnly) {
+            $report.status = 'PASS'
+            Save-Report
+            Show-Summary
+            Write-Host 'PASS: Workflow offline validation.'
+            exit 0
+        }
+        $phase = 'plan'
     }
     if ([Console]::IsInputRedirected -or -not [Environment]::UserInteractive) {
         $report.status = 'BLOCKED'
@@ -1855,48 +1926,26 @@ try {
         Write-Host 'BLOCKED: controlled LIVE validation requires an interactive console.'
         exit 2
     }
-    # Focused selections keep their preflight; mixed/all-mode runs check
-    # the original base and only the chosen feature-specific offline scopes.
     $preflightScript = Join-Path $PSScriptRoot 'preflight-cli.ps1'
-    if ($asrlSelected) {
-        Write-Host 'ASRL preflight passed using the four offline CLI plans.'
-    } elseif ($sequenceSelected) {
-        & $preflightScript -SequenceOnly
-    } elseif ($readbackSelected) {
-        & $preflightScript -ReadbackOnly
-    } elseif ($protectionSelected) {
-        & $preflightScript -ProtectionOnly
-    } elseif ($selectedModes.Count -eq 1 -and $timerSelected) {
-        & $preflightScript -InputTimerOnly
-    } elseif ($selectedModes.Count -eq 1 -and $traceSelected) {
-        & $preflightScript -TraceOnly
-    } elseif ($selectedModes.Count -eq 1 -and $triggerSelected) {
-        & $preflightScript -TriggerOnly
-    } elseif ($featureOnly) {
-        & $preflightScript -CrLedSlowRiseOnly
-    } else {
-        & $preflightScript
-        if ($LASTEXITCODE -ne 0) { throw 'Base preflight failed.' }
-        if ($timerSelected) {
-            & $preflightScript -InputTimerOnly
-            if ($LASTEXITCODE -ne 0) { throw 'Input Timer preflight failed.' }
-        }
-        if ($traceSelected) {
-            & $preflightScript -TraceOnly
-            if ($LASTEXITCODE -ne 0) { throw 'TRACE preflight failed.' }
-        }
-        if ($featureSelected) {
-            & $preflightScript -CrLedSlowRiseOnly
-            if ($LASTEXITCODE -ne 0) { throw 'CR-LED/Slow Rise preflight failed.' }
-        }
-        if ($triggerSelected) {
-            & $preflightScript -TriggerOnly
-            if ($LASTEXITCODE -ne 0) { throw 'Trigger preflight failed.' }
-        }
+    $preflightModes = [ordered]@{
+        'input-timer'='InputTimerOnly'; trace='TraceOnly'; trigger='TriggerOnly';
+        protection='ProtectionOnly'; 'system-query'='SystemQueryOnly'; readback='ReadbackOnly';
+        sequence='SequenceOnly'; 'cr-led'='CrLedSlowRiseOnly'; 'current-slow-rise'='CrLedSlowRiseOnly'
     }
-    if (-not $asrlSelected -and $LASTEXITCODE -ne 0) {
-        $report.prechecks.preflight = 'FAIL'
-        throw 'Preflight failed.'
+    $preflightChecks = @(foreach ($mode in $selectedModes) {
+        if ($preflightModes.Contains($mode)) { $preflightModes[$mode] }
+    })
+    if (@($selectedModes | Where-Object { $_ -in @('cc','cv','cr','cw') -or $_ -like 'transient-*' }).Count) {
+        & $preflightScript -BaseOnly
+        if ($LASTEXITCODE -ne 0) { throw 'Base preflight failed.' }
+    }
+    foreach ($check in ($preflightChecks | Select-Object -Unique)) {
+        $selection = @{ $check = $true }
+        & $preflightScript @selection
+        if ($LASTEXITCODE -ne 0) {
+            $report.prechecks.preflight = 'FAIL'
+            throw "$check preflight failed."
+        }
     }
     $report.prechecks.preflight = 'PASS'
     Write-Host "Operator resource check (LIVE): Target: $Target; Resource: $Resource; Backend: $Backend"
@@ -1904,10 +1953,13 @@ try {
     Write-Host "- Confirm the external source is manually set to $SourceVoltageLimitV V with a $SourceCurrentLimitA A current limit."
     Write-Host '- Confirm physical load Input OFF, safe wiring/DUT and tolerance of every selected setting (use -Verbose or the report).'
     Write-Host '- Confirm no other application controls this instrument and an independent manual Input OFF procedure is available.'
+    if ($protectionSelected) {
+        Write-Host '- Start in Fixed CC with Timer, Short, Slow Rise and Transient OFF for Protection.'
+    }
     if ($triggerSelected) {
         Write-Host '- Confirm external On/Off and analog programming are disabled and external trigger wiring was reviewed while de-energized.'
     }
-    if (-not ($readbackSelected -or $asrlSelected)) {
+    if (@($selectedModes | Where-Object { $_ -notin @('readback','system-query','workflow') -and $_ -notin $featureModes }).Count) {
         Write-Host '- Selected trials may deliberately turn Input ON; the script explicitly commands and verifies OFF, but cannot guarantee OFF after communication failures.'
     }
     $ack = if ($protectionSelected) {
@@ -1947,7 +1999,19 @@ try {
     Write-Host "PASS Identify; VISA runtime manufacturer: $expectedManufacturer"
 
     $phase = 'cases'
-    foreach ($step in ($planned | Select-Object -Skip 1)) {
+    $readbackSelection = $null
+    for ($i = 1; $i -le $planned.Count; $i++) {
+        if ($protectionSelected -and $i -eq $beforeSetup) { Invoke-ProtectionValidation }
+        if ($i -eq $planned.Count) { break }
+        $step = $planned[$i]
+        if ($step.ContainsKey('readback_mode') -and
+            ($readbackSelection.active_mode -cne $step.readback_mode -or
+             ($step.readback_function -and $readbackSelection.function -cne $step.readback_function))) {
+            $entry = $report.results | Where-Object { $_.name -ceq $step.name }
+            $entry.status = 'SKIP'
+            Write-Host "SKIP $($step.name): current instrument selection is outside this case."
+            continue
+        }
         if ($step.ContainsKey('cr_handoff_after')) {
             $origin = $report.results | Where-Object { $_.name -eq $step.cr_handoff_after } | Select-Object -First 1
             if (-not $origin.Contains('origin_function')) {
@@ -1990,7 +2054,7 @@ try {
             }
             $report.sequence_input_off_unconfirmed = $true
         }
-        if ($asrlSelected -and $step.name -eq 'input-state') { $report.prechecks.input_off = 'FAIL' }
+        if ($step.name -eq 'input-state') { $report.prechecks.input_off = 'FAIL' }
         $result = Invoke-LiveCommand -Command $step.command -CaseName $step.name `
             -ExtraArgs $step.args -DeadlineMs $commandDeadline -ExpectedError $step.expected_error `
             -AllowCrHandoff:($step.allow_cr_handoff -eq $true)
@@ -2054,6 +2118,10 @@ try {
         if ($step.ContainsKey('expected_range') -and $observedRange -cne $step.expected_range) {
             Fail-Case $step.name 'readback_mismatch' 'Auto Range differs from the Core plan.'
         }
+        if ($step.independent_snapshot) { $readbackSelection = $result.result }
+        if ($step.name -ceq 'transient-status') {
+            $step.readback_expected.function = $readbackSelection.function
+        }
         if ($step.ContainsKey('readback_expected')) {
             $step.readback_expected.state_source = 'instrument_readback'
             Assert-ReadbackFields $result.result $step.readback_expected $step.name
@@ -2088,7 +2156,6 @@ try {
         $entry.status = 'SKIP'
     }
     if ($triggerSelected) { Invoke-TriggerValidation }
-    if ($protectionSelected) { Invoke-ProtectionValidation }
     $report.status = if ($readbackSelected -and ($report.results.readback_comparison -contains 'OBSERVED ONLY')) {
         'OBSERVED ONLY'
     } else { 'PASS' }
@@ -2097,7 +2164,7 @@ try {
     if ($report.status -eq 'OBSERVED ONLY') {
         Write-Host 'Readback complete. Only comparisons with supplied expected values were verified.'
     } else {
-        Write-Host 'PASS: one-run CLI LIVE validation.'
+        Write-Host 'PASS: applicable CLI LIVE cases and selected offline cases.'
     }
     exit 0
 } catch {
@@ -2227,7 +2294,8 @@ try {
         $report.status = 'FAIL'
         if ($script:triggerTrusted -and -not $traceCommunicationUntrusted -and
             -not $inputOnAttempted -and -not $timerEnableAttempted -and
-            -not $slowRiseEnableAttempted) {
+            -not $slowRiseEnableAttempted -and -not $report.sequence_input_off_unconfirmed -and
+            -not $report.protection_input_off_unconfirmed) {
             $report.results += [ordered]@{name='cleanup-trigger-input-state';command='input-state';status='NOT RUN'}
             try {
                 $state = Invoke-LiveCommand -Command 'input-state' -CaseName 'cleanup-trigger-input-state' -Cleanup

@@ -95,6 +95,23 @@ def validate_connection(resource: str | None, backend: str, *, required: bool,
         raise LoadError("invalid_resource", "An explicit USB INSTR VISA resource is required.")
 
 
+def validate_request_connection(resource, backend, *, mode, asrl, allowed):
+    """Validate an explicit contributor transport without widening Product LIVE."""
+    if asrl is not None:
+        if not allowed or mode == "simulate":
+            raise LoadError("unsupported_live_scope",
+                            "ASRL requires a contributor LIVE or dry-run command.")
+        asrl.overrides()
+    validate_connection(resource, backend, required=mode == "live" or asrl is not None,
+                        asrl=asrl is not None)
+
+
+def open_request_session(resource, asrl, open_usb):
+    if asrl is None:
+        return open_usb(resource)
+    return open_asrl_session(resource, asrl.overrides(), contributor=True)
+
+
 @contextmanager
 def open_session(resource: str):
     import pyvisa
@@ -194,7 +211,7 @@ def query(session, command: str) -> str:
 
 
 @contextmanager
-def open_asrl_session(resource: str, overrides: dict):
+def open_asrl_session(resource: str, overrides: dict, *, contributor: bool = False):
     import pyvisa
 
     class ASRLLibrary:
@@ -229,12 +246,22 @@ def open_asrl_session(resource: str, overrides: dict):
             except Exception as exc:
                 raise communication_error("visa_configure_failed", "Cannot set ASRL I/O timeout.", exc) from exc
 
-        def query_identity(self, command: str) -> str:
+        identity_pending = True
+
+        def query(self, command, delay=None):
+            if not self.identity_pending:
+                return super().query(command, delay)
+            if command != "*IDN?":
+                raise LoadError("invalid_identity", "ASRL requires identity before command queries.", 3)
             self.visalib.idn_deadline_ns = monotonic_ns() + ASRL_IDN_TIMEOUT_MS * _NS_PER_MS
             try:
-                return query(self, command)
+                reply = super().query(command, delay)
             finally:
                 self.visalib.idn_deadline_ns = None
+            self.identity_pending = False
+            if contributor:
+                self.set_io_timeout(TIMEOUT_MS)
+            return reply
 
     validate_connection(resource, "system", required=True, asrl=True)
     manager_handle = session_handle = None

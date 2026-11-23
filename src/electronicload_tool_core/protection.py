@@ -8,7 +8,8 @@ from . import control as c
 from .errors import LoadError
 from .identity import MODEL_ID, parse_identity
 from .simulator import ControlSimulator
-from .visa import open_session, require_trusted_session, validate_connection
+from .visa import (open_request_session, open_session, require_trusted_session,
+                   validate_request_connection)
 
 COMMANDS = ("protection-status", "protection-set", "protection-clear")
 # IT8800 Programming Guide V2.1, Questionable group and Source Subsystem.
@@ -290,7 +291,8 @@ def _run_trial(session, trial: str, stop) -> dict:
 
 def execute(command: str, *, mode: str = "live", resource=None, backend: str = "system",
             model_id: str = MODEL_ID, arguments=None, simulator=None, stop=None,
-            hardware_validation: bool = False, snapshot: bool = False, trial: str | None = None) -> dict:
+            hardware_validation: bool = False, snapshot: bool = False, trial: str | None = None,
+            asrl=None) -> dict:
     if mode not in {"live", "dry-run", "simulate"} or command not in (*COMMANDS, "input-on"):
         raise LoadError("argument_error", "Unknown Protection command or mode.")
     if model_id != MODEL_ID:
@@ -311,7 +313,8 @@ def execute(command: str, *, mode: str = "live", resource=None, backend: str = "
         settings = validate_arguments(command, args)
     if mode == "live" and not hardware_validation:
         raise LoadError("unsupported_live_scope", "Protection is offline only.")
-    validate_connection(resource, backend, required=mode == "live")
+    validate_request_connection(resource, backend, mode=mode, asrl=asrl,
+                                allowed=hardware_validation)
     marker = {"validation_only": True, "validation_scope": "protection"} if hardware_validation else {}
     if mode == "dry-run":
         writes = [f"{REGISTERS[field]} {_write_token(value)}" for field, value in settings.items()]
@@ -327,7 +330,7 @@ def execute(command: str, *, mode: str = "live", resource=None, backend: str = "
         result = _simulate(command, settings, args.get("events", False),
                            simulator if simulator is not None else ControlSimulator(), stop)
         return {**result, "state_source": "simulate"}
-    with open_session(resource) as (session, runtime):
+    with open_request_session(resource, asrl, open_session) as (session, runtime):
         parse_identity(c._query(session, "*IDN?"))
         if command == "protection-status":
             # Finish the read-only trial checks before consuming an event.

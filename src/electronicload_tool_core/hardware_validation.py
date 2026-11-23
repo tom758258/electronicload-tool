@@ -15,6 +15,7 @@ from .errors import LoadError
 from .identity import parse_identity
 from .readback import TRANSIENT_LEVEL_QUERIES, fixed_slew_status, transient_mode, transient_values
 from .simulator import ControlSimulator
+from .visa import open_request_session
 from .trigger import (SOURCE_TOKENS, TRIGGER_COMMANDS, TRIGGER_INTERVAL_QUERY,
                       TRIGGER_SOURCE_QUERY, read_source, software_trigger, validate_interval,
                       validate_setup)
@@ -39,7 +40,7 @@ def _input_timer_snapshot(session):
 
 
 def execute_input_timer(command, *, mode, resource, seconds, current, range_name,
-                        expected, confirmed, stop):
+                        expected, confirmed, stop, asrl=None):
     """CLI-only bounded CC validation. Normal Product/Worker Timer LIVE stays closed."""
     if mode not in {"live", "dry-run"} or command not in {*c.INPUT_TIMER_COMMANDS,
                                                            "input-on", "input-off"}:
@@ -85,7 +86,7 @@ def execute_input_timer(command, *, mode, resource, seconds, current, range_name
                     raise LoadError("readback_mismatch", "Timer/CC differs from authorized settings.", 3)
         _stopping(stop)
 
-    with c.open_session(resource) as (session, runtime):
+    with open_request_session(resource, asrl, c.open_session) as (session, runtime):
         parse_identity(c._query(session, "*IDN?"))
         if command == "input-off":
             result = c._perform(session, command, current=None, voltage=None, resistance=None,
@@ -524,7 +525,7 @@ def _finite_list(configuration):
 
 
 def execute_trigger(command, *, mode, resource, source, interval, transient, list_configuration,
-                    expected, confirmed, stop):
+                    expected, confirmed, stop, asrl=None):
     """Use native SCPI only in the explicitly selected standalone CLI scope."""
     transient_setup = command in c.TRANSIENT_SETUP_COMMANDS
     list_setup = command == "set-list-cc"
@@ -583,7 +584,7 @@ def execute_trigger(command, *, mode, resource, source, interval, transient, lis
     if command == "input-on" and trigger["source"] == "MANUAL":
         raise LoadError("unsupported_live_scope",
                         "MANUAL Trigger powered contributor LIVE is not physically validated.")
-    with c.open_session(resource) as (session, runtime):
+    with open_request_session(resource, asrl, c.open_session) as (session, runtime):
         if scope is not None or command in {"input-off", "transient-disable"}:
             setup_writes = writes if transient_setup else []
             result = _perform(session, command, scope or "transient-cc", configuration, setup_writes,
@@ -601,7 +602,7 @@ def execute_trigger(command, *, mode, resource, source, interval, transient, lis
 
 
 def _execute_led_or_slow_rise(command, *, scope, mode, resource, current, resistance,
-                              range_name, vdrop, stop):
+                              range_name, vdrop, stop, asrl):
     permitted = ({"set-cc", *c.CR_COMMANDS, "cr-led-status"} if scope == "cr-led"
                  else {"set-cc", *c.SLOW_RISE_COMMANDS})
     if command not in permitted:
@@ -623,7 +624,7 @@ def _execute_led_or_slow_rise(command, *, scope, mode, resource, current, resist
     if mode == "dry-run":
         return {**marker, "command": command, "hardware_access": False,
                 "expected_configuration": configuration}
-    with c.open_session(resource) as (session, runtime):
+    with open_request_session(resource, asrl, c.open_session) as (session, runtime):
         result = c._perform(session, command, current=current, voltage=None, resistance=resistance,
                             power=None, range_name=range_name, confirmed=False, stop=stop,
                             allow_cv=False, allow_cr=False, allow_cw=False,
@@ -632,14 +633,14 @@ def _execute_led_or_slow_rise(command, *, scope, mode, resource, current, resist
 
 
 def execute(command, *, scope, mode, resource, current, voltage, resistance, power,
-            range_name, transient, expected, confirmed, stop, vdrop=None):
+            range_name, transient, expected, confirmed, stop, vdrop=None, asrl=None):
     if scope in ("cr-led", "current-slow-rise"):
         if (mode not in {"live", "dry-run"} or confirmed
                 or any(value is not None for value in (voltage, power, transient, expected))):
             raise LoadError("argument_error", "Use the explicit validation scope with LIVE or dry-run.")
         return _execute_led_or_slow_rise(command, scope=scope, mode=mode, resource=resource,
                                          current=current, resistance=resistance, range_name=range_name,
-                                         vdrop=vdrop, stop=stop)
+                                         vdrop=vdrop, stop=stop, asrl=asrl)
     if not isinstance(scope, str) or scope not in FUNCTIONS or mode not in {"live", "dry-run"}:
         raise LoadError("argument_error", "Hardware validation requires an explicit scope and LIVE/dry-run.")
     setup = "set-" + scope
@@ -678,7 +679,7 @@ def execute(command, *, scope, mode, resource, current, voltage, resistance, pow
         return {**marker, "command": command, "hardware_access": False,
                 "planned_writes": ["SYST:REM", *actions] if actions else [],
                 "expected_configuration": _serial(expected) if expected else None}
-    with c.open_session(resource) as (session, runtime):
+    with open_request_session(resource, asrl, c.open_session) as (session, runtime):
         result = _perform(session, command, scope, expected, sequence, stop)
         return {**result, **marker, "visa": runtime}
 

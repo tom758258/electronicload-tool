@@ -35,16 +35,15 @@ Core 分別以 1000 ms 為 ASRL 開啟與 `*IDN?` 的期限。IDN 的寫入和�
 ## LIVE support policy / LIVE 支援規則
 
 Core checks the canonical model ID, command, transport, backend, and required
-feature for each live scope. Product LIVE for IT8812C requires explicit USB
-INSTR and System VISA. The standalone `asrl-readonly` contributor scope
-requires an explicit ASRL INSTR resource and permits only `identify`,
-`input-state` and `measure` for IT8812C. Serial overrides apply only to that
-scope. Worker LIVE requires USB INSTR and does not accept contributor scopes.
-Passive discovery can list ASRL resources. Only USB resources receive IDN
-queries during automatic discovery.
+feature for each live scope. Product and Worker LIVE for IT8812C require USB
+INSTR and System VISA. Standalone CLI contributors can explicitly select
+ASRL INSTR with `--validation-connection asrl` for the validation matrix.
+Command-specific validation scopes and confirmations still apply. Serial
+overrides apply to ASRL only. Passive discovery can list ASRL resources.
+Automatic identification queries USB resources only.
 
 Core 逐一檢查 LIVE 範圍的標準型號 ID、指令、傳輸、後端和必要功能。IT8812C 的
-Product LIVE 要求明確指定 USB INSTR 並使用 System VISA。獨立 CLI 的貢獻者範圍
-`asrl-readonly` 要求明確指定 ASRL INSTR 資源，只允許對 IT8812C 執行 `identify`、
-`input-state` 與 `measure`。序列埠覆寫只適用於此範圍。Worker LIVE 要求 USB INSTR，
-且不接受貢獻者範圍。被動探索可列出 ASRL 資源，自動探索只對 USB 資源送出 IDN 查詢。
+Product 與 Worker LIVE 要求 USB INSTR 和 System VISA。獨立 CLI 可使用
+`--validation-connection asrl` 明確選擇 ASRL INSTR 進行貢獻者驗證，仍須遵守
+各命令的驗證範圍與確認條件。序列埠覆寫僅用於 ASRL。被動探索可列出 ASRL 資源，
+自動識別只會查詢 USB 資源。
