@@ -2,12 +2,12 @@
 
 from .errors import LoadError, communication_error
 from .identity import MODEL_ID, Identity, parse_identity
-from .visa import open_session, query, validate_connection
+from .visa import open_session, validate_connection
 
 
 def verify_asrl_identity(session) -> Identity:
     """Verify one explicitly opened ASRL session using its short IDN timeout."""
-    return parse_identity(query(session, "*IDN?"))
+    return parse_identity(session.query_identity("*IDN?"))
 
 
 def _listed_resources() -> tuple[str, ...]:

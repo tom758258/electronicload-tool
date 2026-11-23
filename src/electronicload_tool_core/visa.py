@@ -3,6 +3,7 @@
 import re
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
+from time import monotonic_ns
 from types import SimpleNamespace
 
 from pyvisa.constants import ControlFlow, Parity, StopBits
@@ -14,6 +15,7 @@ TERMINATION = "\n"
 QUERY_DELAY_S = 0.150
 ASRL_OPEN_TIMEOUT_MS = 1000
 ASRL_IDN_TIMEOUT_MS = 1000
+_NS_PER_MS = 1_000_000
 SERIAL_CHOICES = {
     "parity": {value.name: value for value in Parity},
     "stop_bits": {"1": StopBits.one, "1.5": StopBits.one_and_a_half, "2": StopBits.two},
@@ -195,12 +197,44 @@ def query(session, command: str) -> str:
 def open_asrl_session(resource: str, overrides: dict):
     import pyvisa
 
+    class ASRLLibrary:
+        idn_deadline_ns: int | None = None
+
+        def __getattr__(self, name):
+            return getattr(library, name)
+
+        def remaining_idn_ms(self, deadline_ns: int) -> int:
+            remaining_ns = deadline_ns - monotonic_ns()
+            if remaining_ns <= 0:
+                raise pyvisa.errors.VisaIOError(pyvisa.constants.StatusCode.error_timeout)
+            return remaining_ns // _NS_PER_MS
+
+        def read(self, handle, count):
+            deadline_ns = self.idn_deadline_ns
+            if deadline_ns is None:
+                return library.read(handle, count)
+            # PyVISA can issue multiple native reads for one response. Keep
+            # its framing and chunk handling, with a timeout for each read.
+            library.set_attribute(handle, pyvisa.constants.ResourceAttribute.timeout_value,
+                                  self.remaining_idn_ms(deadline_ns))
+            self.remaining_idn_ms(deadline_ns)
+            response = library.read(handle, count)
+            self.remaining_idn_ms(deadline_ns)
+            return response
+
     class ASRLSession(pyvisa.resources.SerialInstrument):
         def set_io_timeout(self, timeout: int) -> None:
             try:
                 self.timeout = timeout
             except Exception as exc:
                 raise communication_error("visa_configure_failed", "Cannot set ASRL I/O timeout.", exc) from exc
+
+        def query_identity(self, command: str) -> str:
+            self.visalib.idn_deadline_ns = monotonic_ns() + ASRL_IDN_TIMEOUT_MS * _NS_PER_MS
+            try:
+                return query(self, command)
+            finally:
+                self.visalib.idn_deadline_ns = None
 
     validate_connection(resource, "system", required=True, asrl=True)
     manager_handle = session_handle = None
@@ -214,13 +248,18 @@ def open_asrl_session(resource: str, overrides: dict):
         except Exception as exc:
             raise communication_error("visa_manager_failed", "Cannot load System VISA for ASRL.", exc) from exc
         try:
-            manager = SimpleNamespace(visalib=library, session=manager_handle)
+            manager = SimpleNamespace(visalib=ASRLLibrary(), session=manager_handle)
             session = ASRLSession(manager, resource)
             # Bypass Resource.open and its viClear recovery loop.
+            deadline_ns = monotonic_ns() + ASRL_OPEN_TIMEOUT_MS * _NS_PER_MS
             session_handle, status = library.open(manager_handle, resource,
                                                   pyvisa.constants.AccessModes.no_lock,
                                                   ASRL_OPEN_TIMEOUT_MS)
             session.session = session_handle
+            # viOpen is synchronous and may ignore the lock wait argument.
+            # Retain any late handle for cleanup, without using the session.
+            if monotonic_ns() >= deadline_ns:
+                raise pyvisa.errors.VisaIOError(pyvisa.constants.StatusCode.error_timeout)
         except Exception as exc:
             raise communication_error("visa_open_failed", "Cannot open the ASRL session.", exc) from exc
         if status != pyvisa.constants.StatusCode.success:

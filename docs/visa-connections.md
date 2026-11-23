@@ -8,22 +8,29 @@ Core 負責資源檢查、VISA session 生命週期、儀器識別、SCPI 與回
 USB 與 ASRL 皆使用 System VISA（`@ivi`），各有獨立的 session 路徑，並共用
 IT8812C 的身分規則與唯讀指令。
 
-| Transport / 傳輸 | VISA open timeout / 開啟逾時 | IDN I/O timeout / 身分查詢逾時 | Other I/O timeout / 其餘 I/O 逾時 | Framing / 訊框設定 |
+| Transport / 傳輸 | VISA open / 開啟逾時 | IDN / 身分查詢逾時 | Other I/O timeout / 其餘 I/O 逾時 | Framing / 訊框設定 |
 | --- | --- | --- | --- | --- |
 | USB INSTR | 5000 ms | 5000 ms | 5000 ms | LF read/write, 150 ms query delay / 讀寫 LF，查詢延遲 150 ms |
 | ASRL INSTR | 1000 ms | 1000 ms | 5000 ms | VISA/PyVISA settings with selective overrides / 沿用 VISA／PyVISA 設定，只覆寫指定項目 |
 
-The open timeout is passed to VISA. The driver controls how it is enforced.
-After a successful ASRL `*IDN?`, Core uses the normal I/O timeout for any further
-queries in that session. The ASRL path owns its native manager handle and closes
-the device handle before the manager. Open, configuration, query and cleanup
-failures terminate the request. Cleanup failures are reported alongside the
-primary error. Both session paths bypass PyVISA's automatic clear and retry.
+The USB open timeout is passed to VISA and its driver controls how it is enforced.
+Core measures ASRL open and `*IDN?` against independent 1000 ms deadlines. The
+IDN write and all response reads share its budget. Core rejects a late result
+before using the session or issuing further queries. Native VISA calls are
+synchronous, so a driver that overruns its deadline must return before Core can
+report the timeout and clean up. After a successful ASRL identity check, further
+queries use the normal I/O timeout. The ASRL path owns its native manager handle
+and closes the device handle before the manager. Open, configuration, query and
+cleanup failures terminate the request. Cleanup failures are reported alongside
+the primary error. Both session paths bypass PyVISA's automatic clear and retry.
 
-開啟逾時由 Core 傳給 VISA，實際執行方式由驅動程式決定。ASRL 的 `*IDN?`
-核對成功後，同一 session 的後續查詢使用一般 I/O 逾時。ASRL 各有原生 Manager
-handle，依序關閉裝置與 Manager。開啟、設定、查詢或清理出錯都會結束請求。
-清理失敗會與主要錯誤一併回報。兩條 session 路徑均略過 PyVISA 的自動清除與重試。
+USB 開啟逾時由 Core 傳給 VISA，實際執行方式由驅動程式決定。
+Core 分別以 1000 ms 為 ASRL 開啟與 `*IDN?` 的期限。IDN 的寫入和所有回應讀取
+共用這個預算。若結果逾期，Core 會拒絕使用該 session 或繼續查詢。原生 VISA 呼叫
+採同步執行，驅動程式逾期時，Core 必須等它返回才能回報逾時並清理。ASRL 身分核對
+成功後，後續查詢使用一般 I/O 逾時。ASRL 各有原生 Manager handle，依序關閉裝置
+與 Manager。開啟、設定、查詢或清理出錯都會結束請求。清理失敗會與主要錯誤一併
+回報。兩條 session 路徑均略過 PyVISA 的自動清除與重試。
 
 ## LIVE support policy / LIVE 支援規則
 

@@ -5,6 +5,7 @@ from contextlib import nullcontext
 import pytest
 from pyvisa import constants, errors, highlevel
 
+from electronicload_tool_core import visa
 from electronicload_tool_core.errors import LoadError
 from electronicload_tool_core.readonly import execute
 from electronicload_tool_core.visa import SerialOptions
@@ -25,8 +26,11 @@ def asrl_library(monkeypatch):
         def __init__(self):
             self.events = []
             self.failures = {}
+            self.elapsed_ns = 0
+            self.latency_ms = {}
             self.status = SUCCESS
             self.attributes = {}
+            self.idn_fragments = []
             self.replies = {
                 "*IDN?": "ITECH Ltd,IT8812C,PRIVATE-SERIAL,1.2",
                 "INP:STAT?": "0", "MEAS:VOLT?": "12", "MEAS:CURR?": "0.5", "FETC:POW?": "6",
@@ -34,6 +38,7 @@ def asrl_library(monkeypatch):
 
         def event(self, *event):
             self.events.append(event)
+            self.elapsed_ns += self.latency_ms.get(event[0], 0) * 1_000_000
             if event in self.failures:
                 raise self.failures[event]
 
@@ -65,6 +70,9 @@ def asrl_library(monkeypatch):
 
         def read(self, session, count):
             assert session == 11
+            self.event("read", self.last_query, self.attributes[ATTR.timeout_value])
+            if self.last_query == "*IDN?" and self.idn_fragments:
+                return self.idn_fragments.pop(0), constants.StatusCode.success_max_count_read
             reply = self.replies[self.last_query]
             if isinstance(reply, Exception):
                 raise reply
@@ -81,6 +89,7 @@ def asrl_library(monkeypatch):
         return library
 
     monkeypatch.setattr(highlevel, "open_visa_library", open_library)
+    monkeypatch.setattr(visa, "monotonic_ns", lambda: library.elapsed_ns)
     return library
 
 
@@ -100,7 +109,9 @@ def test_asrl_options_override_only_explicit_settings(asrl_library, options, att
     assert asrl_library.attributes == {**attributes, ATTR.timeout_value: 1000}
     assert asrl_library.events[:3] == [("backend", "@ivi"), ("manager",),
                                        ("open", ASRL_SCOPE["resource"], 1000)]
-    assert asrl_library.events[-3:] == [("query", "*IDN?", 1000), ("close", 11), ("close", 10)]
+    assert [event for event in asrl_library.events if event[0] in {"query", "read", "close"}] == [
+        ("query", "*IDN?", 1000), ("read", "*IDN?", 1000), ("close", 11), ("close", 10),
+    ]
     if termination is not None:
         assert asrl_library.last_message == termination
 
@@ -111,10 +122,14 @@ def test_asrl_options_override_only_explicit_settings(asrl_library, options, att
      {"voltage_v": 12.0, "current_a": 0.5, "power_w": 6.0}),
 ])
 def test_asrl_only_uses_the_normal_timeout_after_identity(asrl_library, command, queries, expected):
+    asrl_library.latency_ms.update(open=900, query=400, read=550)
     result = execute(command, **ASRL_SCOPE)
     assert expected.items() <= result.items()
     assert [event for event in asrl_library.events if event[0] == "query"] == [
         ("query", "*IDN?", 1000), *(("query", query, 5000) for query in queries),
+    ]
+    assert [event for event in asrl_library.events if event[0] == "read"] == [
+        ("read", "*IDN?", 600), *(("read", query, 5000) for query in queries),
     ]
     assert asrl_library.events[-2:] == [("close", 11), ("close", 10)]
 
@@ -152,6 +167,29 @@ def test_asrl_failures_stop_without_retry(asrl_library, stage, code, closes):
     assert [event[1] for event in asrl_library.events if event[0] == "query"] == expected_queries
     assert [event[1] for event in asrl_library.events if event[0] == "close"] == closes
     assert sum(event[0] == "open" for event in asrl_library.events) == (stage != "manager")
+
+
+@pytest.mark.parametrize("latency_ms,fragment,code,queries,read_timeouts", [
+    ({"open": 1150}, b"", "visa_open_failed", [], []),
+    ({"query": 1150}, b"", "query_failed", ["*IDN?"], []),
+    ({"query": 570, "read": 570}, b"", "query_failed", ["*IDN?"], [430]),
+    ({"query": 200, "read": 450}, b"ITECH Ltd,", "query_failed", ["*IDN?"], [800, 350]),
+])
+def test_asrl_rejects_late_native_success(asrl_library, latency_ms, fragment, code, queries, read_timeouts):
+    asrl_library.latency_ms.update(latency_ms)
+    if fragment:
+        asrl_library.idn_fragments.append(fragment)
+        asrl_library.replies["*IDN?"] = "IT8812C,PRIVATE-SERIAL,1.2"
+    asrl_library.failures[("close", 11)] = OSError("PRIVATE-PORT")
+    with pytest.raises(LoadError) as failure:
+        execute("measure", **ASRL_SCOPE)
+    assert failure.value.code == code and failure.value.exit_code == 3
+    assert failure.value.details["visa_status"] == constants.StatusCode.error_timeout
+    assert failure.value.details["cleanup_errors"][0]["code"] == "cleanup_failed"
+    assert "PRIVATE" not in str(failure.value.as_dict())
+    assert [event[1] for event in asrl_library.events if event[0] == "query"] == queries
+    assert [event[2] for event in asrl_library.events if event[0] == "read"] == read_timeouts
+    assert asrl_library.events[-2:] == [("close", 11), ("close", 10)]
 
 
 @pytest.mark.parametrize("close_failures,primary", [([11], False), ([10], False), ([11, 10], True)])
