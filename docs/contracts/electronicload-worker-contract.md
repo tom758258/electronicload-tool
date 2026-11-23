@@ -173,8 +173,10 @@ optional local `csv` path. Both CC commands accept optional `range`, with
 1 second) and `cutoff_capacity_ah`. The [CLI guide](../cli/README.md#basic-workflows)
 defines the bounds, units, operators, and CSV columns.
 
-Worker arguments use finite JSON numbers, integer `count`, and boolean
-`confirm_input_on`. Malformed arguments, duplicate JSON fields, and unknown
+Worker arguments use finite JSON numbers, integer `count` (1 to 10,000),
+and boolean `confirm_input_on`. `duration_s` and `timeout_s` must be positive
+and have no fixed maximum. `interval_s` accepts 0.001 to 3600 seconds.
+Malformed arguments, duplicate JSON fields, and unknown
 fields fail before admission with HTTP 400. The simulated CC commands require
 `confirm_input_on: true`; omission or false returns HTTP 409. Valid LIVE
 requests on a live Worker are admitted and finish with
@@ -186,11 +188,16 @@ and performs no simulator I/O or file creation.
 
 Simulated jobs share the Worker's existing simulator. A successful result
 has `elapsed_s` and `stop_reason` (`completed`, `condition_met`,
-`duration_elapsed`, `voltage_cutoff`, or `capacity_cutoff`). Sampling results
-also include `sample_count` and `last_measurement` (null before the first
-sample). CC results include `current_a`, resolved `range`, `input_state`,
+`duration_elapsed`, `voltage_cutoff`, `capacity_cutoff`, or
+`sample_limit_reached`). Sampling results also include `sample_count` and
+`last_measurement` (null before the first sample). Sampling stops after at
+most 10,000 actual samples. `measure-log` with `count` returns `completed`
+at the requested count. If the sample limit is reached before another stop
+condition, the job returns `sample_limit_reached`; CC discharge runs its
+Input OFF cleanup before reporting the result. CC results include
+`current_a`, resolved `range`, `input_state`,
 and `cleanup` with `required`, `attempted`, and `off_confirmed`.
-Timed load includes `duration_s`. Discharge samples `voltage_v`, `current_a`
+Timed load includes `duration_s` and does not sample. Discharge samples `voltage_v`, `current_a`
 and `power_w` in sequence. It checks voltage before querying current and
 integrates `capacity_ah` using consecutive current-reading timestamps
 before querying power. Either cutoff ends sampling immediately. A partial

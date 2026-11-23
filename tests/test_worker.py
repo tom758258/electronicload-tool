@@ -1960,9 +1960,10 @@ def test_workflow_worker_common_jobs_validation_and_simulator_state(worker, caps
     assert rejection["error"]["code"] == "invalid_current_resolution"
 
     path = tmp_path / "samples.csv"
-    preview_args = {**arguments["cc-discharge"], "csv": str(path)}
+    preview_args = {**arguments["cc-discharge"], "timeout_s": 604801, "csv": str(path)}
     preview_args.pop("confirm_input_on")
     preview = call("cc-discharge", preview_args, mode="dry_run")
+    assert preview["arguments"]["timeout_s"] == "604801"
     assert preview["csv_requested"] and not path.exists()
     assert call("input-state", {})["input_state"] == "OFF"
 
@@ -1994,7 +1995,7 @@ def test_workflow_worker_stop_waits_for_off_confirmation(trace_worker_with_sessi
     load = ActiveLoad()
     ready, events = trace_worker_with_session(load)
     code, accepted = http(ready["command_url"], request(
-        "cc-timed-load", {"current": 0.5, "duration_s": 300, "confirm_input_on": True}))
+        "cc-timed-load", {"current": 0.5, "duration_s": 604801, "confirm_input_on": True}))
     assert code == 202 and on_confirmed.wait(3)
     assert http(ready["command_url"], request("measure"))[0] == 409
     assert http(ready["cancel_url"], {"schema_version": 3,

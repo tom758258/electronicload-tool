@@ -5,6 +5,7 @@ import math
 import operator
 from decimal import Decimal
 from pathlib import Path
+from threading import TIMEOUT_MAX
 from time import monotonic, sleep
 
 from . import control
@@ -26,7 +27,6 @@ ARGUMENTS = {
 }
 COMMANDS = tuple(ARGUMENTS)
 OPERATORS = {"lt": operator.lt, "le": operator.le, "gt": operator.gt, "ge": operator.ge}
-MAX_SECONDS = 86400
 MAX_INTERVAL = 3600
 MIN_INTERVAL = Decimal("0.001")
 MAX_SAMPLES = 10000
@@ -70,15 +70,12 @@ def validate_arguments(command, arguments, *, mode):
             if not isinstance(settings[field], str) or settings[field] not in choices:
                 raise LoadError("argument_error", f"{field} must be one of {', '.join(choices)}.")
     for field in ("timeout_s", "duration_s"):
-        if field in settings and not MIN_INTERVAL <= settings[field] <= MAX_SECONDS:
-            raise LoadError("argument_error", f"{field} must be from {MIN_INTERVAL} to {MAX_SECONDS} seconds.")
+        if field in settings and settings[field] <= 0:
+            raise LoadError("argument_error", f"{field} must be positive.")
     if "interval_s" in settings:
         interval = settings["interval_s"]
         if not MIN_INTERVAL <= interval <= MAX_INTERVAL:
             raise LoadError("argument_error", f"interval_s must be from {MIN_INTERVAL} to {MAX_INTERVAL} seconds.")
-        time_limit = settings.get("timeout_s", settings.get("duration_s"))
-        if time_limit is not None and time_limit > interval * MAX_SAMPLES:
-            raise LoadError("argument_error", f"A time limit may allow at most {MAX_SAMPLES} samples.")
     if command == "measure-log":
         if ("count" in settings) == ("duration_s" in settings):
             raise LoadError("argument_error", "Supply exactly one of count or duration_s.")
@@ -86,8 +83,6 @@ def validate_arguments(command, arguments, *, mode):
             count = settings["count"]
             if type(count) is not int or not 1 <= count <= MAX_SAMPLES:
                 raise LoadError("argument_error", f"count must be an integer from 1 to {MAX_SAMPLES}.")
-            if (count - 1) * interval >= MAX_SECONDS:
-                raise LoadError("argument_error", f"The last sample must be scheduled before {MAX_SECONDS} seconds.")
     if command in CC_COMMANDS:
         if settings["current"] <= 0:
             raise LoadError("argument_error", "Load current must be positive.")
@@ -126,8 +121,8 @@ def _sample(session, quantities):
 
 def _measure(session, command, settings, quantities, stop, result, record_row):
     started = monotonic()
-    duration = settings.get("duration_s")
-    deadline = started + float(duration if duration is not None else settings.get("timeout_s", MAX_SECONDS))
+    time_limit = settings.get("duration_s", settings.get("timeout_s"))
+    deadline = started + float(time_limit) if time_limit is not None else math.inf
     interval = float(settings["interval_s"])
     tick = 0
     discharge = command == "cc-discharge"
@@ -136,7 +131,7 @@ def _measure(session, command, settings, quantities, stop, result, record_row):
     cutoff_ampere_seconds = cutoff_ah * 3600 if cutoff_ah is not None else None
     previous_time = previous_current = None
     while True:
-        due = deadline if tick >= MAX_SAMPLES else started + tick * interval
+        due = started + tick * interval
         _wait(stop, max(0, min(due, deadline) - monotonic()))
         if monotonic() >= deadline:
             break
@@ -193,9 +188,11 @@ def _measure(session, command, settings, quantities, stop, result, record_row):
                 return "condition_met"
         if cutoff_reason is not None:
             return cutoff_reason
+        if result["sample_count"] == MAX_SAMPLES:
+            return "sample_limit_reached"
         # Missed intervals are skipped to keep the sampling cadence without catch-up bursts.
         tick = max(tick + 1, math.floor((monotonic() - started) / interval) + 1)
-    if duration is not None:
+    if "duration_s" in settings:
         return "duration_elapsed"
     raise LoadError("workflow_timeout", "Workflow reached its time limit.", 3)
 
@@ -282,7 +279,14 @@ def _run_cc(session, settings, stop, result, run_load):
 
 
 def _wait_load(stop, duration_s):
-    _wait(stop, float(duration_s))
+    remaining = float(duration_s)
+    deadline = monotonic() + remaining
+    # Leave headroom for the platform timer's absolute-deadline conversion.
+    wait_chunk = TIMEOUT_MAX / 2
+    while remaining > wait_chunk:
+        _wait(stop, wait_chunk)
+        remaining = deadline - monotonic()
+    _wait(stop, max(0, remaining))
     return "duration_elapsed"
 
 

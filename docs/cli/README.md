@@ -1197,9 +1197,8 @@ Each command runs independently in the CLI or as one Worker job. Use
 `--simulate` to run or `--dry-run` to preview validated arguments without
 waiting, reading the simulator, or creating files. CLI runs return one JSON
 object. Press Ctrl+C to interrupt a CLI run. These commands are offline only.
-The simulator uses a fixed 12 V
-source, so a discharge simulation at a 3 V cutoff needs a time or capacity
-limit to stop.
+The simulator uses a fixed 12 V source, so a discharge simulation with a
+3 V cutoff ends at the timeout, capacity cutoff, or sample limit.
 
 | Command | Required options | Optional options |
 | --- | --- | --- |
@@ -1221,12 +1220,15 @@ electronicload-tool cc-discharge --dry-run --current 0.5 --cutoff-voltage 3 --cu
   or `power`) using `lt`, `le`, `gt` or `ge`. The threshold uses V, A or W
   for the selected metric. The run ends when the condition is met.
 - Sampling starts immediately and skips missed ticks. Intervals accept
-  0.001 to 3600 seconds, and durations and timeouts accept 0.001 to 86,400
-  seconds. `measure-log` accepts 1 to 10,000 samples with the last scheduled
-  before 86,400 seconds. A `measure-log` duration or monitoring timeout may
-  span up to 10,000 intervals. Duration mode samples strictly before the
-  deadline and ends with `duration_elapsed`. A monitoring timeout returns
-  `workflow_timeout` with the available summary.
+  0.001 to 3600 seconds. Durations and timeouts accept positive, finite
+  seconds with no fixed maximum. `measure-log --count` accepts 1 to 10,000
+  and returns `completed` at the requested count. In duration mode it samples
+  strictly before the deadline and returns `duration_elapsed` if the deadline
+  comes first. A monitoring timeout returns `workflow_timeout` with the
+  available summary. If a sampling workflow reaches 10,000 actual samples
+  before another stop condition, it succeeds with `sample_limit_reached`.
+  Discharge still runs Input OFF cleanup at the sample limit. Timed load
+  waits for the requested duration without sampling.
 - CC runs require initial Input OFF and verify Fixed CC settings before
   enabling Input. Current must be positive and valid for the selected range
   (`auto` by default, or `low` or `high`). Timed load waits the requested
@@ -1265,8 +1267,7 @@ For Worker argument names, results and Stop behavior, see the
 `--simulate` 執行，或用 `--dry-run` 預覽已驗證的參數。預覽不等待、
 不讀取模擬器，也不建立檔案。CLI 回傳單一 JSON 物件，可按 Ctrl+C
 中斷執行。這些指令僅供離線使用。模擬電壓固定為 12 V，因此用 3 V
-截止模擬放電時，會由
-時間或容量限制結束。
+截止模擬放電時，會在超時、容量截止或取樣達上限時結束。
 
 | 指令 | 必填選項 | 選填選項 |
 | --- | --- | --- |
@@ -1279,11 +1280,13 @@ For Worker argument names, results and Stop behavior, see the
   `measure-until` 只讀取所選項目（`voltage`、`current` 或 `power`），以
   `lt`、`le`、`gt` 或 `ge` 比較門檻，達成條件即結束。門檻使用對應的
   V、A 或 W。
-- 取樣立即開始，錯過的取樣時點直接略過。間隔接受 0.001 至 3600 秒，
-  持續時間和超時接受 0.001 至 86,400 秒。`measure-log` 接受 1 至 10,000
-  筆，最後一筆須排在 86,400 秒前。`measure-log` 總時長或監控超時最多
-  涵蓋 10,000 個取樣間隔。總時長模式只在期限前取樣，結束時回報
-  `duration_elapsed`。監控超時回報 `workflow_timeout` 與已有摘要。
+- 取樣立即開始，錯過的取樣時點直接略過。間隔接受 0.001 至 3600 秒。
+  持續時間和超時接受正的有限秒數，無固定上限。`measure-log --count`
+  接受 1 至 10,000 筆，達到指定筆數回報 `completed`。總時長模式只在
+  期限前取樣，若先到期限則回報 `duration_elapsed`。監控超時回報
+  `workflow_timeout` 與已有摘要。若先達到 10,000 筆實際取樣，取樣指令
+  以 `sample_limit_reached` 正常結束。放電達到取樣上限時仍會執行
+  Input OFF 清理。定時負載依指定時間等待，期間不取樣。
 - CC 指令確認初始 Input OFF，並在確認固定 CC 設定後才開啟 Input。電流
   必須為正值且符合所選檔位，預設 `auto`，也可選 `low` 或 `high`。定時負載
   自確認 ON 後開始計時。放電先在 Input OFF 時讀取起始電壓，若小於或

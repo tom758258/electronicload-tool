@@ -30,7 +30,8 @@ from electronicload_tool_core.trace import (CONFIG_FIELDS, CSV_FIELDS, SAMPLE_FI
                                            TRACE_COMMANDS, execute as trace_execute)
 from electronicload_tool_core.trigger import TRIGGER_SOURCES
 from electronicload_tool_core.workflows import (ARGUMENTS as WORKFLOW_ARGUMENTS,
-                                                COMMANDS as WORKFLOW_COMMANDS, OPERATORS,
+                                                COMMANDS as WORKFLOW_COMMANDS, MAX_INTERVAL, MAX_SAMPLES,
+                                                MIN_INTERVAL, OPERATORS,
                                                 execute as workflow_execute)
 from .json_input import decode_decimal_json
 from .worker import manifest, run_worker
@@ -98,6 +99,8 @@ def main(argv: list[str] | None = None) -> int:
             description = "Use --simulate to run or --dry-run to preview. Results are JSON."
             if name == "measure-log":
                 description += " Use exactly one of --count and --duration-s."
+            if name != "cc-timed-load":
+                description += f" Sampling stops after at most {MAX_SAMPLES:,} samples."
         sub = subparsers.add_parser(name, allow_abbrev=False, description=description)
         sub.json_errors = json_output
         if name == "list-resources":
@@ -139,6 +142,12 @@ def main(argv: list[str] | None = None) -> int:
             choices = {"metric": tuple(BASIC_MEASUREMENTS), "operator": tuple(OPERATORS),
                        "range": FIXED_RANGE_CHOICES}
             types = {"count": int, "csv": str, **dict.fromkeys(choices, str)}
+            workflow_help = {
+                "count": f"Number of samples (1 to {MAX_SAMPLES:,}).",
+                "interval_s": f"Sampling interval in seconds ({MIN_INTERVAL} to {MAX_INTERVAL}).",
+                "duration_s": "Duration in seconds (positive and finite, with no fixed maximum).",
+                "timeout_s": "Timeout in seconds (positive and finite, with no fixed maximum).",
+            }
             for field in (*required, *optional):
                 if field == "confirm_input_on":
                     sub.add_argument("--confirm", dest=field, action="store_true",
@@ -146,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     sub.add_argument("--" + field.replace("_", "-"), required=field in required,
                                      default=argparse.SUPPRESS, choices=choices.get(field),
-                                     type=types.get(field, _workflow_number))
+                                     type=types.get(field, _workflow_number), help=workflow_help.get(field))
             continue
         sub.add_argument("--validation-allow-pending-live-support", action="store_true",
                          help=argparse.SUPPRESS)

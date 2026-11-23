@@ -2,7 +2,7 @@
 
 import csv
 import json
-from threading import Event
+from threading import TIMEOUT_MAX, Event
 
 import pytest
 
@@ -18,6 +18,8 @@ class Clock(Event):
         self.now = 0.0
 
     def wait(self, timeout=None):
+        if timeout > TIMEOUT_MAX:
+            raise OverflowError("Timeout exceeds the platform wait limit.")
         if not self.is_set():
             self.now += timeout
         return self.is_set()
@@ -108,19 +110,53 @@ def test_periodic_sampling_skips_missed_intervals(clock, tmp_path):
         assert [float(row["elapsed_s"]) for row in csv.DictReader(file)] == [1.25, 2, 3]
 
 
-def test_measure_log_duration_ends_without_sampling_at_deadline(clock):
+@pytest.mark.parametrize(("duration", "count"), [(2, 2), (0.0005, 1)])
+def test_measure_log_duration_ends_without_sampling_at_deadline(clock, duration, count):
     load = RecordingLoad()
     load.input_on = True
-    result = run("measure-log", load, clock, interval_s=1, duration_s=2)
-    assert result["stop_reason"] == "duration_elapsed" and result["elapsed_s"] == 2
-    assert result["sample_count"] == load.io.count("MEAS:VOLT?") == 2
+    result = run("measure-log", load, clock, interval_s=1, duration_s=duration)
+    assert result["stop_reason"] == "duration_elapsed" and result["elapsed_s"] == duration
+    assert result["sample_count"] == load.io.count("MEAS:VOLT?") == count
     assert load.input_on and all(query.endswith("?") for query in load.io)
 
 
-def test_cc_timed_load_checks_settings_then_waits_then_verifies_off(clock):
+@pytest.mark.parametrize(
+    ("command", "arguments", "reason", "last_sample_s"),
+    [
+        ("measure-log", {"interval_s": 3600, "count": 10_000}, "completed", 9999 * 3600),
+        ("measure-log", {"interval_s": 1, "duration_s": 604801}, "sample_limit_reached", 20_000),
+        ("measure-until", {"interval_s": 1, "timeout_s": 604801, "metric": "voltage",
+                           "operator": "lt", "threshold": 4.5}, "sample_limit_reached", 9999),
+        ("cc-discharge", {"interval_s": 1, "timeout_s": 604801, "current": 0.5,
+                          "cutoff_voltage": 3, "confirm_input_on": True}, "sample_limit_reached", 9999),
+    ],
+)
+def test_sampling_stops_at_10000_actual_samples(clock, command, arguments, reason, last_sample_s):
+    class SlowFirstReading(RecordingLoad):
+        def query(self, command):
+            if command == "MEAS:VOLT?" and command not in self.io:
+                clock.now += 10_001
+            return super().query(command)
+
+    # Duration mode must count actual samples even when many scheduled ticks are missed.
+    load = SlowFirstReading() if "duration_s" in arguments else RecordingLoad()
+    result = run(command, load, clock, **arguments)
+    assert result["stop_reason"] == reason and result["elapsed_s"] == last_sample_s
+    assert result["sample_count"] == 10_000
+    assert result["last_measurement"]["voltage_v"] == 12
+    if command == "cc-discharge":
+        assert load.io.count("MEAS:VOLT?") == 10_001  # Includes the initial Input-OFF reading.
+        assert load.io[-2:] == ["INP OFF", "INP:STAT?"]
+        assert result["input_state"] == "OFF" and result["cleanup"]["off_confirmed"] and not load.input_on
+    else:
+        assert load.io.count("MEAS:VOLT?") == 10_000
+
+
+@pytest.mark.parametrize("duration", [30, 604801, TIMEOUT_MAX * 2])
+def test_cc_timed_load_checks_settings_then_waits_then_verifies_off(clock, duration):
     load = RecordingLoad()
-    result = run("cc-timed-load", load, clock, current=0.5, duration_s=30, confirm_input_on=True)
-    assert result["stop_reason"] == "duration_elapsed" and result["elapsed_s"] == 30
+    result = run("cc-timed-load", load, clock, current=0.5, duration_s=duration, confirm_input_on=True)
+    assert result["stop_reason"] == "duration_elapsed" and result["elapsed_s"] == duration
     assert result["input_state"] == "OFF" and result["cleanup"]["off_confirmed"] and not load.input_on
     assert load.io.index("INP:STAT?") < load.io.index("CURR 0.5")
     assert load.io.index("CURR 0.5") < load.io.index("CURR?") < load.io.index("INP ON")
@@ -409,11 +445,12 @@ def test_dry_run_previews_without_simulator_io_or_csv_creation(capsys, tmp_path,
     monkeypatch.setattr(workflows, "ControlSimulator", no_simulator)
     path = tmp_path / "new-directory" / "discharge.csv"
     assert main(["cc-discharge", "--dry-run", "--current", ".5000", "--cutoff-voltage", "3",
-                 "--timeout-s", "1800", "--csv", str(path)]) == 0
+                 "--timeout-s", "604801", "--csv", str(path)]) == 0
     plan = json.loads(capsys.readouterr().out)["result"]
     assert plan["hardware_access"] is False and plan["csv_requested"] is True
     assert plan["input_on_requires_confirmation"] is True
     assert plan["arguments"]["current"] == "0.5000" and plan["arguments"]["range"] == "low"
+    assert plan["arguments"]["timeout_s"] == "604801"
     assert str(path) not in json.dumps(plan) and not path.parent.exists()
 
 
@@ -422,14 +459,16 @@ def test_dry_run_previews_without_simulator_io_or_csv_creation(capsys, tmp_path,
     [
         ("measure-log", {"interval_s": 1, "count": True}, "argument_error"),
         ("measure-log", {"interval_s": 1, "count": 10001}, "argument_error"),
-        ("measure-log", {"interval_s": 3600, "count": 25}, "argument_error"),
-        ("measure-log", {"interval_s": 1, "duration_s": 10000.001}, "argument_error"),
+        ("measure-log", {"interval_s": 0.0009, "count": 1}, "argument_error"),
+        ("measure-log", {"interval_s": 3600.001, "count": 1}, "argument_error"),
+        ("measure-log", {"interval_s": 1, "duration_s": 0}, "argument_error"),
         ("measure-until", {"interval_s": 0.001, "metric": "power", "operator": "gt",
-                           "timeout_s": 11, "threshold": 0}, "argument_error"),
-        ("cc-timed-load", {"current": 0.5, "duration_s": 86401}, "argument_error"),
+                           "timeout_s": -1, "threshold": 0}, "argument_error"),
+        ("cc-timed-load", {"current": 0.5, "duration_s": float("inf")}, "argument_error"),
         ("cc-timed-load", {"current": 0.5, "duration_s": 1, "csv": "timed.csv"}, "argument_error"),
         ("cc-timed-load", {"current": 0.5, "duration_s": 1}, "confirmation_required"),
         ("cc-discharge", {"current": 0.5, "timeout_s": 5}, "argument_error"),
+        ("cc-discharge", {"current": 0.5, "timeout_s": float("nan"), "cutoff_voltage": 3}, "argument_error"),
         ("cc-discharge", {"current": 0.5, "cutoff_voltage": 3, "cutoff_capacity_ah": 0,
                           "timeout_s": 5}, "argument_error"),
     ],
