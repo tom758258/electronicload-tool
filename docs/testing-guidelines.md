@@ -78,12 +78,14 @@ affected CLI parser/help/version and read-only CLI contracts:
 
 Worker integration uses a real local simulated subprocess, HTTP and JSONL,
 but never physical hardware. The **single** `live-cli-check.ps1` defaults to
-the established validation modes: CC/CV/CR/CW, Transient CC/CV/CR/CW,
-TRACE, CR-LED, Current Slow Rise, Trigger and Input Timer. `-Modes` selects one or more
-modes while retaining common read-only safety prechecks and each selected
-mode's explicit Input ON/OFF flow. Test its `-PlanOnly` operation and unattended
-LIVE refusal with a **fictional** USB Resource. In noninteractive LIVE runs, verify it refuses before opening any VISA
-session or sending SCPI. The Script supplies the CLI's per-command
+FULL for USB and ASRL. See the [CLI validation modes](cli/README.md#available-validation-modes--驗證模式)
+for the complete matrix. Use `-Modes` to focus checks on affected behavior.
+Hardware modes retain the common read-only safety prechecks and any explicit
+Input ON/OFF flow. Test `-PlanOnly` and unattended LIVE refusal with a fictional
+resource matching the selected connection. Verify noninteractive hardware
+requests are refused before opening VISA or sending SCPI. Workflow cases run
+offline in dry-run and simulation, including when a valid connection is
+supplied to a Workflow-only invocation. The script supplies the CLI's per-command
 `input-on --confirm` during approved interactive execution. CC defaults to 0.1 A, with a 2 A script-only hard ceiling and a
 default operator-declared source limit of 0.8 A at 5 V.
 Verify redacted shareable case totals and normal mode's lack of private raw

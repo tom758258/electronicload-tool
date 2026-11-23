@@ -97,10 +97,14 @@ $serialFlags = [ordered]@{
     SerialFlowControl = '--serial-flow-control'; SerialReadTermination = '--serial-read-termination'
     SerialWriteTermination = '--serial-write-termination'
 }
+$serialOverrides = [ordered]@{}
 $serialArgs = @(foreach ($parameter in $serialFlags.Keys) {
     if ($PSBoundParameters.ContainsKey($parameter)) {
-        $serialFlags[$parameter]
-        $PSBoundParameters[$parameter]
+        $flag = $serialFlags[$parameter]
+        $value = $PSBoundParameters[$parameter]
+        $serialOverrides[($flag -replace '^--serial-', '' -replace '-', '_')] = $value
+        $flag
+        $value
     }
 })
 $connectionArgs = @('--backend', $Backend, '--model', $Target)
@@ -331,6 +335,9 @@ function Save-Report {
         cases = $cases
         summary_counts = $counts
     }
+    if ($script:asrlSelected -and $script:serialOverrides.Count) {
+        $public['serial_overrides'] = $script:serialOverrides
+    }
     if ($script:sequenceSelected) {
         $public['sequence_input_off_unconfirmed'] = $script:report.sequence_input_off_unconfirmed
     }
@@ -411,7 +418,7 @@ function New-CliProcessInfo([string[]]$Arguments) {
     return $start
 }
 
-function Invoke-OfflineCommand([string]$Command, [string[]]$ExtraArgs, [switch]$Workflow, [switch]$Simulate) {
+function Invoke-OfflineCommand([string]$Command, [string[]]$ExtraArgs = @(), [switch]$Workflow, [switch]$Simulate) {
     $mode = if ($Simulate) { '--simulate' } else { '--dry-run' }
     $arguments = @('-c', 'from electronicload_tool_cli.cli import main; raise SystemExit(main())',
         $Command, $mode, '--json') + $ExtraArgs

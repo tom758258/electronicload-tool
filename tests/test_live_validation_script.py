@@ -683,12 +683,19 @@ def test_asrl_mixed_mode_plan_and_noninteractive_refusal(run_script, plan_only, 
     assert report['connection'] == 'asrl' and report['modes'] == [
         'cc', 'system-query', 'readback', 'sequence',
     ]
+    assert report['serial_overrides'] == (
+        {'baud_rate': '19200', 'data_bits': '7', 'parity': 'even', 'stop_bits': '2',
+         'flow_control': 'none', 'read_termination': 'CRLF', 'write_termination': 'LF'}
+        if plan_only else {'write_termination': 'CR'}
+    )
     assert report['prechecks']['plan'] == 'PASS' and not report['hardware_touched']
     cases = {case['name']: case for case in report['cases']}
     assert {'set-cc-high', 'fixed-status-cv', 'sequence-cv', 'scpi-error-next'} <= cases.keys()
     assert all(case['status'] == 'NOT RUN' for case in cases.values())
     assert report['summary_counts']['total'] == report['summary_counts']['not_run'] == len(cases)
-    assert ASRL not in report_text + result.stdout and str(ROOT) not in report_text
+    assert report['resource'] == '<redacted>'
+    summary = path.with_name('summary.md').read_text(encoding='utf-8-sig')
+    assert ASRL not in report_text + summary + result.stdout and str(ROOT) not in report_text
     assert not (path.parents[1] / 'private').exists()
     if not plan_only:
         assert 'requires an interactive console' in result.stdout
@@ -707,8 +714,10 @@ def test_system_query_focused_plan_and_preflight(run_script):
 
 
 @pytest.mark.parametrize('plan_only', [True, False])
-def test_workflow_only_needs_no_resource_or_interactive_console(run_script, plan_only):
-    result = run_script(['-Modes', 'workflow', *(['-PlanOnly'] if plan_only else [])], resource=None)
+@pytest.mark.parametrize('connection,resource', [('usb', None), ('usb', RESOURCE), ('asrl', ASRL)])
+def test_workflow_only_stays_offline_with_optional_connection(run_script, plan_only, connection, resource):
+    result = run_script(['-Connection', connection, '-Modes', 'workflow',
+                         *(['-PlanOnly'] if plan_only else [])], resource=resource)
     assert result.returncode == 0, result.stdout + result.stderr
     path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)[-1])
     report = json.loads(path.read_text(encoding='utf-8-sig'))

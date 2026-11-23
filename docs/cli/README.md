@@ -1491,13 +1491,15 @@ commands use `--validation-connection asrl` alongside any command-specific
 `--hardware-validation` scope. The original three read-only CLI commands also
 accept their existing `--hardware-validation asrl-readonly` option.
 The following serial overrides are optional. Omitted values come from VISA
-and PyVISA.
+and PyVISA. The shareable JSON records explicitly supplied values in
+`serial_overrides` and redacts the VISA resource.
 
 以 `-Connection asrl`、明確的 `ASRL<number>::INSTR` 資源及 System VISA
 （`@ivi`）執行與 USB 共用的 FULL 或個別模式。獨立 CLI 的貢獻者指令使用
 `--validation-connection asrl`，並保留命令所需的 `--hardware-validation` 範圍。
 原有三條唯讀 CLI 仍接受 `--hardware-validation asrl-readonly`。序列埠參數可
-選填，省略時沿用 VISA 與 PyVISA 的設定。
+選填，省略時沿用 VISA 與 PyVISA 的設定。可分享的 JSON 會在 `serial_overrides`
+記錄明確指定的值，並遮蔽 VISA 資源。
 
 | CLI | PowerShell | Value / 值 |
 | --- | --- | --- |
