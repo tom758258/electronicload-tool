@@ -32,10 +32,14 @@ from electronicload_tool_core.trace import (CONFIG_FIELDS, CSV_FIELDS, TRACE_COM
                                            validate_configuration, validate_csv)
 from electronicload_tool_core.trigger import validate_setup as validate_trigger_setup
 from electronicload_tool_core.visa import TraceSessionLost, mark_session_untrusted, validate_connection
+from electronicload_tool_core.workflows import (COMMANDS as WORKFLOW_COMMANDS,
+                                                execute as workflow_execute,
+                                                validate_arguments as validate_workflow_arguments)
 from .json_input import decode_decimal_json
 
 SCHEMA = 3
-COMMANDS = READ_COMMANDS + CONTROL_COMMANDS + TRACE_COMMANDS + PROTECTION_COMMANDS + (SEQUENCE_COMMAND,)
+COMMANDS = (READ_COMMANDS + CONTROL_COMMANDS + TRACE_COMMANDS + PROTECTION_COMMANDS
+            + (SEQUENCE_COMMAND,) + WORKFLOW_COMMANDS)
 FEATURES = {"common.async_jobs": {"contract_version": 1},
             "common.job_cancel": {"contract_version": 1, "commands": ["trace-start"]}}
 TRACE_RECOVERY_COMMANDS = {"input-state", "input-off", "trace-configure"}
@@ -86,6 +90,7 @@ class Runtime:
         self.fatal_error = None
         self.trace_cancel = None
         self.trace_safety = None
+        self.workflow_cleanup_failure = None
 
     def urls(self):
         base = f"http://{self.host}:{self.port}"
@@ -116,6 +121,10 @@ class Runtime:
         if command == SEQUENCE_COMMAND:
             return sequence_execute(arguments["document"], mode=core_mode, resource=self.resource,
                                     backend=self.backend, confirmed=arguments.get("confirm_input_on", False),
+                                    simulator=self.simulator, stop=self.stop)
+        if command in WORKFLOW_COMMANDS:
+            return workflow_execute(command, mode=core_mode, resource=self.resource,
+                                    backend=self.backend, arguments=arguments,
                                     simulator=self.simulator, stop=self.stop)
         if command in PROTECTION_COMMANDS:
             return protection_execute(command, mode=core_mode, resource=self.resource,
@@ -192,6 +201,9 @@ class Runtime:
                     "command": command, "timestamp_utc": _utc(), **outcome}
         with self.lock:
             self._record_trace_safety(command, context["mode"], outcome, session_lost)
+            if (command in WORKFLOW_COMMANDS and outcome["error"] is not None
+                    and outcome["error"]["code"] == "workflow_cleanup_unconfirmed"):
+                self.workflow_cleanup_failure = terminal
             self.last_job = terminal
             self.active_job = None
             self.trace_cancel = None
@@ -263,7 +275,7 @@ def _context(request, mode):
 def _arguments(command, raw, runtime):
     if not isinstance(raw, dict):
         raise LoadError("argument_error", "Arguments must be an object.")
-    if command == SEQUENCE_COMMAND:
+    if command == SEQUENCE_COMMAND or command in WORKFLOW_COMMANDS:
         return raw
     if command in PROTECTION_COMMANDS:
         validate_protection_arguments(command, raw, json_numbers=True)
@@ -387,7 +399,7 @@ def _handler(runtime):
                     # Core must validate the original decimal tokens.
                     value["arguments"] = json.loads(body, parse_float=Decimal)["arguments"]
                 if value.get("command") in (*LIST_COMMANDS, *TRACE_COMMANDS, *PROTECTION_COMMANDS,
-                                            "trigger-configure", SEQUENCE_COMMAND):
+                                            "trigger-configure", SEQUENCE_COMMAND, *WORKFLOW_COMMANDS):
                     # Preserve nested numeric tokens; reject duplicate fields/nonfinite JSON.
                     value = decode_decimal_json(body)
                 return value
@@ -477,6 +489,9 @@ def _handler(runtime):
                     _, _, contains_on = validate_document(arguments.get("document"))
                     if contains_on and context["mode"] != "dry_run" and not confirmed:
                         raise LoadError("confirmation_required", "Sequence Input ON requires explicit run confirmation.")
+                if command in WORKFLOW_COMMANDS:
+                    core_mode = "dry-run" if context["mode"] == "dry_run" else context["mode"]
+                    validate_workflow_arguments(command, arguments, mode=core_mode)
                 if command == "input-on" and context["mode"] == "live":
                     if not runtime.allow_input_on:
                         raise LoadError("input_on_not_allowed", "Worker Input ON is disabled.")
@@ -535,10 +550,12 @@ def run_worker(*, mode="simulate", resource=None, backend="system",
             trace_shutdown = ({"trace_safety": {**runtime.trace_safety,
                                                "safe_shutdown_unconfirmed": True}}
                               if runtime.trace_safety else {})
+            workflow_shutdown = ({"workflow_cleanup_failure": runtime.workflow_cleanup_failure}
+                                 if runtime.workflow_cleanup_failure else {})
             runtime.emit("summary", ok=runtime.fatal_error is None,
                          fatal_error=runtime.fatal_error,
                          last_job=runtime.last_job, exit_code=0 if runtime.fatal_error is None else 3,
-                         **trace_shutdown)
+                         **trace_shutdown, **workflow_shutdown)
             return 0 if runtime.fatal_error is None else 3
     except OSError as exc:
         runtime.emit("error", error=_error("worker", "listen_failed", "Worker HTTP bind failed.",

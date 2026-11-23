@@ -1191,6 +1191,124 @@ Sequence LIVE。
 手動 OFF 指引。程序逾時或無法確認 Input OFF 時，Script 也會提供獨立手動 OFF 指引。
 清理僅使用原 Session。
 
+## Basic Workflows
+
+Each command runs independently in the CLI or as one Worker job. Use
+`--simulate` to run or `--dry-run` to preview validated arguments without
+waiting, reading the simulator, or creating files. CLI runs return one JSON
+object. Press Ctrl+C to interrupt a CLI run. These commands are offline only.
+The simulator uses a fixed 12 V source, so a discharge simulation with a
+3 V cutoff ends at the timeout, capacity cutoff, or sample limit.
+
+| Command | Required options | Optional options |
+| --- | --- | --- |
+| `measure-log` | `--interval-s`, exactly one of `--count` or `--duration-s` | `--csv` |
+| `measure-until` | `--interval-s`, `--metric`, `--operator`, `--threshold`, `--timeout-s` | `--csv` |
+| `cc-timed-load` | `--current`, `--duration-s`, `--confirm` when simulating | `--range` |
+| `cc-discharge` | `--current`, `--cutoff-voltage`, `--timeout-s`, `--confirm` when simulating | `--interval-s` (defaults to 1 s), `--cutoff-capacity-ah`, `--range`, `--csv` |
+
+```powershell
+electronicload-tool measure-log --simulate --interval-s 1 --count 60
+electronicload-tool measure-log --simulate --interval-s 1 --duration-s 60
+electronicload-tool measure-until --simulate --interval-s 1 --metric voltage --operator le --threshold 4.5 --timeout-s 6
+electronicload-tool cc-timed-load --simulate --current 0.5 --duration-s 30 --confirm
+electronicload-tool cc-discharge --dry-run --current 0.5 --cutoff-voltage 3 --cutoff-capacity-ah 1 --timeout-s 7300
+```
+
+- The measurement commands preserve Input state. `measure-log` reads voltage,
+  current and power. `measure-until` reads one metric (`voltage`, `current`
+  or `power`) using `lt`, `le`, `gt` or `ge`. The threshold uses V, A or W
+  for the selected metric. The run ends when the condition is met.
+- Sampling starts immediately and skips missed ticks. Intervals accept
+  0.001 to 3600 seconds. Durations and timeouts accept positive, finite
+  seconds with no fixed maximum. `measure-log --count` accepts 1 to 10,000
+  and returns `completed` at the requested count. In duration mode it samples
+  strictly before the deadline and returns `duration_elapsed` if the deadline
+  comes first. A monitoring timeout returns `workflow_timeout` with the
+  available summary. If a sampling workflow reaches 10,000 actual samples
+  before another stop condition, it succeeds with `sample_limit_reached`.
+  Discharge still runs Input OFF cleanup at the sample limit. Timed load
+  waits for the requested duration without sampling.
+- CC runs require initial Input OFF and verify Fixed CC settings before
+  enabling Input. Current must be positive and valid for the selected range
+  (`auto` by default, or `low` or `high`). Timed load waits the requested
+  duration after ON confirmation. Discharge reads the initial voltage with
+  Input OFF and ends without enabling Input if that voltage is at or below
+  the cutoff. After ON confirmation, discharge reads voltage, current and
+  the latest available power in sequence. It stops at or below the positive
+  voltage cutoff in V, or at or above the optional positive capacity cutoff
+  in Ah. The voltage cutoff ends sampling before the current and power
+  queries. The capacity cutoff ends sampling before the power query. Ah is
+  integrated between consecutive current readings using their own timestamps.
+  The first sample starts at 0 Ah.
+- CC runs verify Input OFF at the end. If OFF cannot be confirmed, the
+  result instructs the operator to independently switch off the load.
+  Timed load returns a summary. The three sampling commands also report
+  `sample_count` and `last_measurement`. Discharge includes `capacity_ah`
+  and the preflight `initial_voltage_v` when read. An initial cutoff has
+  zero load samples and zero Ah. A cutoff sample includes only the readings
+  collected for that sample in `last_measurement`.
+- Only an explicit `--csv` creates a CSV. Relative paths resolve from the
+  running process's working directory. Missing parent directories are created,
+  and existing files are preserved. CSV uses `sample_index`, `elapsed_s`
+  and the measured columns, plus `capacity_ah` for discharge. Unmeasured
+  columns in a partial sample are blank. Discharge CSV rows are exported
+  after the OFF cleanup path completes. If the run reports unconfirmed OFF
+  cleanup, the file retains only its header and the result reports
+  `csv_incomplete`. Other failures after creating the file also retain it
+  and report `csv_incomplete`.
+
+For Worker argument names, results and Stop behavior, see the
+[Worker contract](../contracts/electronicload-worker-contract.md#basic-workflows).
+
+### 基礎工作流程（繁體中文）
+
+每條命令可獨立在 CLI 執行，也可提交為一個 Worker 工作。使用
+`--simulate` 執行，或用 `--dry-run` 預覽已驗證的參數。預覽不等待、
+不讀取模擬器，也不建立檔案。CLI 回傳單一 JSON 物件，可按 Ctrl+C
+中斷執行。這些指令僅供離線使用。模擬電壓固定為 12 V，因此用 3 V
+截止模擬放電時，會在超時、容量截止或取樣達上限時結束。
+
+| 指令 | 必填選項 | 選填選項 |
+| --- | --- | --- |
+| `measure-log` | `--interval-s`，另指定 `--count` 或 `--duration-s` 其中一項 | `--csv` |
+| `measure-until` | `--interval-s`、`--metric`、`--operator`、`--threshold`、`--timeout-s` | `--csv` |
+| `cc-timed-load` | `--current`、`--duration-s`，模擬時需 `--confirm` | `--range` |
+| `cc-discharge` | `--current`、`--cutoff-voltage`、`--timeout-s`，模擬時需 `--confirm` | `--interval-s`（預設 1 秒）、`--cutoff-capacity-ah`、`--range`、`--csv` |
+
+- 量測指令維持原本的 Input 狀態。`measure-log` 讀取電壓、電流與功率。
+  `measure-until` 只讀取所選項目（`voltage`、`current` 或 `power`），以
+  `lt`、`le`、`gt` 或 `ge` 比較門檻，達成條件即結束。門檻使用對應的
+  V、A 或 W。
+- 取樣立即開始，錯過的取樣時點直接略過。間隔接受 0.001 至 3600 秒。
+  持續時間和超時接受正的有限秒數，無固定上限。`measure-log --count`
+  接受 1 至 10,000 筆，達到指定筆數回報 `completed`。總時長模式只在
+  期限前取樣，若先到期限則回報 `duration_elapsed`。監控超時回報
+  `workflow_timeout` 與已有摘要。若先達到 10,000 筆實際取樣，取樣指令
+  以 `sample_limit_reached` 正常結束。放電達到取樣上限時仍會執行
+  Input OFF 清理。定時負載依指定時間等待，期間不取樣。
+- CC 指令確認初始 Input OFF，並在確認固定 CC 設定後才開啟 Input。電流
+  必須為正值且符合所選檔位，預設 `auto`，也可選 `low` 或 `high`。定時負載
+  自確認 ON 後開始計時。放電先在 Input OFF 時讀取起始電壓，若小於或
+  等於截止電壓，會保持 OFF 並結束。確認 ON 後依序讀取電壓、電流與
+  最新可用的功率。電壓小於或等於正值截止電壓（V），或容量大於或等於
+  選填的正值截止容量（Ah），就結束放電。達到電壓截止時，直接結束取樣，
+  省略電流及功率查詢；達到容量截止時，省略功率查詢。容量採相鄰實測
+  電流的讀值與時間戳積分，首筆為 0 Ah。
+- CC 指令結束時確認 Input OFF。若無法確認，結果會要求操作人員獨立關閉
+  負載。定時負載回傳執行摘要。三條取樣指令另回傳 `sample_count` 與
+  `last_measurement`。放電也回傳 `capacity_ah`，成功讀取起始電壓時另有
+  `initial_voltage_v`。若起始電壓已達截止，負載取樣筆數與容量皆為零。
+  截止當下的 `last_measurement` 只包含該筆已取得的讀值。
+- 只有明確指定 `--csv` 才建立 CSV。相對路徑以執行程序的工作目錄為準。
+  缺少的上層目錄會建立，既有檔案會保留。欄位包含 `sample_index`、
+  `elapsed_s` 和量測欄位，放電另有 `capacity_ah`。部分取樣中未取得的
+  欄位留空。放電 CSV 資料列在 OFF 清理流程結束後才寫入。若回報無法確認
+  OFF 清理，CSV 只保留標題列，結果回報 `csv_incomplete`。建檔後若發生
+  其他錯誤，也會保留檔案並回報 `csv_incomplete`。
+
+Worker 的參數、結果與 Stop 行為見 [Worker 契約](../contracts/electronicload-worker-contract.md#basic-workflows)。
+
 ## Worker and Automation
 
 Standalone simulation commands each start with fresh state. To exercise a CV/CR/CW
@@ -1200,8 +1318,9 @@ Worker, with `confirm_input_on: true` on the ON request.
 A Worker prints Common v3 JSONL on stdout and offers local `GET /status`,
 `POST /command`, `POST /stop` and `POST /cancel` on numeric loopback only.
 It runs one async job at a time and reports completion via `job_finished`
-and `last_job`. Only `trace-start` supports job cancellation. Input OFF
-requires an explicit `input-off` command. For domain argument shapes and
+and `last_job`. Only `trace-start` supports job cancellation. Use
+`input-off` for independent Input control. Active CC workflows own their
+Input OFF cleanup. For domain argument shapes and
 permissions, see [Electronic Load Worker Contract](../contracts/electronicload-worker-contract.md).
 
 Worker requests use the existing local Common v3 endpoints and one async job at

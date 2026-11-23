@@ -488,3 +488,17 @@ deadline and report redaction. Run existing help/version, Input/Fixed, and
 read-only checks affected by shared execution paths and Ruff on changed
 Python files. Hardware validation requires separate authorization and the
 operator procedure in the [CLI guide](cli/README.md#contributor-software-sequence-validation--貢獻者實機驗證).
+
+## Basic Workflow focused checks
+
+Run `tests/test_workflows.py` and select Workflow tests in
+`tests/test_worker.py`. Include the affected CLI help/version, shared
+measurements, Fixed CC/Input and Sequence checks when those paths are touched.
+Run Ruff on modified Python files. Use a controllable clock and simulated
+readbacks for count and duration cadence, timeout, the initial voltage cutoff,
+trapezoidal Ah accumulation at the cutoff boundary, and OFF cleanup before
+CSV row export. Check the Common v3 HTTP/JSONL boundary with the simulated
+Worker, including retention of cleanup failure evidence across subsequent jobs.
+Verify LIVE refusal before VISA with the recording fake.
+The basic workflows run offline and require no release or physical-device
+acceptance.

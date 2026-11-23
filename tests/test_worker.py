@@ -1916,3 +1916,144 @@ def test_sequence_worker_stop_fails_and_reports_partial_results(trace_worker_wit
     assert details["cleanup"] == {"required": True, "attempted": True, "off_confirmed": True}
     assert details["measurements"][0]["step_index"] == 3
     assert details["failed_step"]["action"] == "wait" and not simulator.input_on
+
+
+def test_workflow_worker_common_jobs_validation_and_simulator_state(worker, capsys, tmp_path):
+    from electronicload_tool_cli.cli import main
+
+    _, events, ready = worker
+    arguments = {
+        "measure-log": {"interval_s": 0.01, "count": 2},
+        "measure-until": {"interval_s": 0.01, "metric": "power", "operator": "ge",
+                          "threshold": 0, "timeout_s": 1},
+        "cc-timed-load": {"current": 0.5, "duration_s": 0.001, "confirm_input_on": True},
+        "cc-discharge": {"current": 0.5, "cutoff_voltage": 12, "timeout_s": 1,
+                         "confirm_input_on": True},
+    }
+    assert main(["manifest", "--json"]) == 0
+    manifest = json.loads(capsys.readouterr().out)
+    assert all(manifest["commands"][command] == {"kind": "async_job"} for command in arguments)
+    assert manifest["features"]["common.job_cancel"]["commands"] == ["trace-start"]
+
+    def call(command, values, mode="simulate"):
+        payload = request(command, values)
+        payload["context"]["mode"] = mode
+        payload["job_id"] = "workflow-check"
+        code, response = http(ready["command_url"], payload)
+        assert code == 202 and response["kind"] == "async_job"
+        terminal = wait_finished(events, response["worker_job_id"])
+        assert terminal["job_id"] == "workflow-check" and terminal["state"] == "succeeded"
+        assert http(ready["status_url"])[1]["last_job"]["result"] == terminal["result"]
+        return terminal["result"]
+
+    code, rejection = http(ready["command_url"], request(
+        "cc-timed-load", {"current": 0.5, "duration_s": 0.01}))
+    assert code == 409 and rejection["error"]["code"] == "confirmation_required"
+    assert rejection["worker_job_id"] is None
+
+    context = request("cc-timed-load")["context"]
+    assert main(["send-command", "--url", ready["command_url"], "--worker-command", "cc-timed-load",
+                 "--arguments-json",
+                 '{"current":0.5000000000000000001,"range":"low","duration_s":1,"confirm_input_on":true}',
+                 "--context-json", json.dumps(context)]) == 2
+    rejection = json.loads(capsys.readouterr().out)
+    assert rejection["error"]["code"] == "invalid_current_resolution"
+
+    path = tmp_path / "samples.csv"
+    preview_args = {**arguments["cc-discharge"], "timeout_s": 604801, "csv": str(path)}
+    preview_args.pop("confirm_input_on")
+    preview = call("cc-discharge", preview_args, mode="dry_run")
+    assert preview["arguments"]["timeout_s"] == "604801"
+    assert preview["csv_requested"] and not path.exists()
+    assert call("input-state", {})["input_state"] == "OFF"
+
+    assert call("measure-log", arguments["measure-log"])["sample_count"] == 2
+    assert call("measure-log", {"interval_s": 1, "duration_s": 0.02})["stop_reason"] == "duration_elapsed"
+    for options in ({}, {"count": 2, "duration_s": 1}):
+        code, rejection = http(ready["command_url"], request("measure-log", {"interval_s": 1, **options}))
+        assert code == 400 and rejection["error"]["code"] == "argument_error"
+        assert rejection["worker_job_id"] is None
+    assert call("measure-until", arguments["measure-until"])["stop_reason"] == "condition_met"
+    assert call("cc-timed-load", arguments["cc-timed-load"])["stop_reason"] == "duration_elapsed"
+    assert call("cc-discharge", {**arguments["cc-discharge"], "csv": str(path)})["csv_written"]
+    assert path.is_file()
+    assert call("input-state", {})["input_state"] == "OFF"
+
+
+def test_workflow_worker_stop_waits_for_off_confirmation(trace_worker_with_session):
+    from electronicload_tool_core.simulator import ControlSimulator
+
+    on_confirmed = threading.Event()
+
+    class ActiveLoad(ControlSimulator):
+        def query(self, command):
+            reply = super().query(command)
+            if command == "INP:STAT?" and reply == "1":
+                on_confirmed.set()
+            return reply
+
+    load = ActiveLoad()
+    ready, events = trace_worker_with_session(load)
+    code, accepted = http(ready["command_url"], request(
+        "cc-timed-load", {"current": 0.5, "duration_s": 604801, "confirm_input_on": True}))
+    assert code == 202 and on_confirmed.wait(3)
+    assert http(ready["command_url"], request("measure"))[0] == 409
+    assert http(ready["cancel_url"], {"schema_version": 3,
+                                    "worker_job_id": accepted["worker_job_id"]})[0] == 409
+    assert http(ready["stop_url"], {"schema_version": 3})[0] == 202
+    terminal = wait_finished(events, accepted["worker_job_id"])
+    assert terminal["state"] == "failed" and terminal["result"] is None
+    assert terminal["error"]["code"] == "stopping"
+    details = terminal["error"]["details"]
+    assert details["stop_reason"] == "stopped" and details["input_state"] == "OFF"
+    assert details["cleanup"] == {"required": True, "attempted": True, "off_confirmed": True}
+    assert not load.input_on
+    summary = events.get(timeout=5)
+    assert summary["event"] == "summary" and summary["last_job"]["error"] == terminal["error"]
+    assert "workflow_cleanup_failure" not in summary
+
+
+def test_worker_summary_keeps_workflow_cleanup_failure_after_later_success(trace_worker_with_session):
+    from electronicload_tool_core.simulator import ControlSimulator
+
+    class IgnoresInputOff(ControlSimulator):
+        def write(self, command):
+            if command != "INP OFF":
+                super().write(command)
+
+    load = IgnoresInputOff()
+    ready, events = trace_worker_with_session(load)
+    code, accepted = http(ready["command_url"], request(
+        "cc-timed-load", {"current": 0.5, "duration_s": 0.001, "confirm_input_on": True}))
+    assert code == 202
+    failed = wait_finished(events, accepted["worker_job_id"])
+    assert failed["error"]["code"] == "workflow_cleanup_unconfirmed"
+    assert failed["error"]["details"]["manual_action_required"] and load.input_on
+
+    code, accepted = http(ready["command_url"], request("measure"))
+    assert code == 202 and wait_finished(events, accepted["worker_job_id"])["ok"]
+    assert http(ready["stop_url"], {"schema_version": 3})[0] == 202
+    summary = events.get(timeout=5)
+    assert summary["event"] == "summary" and summary["ok"] and summary["exit_code"] == 0
+    assert summary["last_job"]["worker_job_id"] == accepted["worker_job_id"] and load.input_on
+    evidence = summary["workflow_cleanup_failure"]
+    assert evidence["worker_job_id"] == failed["worker_job_id"] and evidence["error"] == failed["error"]
+
+
+def test_workflow_worker_valid_live_jobs_fail_before_fake_visa(capsys, fake_visa):
+    from electronicload_tool_cli.worker import Runtime
+
+    runtime = Runtime(mode="live", resource="USB0::0xFFFF::0x0001::SYNTHETIC::INSTR",
+                      allow_input_on=True)
+    for command, arguments in (
+        ("measure-log", {"interval_s": 1, "count": 1}),
+        ("cc-discharge", {"current": 0.5, "cutoff_voltage": 3, "timeout_s": 5,
+                          "confirm_input_on": True}),
+    ):
+        job = {"command": command, "worker_job_id": command, "job_id": None}
+        runtime.run_job(job, arguments, {"mode": "live"})
+        terminal = runtime.snapshot()["last_job"]
+        assert terminal["state"] == "failed" and terminal["error"]["code"] == "unsupported_live_scope"
+    terminal_events = [event for line in capsys.readouterr().out.splitlines()
+                       if (event := json.loads(line))["event"] == "job_finished"]
+    assert len(terminal_events) == 2 and not fake_visa.calls

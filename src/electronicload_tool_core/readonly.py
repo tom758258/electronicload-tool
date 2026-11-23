@@ -9,11 +9,16 @@ from .readback import COMMANDS as READBACK_COMMANDS, execute as execute_readback
 from .simulator import Simulator
 from .visa import TERMINATION, TIMEOUT_MS, open_session, require_trusted_session, validate_connection
 
+BASIC_MEASUREMENTS = {
+    "voltage": ("voltage_v", "MEAS:VOLT?"),
+    "current": ("current_a", "MEAS:CURR?"),
+    # FETCh returns the latest available power result; it may not be a fresh sample.
+    "power": ("power_w", "FETC:POW?"),
+}
 QUERIES = {
     "identify": ("*IDN?",),
     "input-state": ("*IDN?", "INP:STAT?"),
-    # FETCh returns the latest available power result; it may not be a fresh sample.
-    "measure": ("*IDN?", "MEAS:VOLT?", "MEAS:CURR?", "FETC:POW?"),
+    "measure": ("*IDN?", *(query for _, query in BASIC_MEASUREMENTS.values())),
 }
 NATIVE_MEASUREMENTS = {
     "measure-min-max": {
@@ -121,7 +126,8 @@ def _read(session, command: str, metric: str | None = None, all_errors: bool = F
     return read_measurement(session, command, metric)
 
 
-def read_measurement(session, command: str, metric: str | None = None) -> dict:
+def read_measurement(session, command: str, metric: str | None = None, *,
+                     quantities=tuple(BASIC_MEASUREMENTS)) -> dict:
     """Read Input or measurements on a session whose identity was already checked."""
     if command == "input-state":
         response = _query(session, "INP:STAT?").strip()
@@ -133,7 +139,7 @@ def read_measurement(session, command: str, metric: str | None = None) -> dict:
         metrics = NATIVE_MEASUREMENTS[command]
         readings = (metrics[metric],) if metric is not None else metrics.values()
     else:
-        readings = zip(("voltage_v", "current_a", "power_w"), QUERIES["measure"][1:])
+        readings = (BASIC_MEASUREMENTS[quantity] for quantity in quantities)
     for key, query in readings:
         response = _query(session, query).strip()
         numeric = re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[Ee][+-]?[0-9]+)?", response)

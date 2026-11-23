@@ -30,13 +30,13 @@ Common contracts remain authoritative for the HTTP and JSONL envelopes.
   Accepted **does not** mean succeeded. A Worker may continue after a failed job.
 - The Worker keeps results in memory and emits JSONL to stdout. It creates no
   `request.json`, `result.json`, event log, artifact directory, or job history.
-  TRACE can write one explicitly requested local CSV. Human diagnostics go to
-  stderr.
+  TRACE and sampling workflows can each write one explicitly requested local
+  CSV. Human diagnostics go to stderr.
 - Stop acknowledges without performing VISA I/O in the HTTP handler, rejects
   further submissions, and prevents a not-yet-sent `INP ON`. Blocking VISA I/O
   already in progress is not forcibly interrupted. Worker Stop **does not**
-  imply Input OFF. An active Software Sequence performs its own bounded OFF
-  cleanup when it has attempted Input ON and still owns that transition.
+  imply Input OFF. An active Software Sequence or CC workflow owns bounded
+  OFF cleanup after attempting Input ON, subject to communication trust.
 - Normal shutdown emits `summary` and terminates stdout (EOF) with an observed
   process exit. A stop acknowledgement is not shutdown confirmation.
 
@@ -51,6 +51,10 @@ Common contracts remain authoritative for the HTTP and JSONL envelopes.
 | `fixed-slew-status` | `{}` | Fixed CC rising and falling slew; offline only |
 | `measure` | `{}` | `voltage_v`, `current_a`, `power_w` |
 | `sequence` | `{"document":{...},"confirm_input_on":true}` (confirmation when running with ON) | One async Software Sequence result, offline only |
+| `measure-log` | `{"interval_s":1,"count":60}` | Periodic V/I/P summary, offline only |
+| `measure-until` | `{"interval_s":1,"metric":"voltage","operator":"le","threshold":4.5,"timeout_s":600}` | Conditional measurement summary, offline only |
+| `cc-timed-load` | `{"current":0.5,"duration_s":30,"confirm_input_on":true}` | Timed CC summary, offline only |
+| `cc-discharge` | `{"current":0.5,"cutoff_voltage":3,"timeout_s":7300,"confirm_input_on":true}` | CC discharge summary with calculated Ah, offline only |
 | `measure-min-max` | `{}` or `{"metric":"voltage-min"\|"voltage-max"\|"current-min"\|"current-max"}` | All four native extrema, or only the selected field; offline only |
 | `measure-discharge` | `{}` or `{"metric":"capacity"\|"time"}` | `capacity_ah`, `discharge_time_s`, or only the selected field; offline only |
 | `scpi-version` | `{}` | `scpi_version`, a `YYYY.V` string; offline only |
@@ -158,6 +162,84 @@ determined. If communication is lost after the latest Input readback observed
 ON, the terminal gives the same manual OFF instruction and preserves the
 communication error in `original_error`. The Worker emits no per-step events
 and creates no Sequence artifacts.
+
+## Basic Workflows
+
+The four commands are independent Common v3 async jobs. The command table
+shows example arguments. `measure-log` requires `interval_s` and exactly one
+of `count` or `duration_s`. The three sampling commands also accept an
+optional local `csv` path. Both CC commands accept optional `range`, with
+`auto` as the default. CC discharge also accepts `interval_s` (defaults to
+1 second) and `cutoff_capacity_ah`. The [CLI guide](../cli/README.md#basic-workflows)
+defines the bounds, units, operators, and CSV columns.
+
+Worker arguments use finite JSON numbers, integer `count` (1 to 10,000),
+and boolean `confirm_input_on`. `duration_s` and `timeout_s` must be positive
+and have no fixed maximum. `interval_s` accepts 0.001 to 3600 seconds.
+Malformed arguments, duplicate JSON fields, and unknown
+fields fail before admission with HTTP 400. The simulated CC commands require
+`confirm_input_on: true`; omission or false returns HTTP 409. Valid LIVE
+requests on a live Worker are admitted and finish with
+`unsupported_live_scope` before VISA access. Valid `dry_run` requests
+return `hardware_access: false`, `input_on_requires_confirmation`,
+`csv_requested`, and the resolved `arguments` with decimal numbers as
+strings. Dry-run omits the confirmation flag and local CSV path from the plan
+and performs no simulator I/O or file creation.
+
+Simulated jobs share the Worker's existing simulator. A successful result
+has `elapsed_s` and `stop_reason` (`completed`, `condition_met`,
+`duration_elapsed`, `voltage_cutoff`, `capacity_cutoff`, or
+`sample_limit_reached`). Sampling results also include `sample_count` and
+`last_measurement` (null before the first sample). Sampling stops after at
+most 10,000 actual samples. `measure-log` with `count` returns `completed`
+at the requested count. If the sample limit is reached before another stop
+condition, the job returns `sample_limit_reached`; CC discharge runs its
+Input OFF cleanup before reporting the result. CC results include
+`current_a`, resolved `range`, `input_state`,
+and `cleanup` with `required`, `attempted`, and `off_confirmed`.
+Timed load includes `duration_s` and does not sample. Discharge samples `voltage_v`, `current_a`
+and `power_w` in sequence. It checks voltage before querying current and
+integrates `capacity_ah` using consecutive current-reading timestamps
+before querying power. Either cutoff ends sampling immediately. A partial
+sample counts toward `sample_count`, and `last_measurement` contains only
+the fields collected for that sample. When preflight reads
+`initial_voltage_v`, the result includes it separately from the load
+samples. If the initial voltage is at or below the cutoff, the job succeeds
+with `voltage_cutoff`, zero samples, zero Ah and confirmed Input OFF.
+`csv_written: true` confirms completion of the requested export.
+There are no per-sample events or sample arrays in results.
+
+The measurement jobs preserve Input state. The CC jobs require Input OFF at
+entry, verify Fixed CC before Input ON, and attempt OFF once and confirm it
+when communication remains trusted and the workflow attempted ON. If the
+initial Input is ON, the job fails with `input_not_off` and leaves it in its
+observed state. If communication becomes untrusted, the job ceases
+instrument I/O. If OFF remains unconfirmed when the workflow might have
+changed Input state, or communication becomes untrusted in a CC run, the job
+reports `workflow_cleanup_unconfirmed`, `manual_action_required: true`, and
+the known state (`UNKNOWN` if it cannot be determined). The error tells the
+operator to independently switch off the load. When this error occurs, the
+Worker includes the most recent such job terminal in the optional
+`summary.workflow_cleanup_failure` field, even after a subsequent successful
+job. This records historical evidence for the current Worker run. Consumers
+should retain terminal and cleanup evidence and independently confirm the
+Input state. The field leaves `last_job`, Common summary and process exit
+meanings intact.
+
+Stop interrupts the wait between samples or during timed load. A Stop or
+timeout produces a failed terminal (normally `stopping` or
+`workflow_timeout`), with progress and cleanup evidence in
+`error.details` and `result: null`. After CSV creation, an execution or
+export failure retains the file with `csv_incomplete: true`. The CSV is
+created exclusively before sampling or enabling Input, following the
+existing local-path rules. Discharge buffers the bounded sample rows and
+exports them once the OFF cleanup path has finished, including after Stop or
+timeout. Unmeasured fields in a partial sample are blank in the CSV. A
+`workflow_cleanup_unconfirmed` failure skips row export and leaves the
+header-only CSV marked incomplete. A second failure exporting the rows
+preserves the original execution error and adds
+`error.details.csv_export_error`. The TRACE recovery restrictions also
+apply to these commands. Cancel is available only for `trace-start`.
 
 ## Configuration readback
 
