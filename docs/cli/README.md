@@ -731,16 +731,21 @@ expected `current`, `range` and integer `seconds`. Before and after remote
 transition Core rechecks physical OFF, CC settings, Short/Transient OFF and Timer
 readback. Between the configured duration and one second later, measured
 from dispatch of the Input ON command, the script checks Timer/Input state
-until it observes Input OFF or reaches the deadline. The console records the
-elapsed time, Timer state and Input state. `-DebugArtifacts` also saves those
-observations in the private report directory. It then explicitly sends/verifies Input
-OFF, separately disables Timer and reads final Timer/Input state. Failure stops
-further trials; a possible ON attempt gets one bounded OFF cleanup attempt.
+and requires a valid Input OFF observation within that window. A status query
+already in progress keeps the regular CLI command deadline. A late, valid
+response fails the trial and allows the usual cleanup. A communication failure
+in a run that includes Trigger requires independent operator action. The console
+records the elapsed time, Timer state and Input state. `-DebugArtifacts` also
+saves those observations in the private report directory. The script then explicitly
+sends/verifies Input OFF, separately disables Timer and reads final Timer/Input state.
+Failure stops further trials. A possible ON attempt gets one bounded OFF cleanup attempt.
 Timer-disable cleanup is a separate operation after confirmed OFF.
 
 腳本以送出 Input ON 命令的時間為起點，在設定秒數到期後的一秒內讀取 Timer
-與 Input 狀態。只有實際讀到 Input OFF 才通過。主控台會列出經過時間與兩種
-狀態，`-DebugArtifacts` 會另存於私人報告目錄。
+與 Input 狀態。只有在此時間窗內實際讀到 Input OFF 才通過。已送出的查詢沿用
+一般 CLI 命令期限。超過時間窗才收到有效回覆時，試驗會失敗並執行既有清理。
+若執行包含 Trigger 且通訊失去信任，需由操作員獨立處置。主控台會列出經過時間
+與兩種狀態，`-DebugArtifacts` 會另存於私人報告目錄。
 
 The validation-only Core/CLI scope uses `INP:TIM:DEL <seconds>`, `INP:TIM 0|1`,
 `INP:TIM:DEL?` and `INP:TIM?` from the
@@ -1409,11 +1414,16 @@ with only `-Target itech-it8812c` and `-Modes`. For example:
 In a mixed selection, the extension checks run before the physical approval
 gate. If that gate blocks execution, physical cases remain `NOT RUN`.
 `-PlanOnly` validates dry-run requests and leaves case results `NOT RUN`.
+All selected pytest cases must run successfully for an extension to pass.
+The report records `NOT RUN` when no test ran and `SKIP` when tests were
+skipped. Either result leaves the run incomplete.
 
 三個擴充模式使用 CLI dry-run 與開發環境中既有的 Simulator 或 Fake VISA
 聚焦測試。可用上例組合執行，也可只選其中一個模式，均只需提供 `-Target`
 與 `-Modes`。混合選取時，擴充模式先執行，實機確認被擋下時實機案例維持
 `NOT RUN`。`-PlanOnly` 驗證 dry-run 請求，案例結果維持 `NOT RUN`。
+擴充模式須實際執行且通過所有選取的 pytest 案例才算通過。沒有案例執行時記錄
+`NOT RUN`，有案例跳過時記錄 `SKIP`。兩者都表示本次驗證未完成。
 
 Readback queries the existing configuration with Input OFF before any setup.
 The current mode determines which Fixed, Slew, Transient or LIST case is
@@ -1634,18 +1644,18 @@ and stops at the first failed trial. The temporary Fixed CC setpoint is 0.20 A.
 The operator confirms each Input ON with a fresh Enter.
 
 The script reuses an available independent Readback snapshot. From Fixed CV
-or CW it prepares Fixed CC at 0.20 A Low and verifies the settings independently
-with Input OFF before taking the first Protection snapshot. The prepared Fixed CC
-settings become the trial restore baseline. From Fixed CC the initial settings
-are the baseline. Setup writes are skipped when the settings already match the
-trial. If starting in another mode, select Fixed CC at the panel before
-beginning validation.
+or CW it confirms Input and Short are both OFF, prepares Fixed CC at 0.20 A Low,
+and independently verifies the settings with Input OFF before taking the first
+Protection snapshot. The prepared Fixed CC settings become the trial restore
+baseline. From Fixed CC the initial settings are the baseline. Setup writes are
+skipped when the settings already match the trial. If starting in another mode,
+select Fixed CC at the panel before beginning validation.
 
 若同時選取 Readback，Protection 會沿用該獨立快照。從 Fixed CV 或 CW 開始時，
-腳本會在 Input OFF 下設定 0.20 A Low 的 Fixed CC，獨立讀回確認後才取得第一份
-Protection 快照，並以該 Fixed CC 設定作為試驗還原基準。若原本已是 Fixed CC，
-則沿用原設定作為基準。設定符合試驗條件時會略過寫入。其他模式請在開始驗證前，
-先從面板選取 Fixed CC。
+腳本會先確認 Input 與 Short 皆為 OFF，再設定 0.20 A Low 的 Fixed CC，在 Input
+OFF 下獨立讀回確認後才取得第一份 Protection 快照，並以該 Fixed CC 設定作為
+試驗還原基準。若原本已是 Fixed CC，則沿用原設定作為基準。設定符合試驗條件時
+會略過寫入。其他模式請在開始驗證前，先從面板選取 Fixed CC。
 
 | Trial | Temporary setting | Physical acceptance |
 | --- | --- | --- |

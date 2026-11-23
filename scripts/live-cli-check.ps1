@@ -460,18 +460,42 @@ function Invoke-OfflineCommand([string]$Command, [string[]]$ExtraArgs = @(), [sw
     return $plan
 }
 
-function Invoke-OfflineTests($Step) {
+function Invoke-OfflineTests($Step, $Entry) {
     $base = Join-Path $script:reportDirectory "$($Step.name)-pytest"
-    $arguments = @('-m','pytest','-q','-p','no:cacheprovider','--basetemp',$base) + $Step.args
-    $execution = Invoke-OfflineProcess $arguments
-    if ($DebugArtifacts) {
-        $privateDir = Join-Path $script:reportDirectory 'private'
-        [void][IO.Directory]::CreateDirectory($privateDir)
-        [IO.File]::WriteAllText((Join-Path $privateDir "$($Step.name).txt"),
-            ($execution.stdout + $execution.stderr), [Text.UTF8Encoding]::new($false))
-    }
-    if ($execution.exit_code -ne 0) {
-        Fail-Case $Step.name 'offline_checks_failed' "Offline Simulator checks failed ($($execution.exit_code))."
+    $resultsFile = Join-Path $base 'results.xml'
+    $arguments = @('-m','pytest','-q','-rs','-p','no:cacheprovider',
+        '--basetemp',$base,'--junitxml',$resultsFile) + $Step.args
+    try {
+        $execution = Invoke-OfflineProcess $arguments
+        if ($DebugArtifacts) {
+            $privateDir = Join-Path $script:reportDirectory 'private'
+            [void][IO.Directory]::CreateDirectory($privateDir)
+            [IO.File]::WriteAllText((Join-Path $privateDir "$($Step.name).txt"),
+                ($execution.stdout + $execution.stderr), [Text.UTF8Encoding]::new($false))
+        }
+        if ($execution.exit_code -notin @(0, 5)) {
+            Fail-Case $Step.name 'offline_checks_failed' "Offline Simulator checks failed ($($execution.exit_code))."
+        }
+        $suite = if (Test-Path -LiteralPath $resultsFile -PathType Leaf) {
+            $results = [xml](Get-Content -LiteralPath $resultsFile -Raw)
+            $results.testsuites.testsuite
+        }
+        if ($execution.exit_code -eq 5 -or [int]$suite.tests -le 0) {
+            $Entry.status = 'NOT RUN'
+            $Entry['error_code'] = 'offline_checks_not_run'
+            throw 'Offline Simulator checks have no recorded test executions.'
+        }
+        if ([int]$suite.failures -gt 0 -or [int]$suite.errors -gt 0) {
+            Fail-Case $Step.name 'offline_checks_failed' 'Offline Simulator checks recorded failures or errors.'
+        }
+        if ([int]$suite.skipped -gt 0) {
+            $Entry.status = 'SKIP'
+            $Entry['error_code'] = 'offline_checks_skipped'
+            throw "Offline Simulator checks skipped $($suite.skipped) of $($suite.tests) tests."
+        }
+        $Entry.status = 'PASS'
+    } finally {
+        Remove-Item -LiteralPath $resultsFile -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -754,9 +778,11 @@ function Invoke-TimerExpiry($Step) {
     $entry = $script:report.results | Where-Object { $_.name -ceq $Step.name }
     $observations = @()
     try {
-        while (($remaining = $deadline - $script:watch.ElapsedMilliseconds) -gt 0) {
+        while ($script:watch.ElapsedMilliseconds -lt $deadline) {
+            # An out-of-window observation fails the trial. The normal command deadline
+            # still determines whether the exchange can be trusted for cleanup.
             $result = Invoke-LiveCommand -Command $Step.command -CaseName $Step.name `
-                -ExtraArgs $Step.args -DeadlineMs $remaining
+                -ExtraArgs $Step.args -DeadlineMs $script:perCommandDeadlineMs
             Assert-Runtime $result $Step.name
             $status = $result.result
             $now = $entry.observed_at_ms
@@ -1018,7 +1044,7 @@ function New-ProtectionPlan {
         @{name='protection-start-state';command='readback';args=$script:readbackScope;
           condition='reuse the independent Readback snapshot when selected'},
         @{name='protection-prepare-cc';command='set-cc';args=$cc;
-          condition='Input OFF confirmed and initial selection is outside Fixed CC'},
+          condition='Input and Short OFF confirmed in Fixed CV or CW'},
         @{name='protection-prepare-cc-readback';command='fixed-status';args=$script:readbackScope;
           condition='verify Fixed CC after a preparation write'}
     )
@@ -1189,6 +1215,9 @@ function Invoke-ProtectionValidation($Selection) {
             ($script:report.results | Where-Object { $_.name -ceq $name }).status = 'SKIP'
         }
     } else {
+        if ($Selection.short_state -cne 'OFF') {
+            Fail-Case 'protection-start-state' 'unsafe_mode' 'Short must be OFF before preparing Fixed CC for Protection.'
+        }
         $null = Invoke-ProtectionStep 'protection-prepare-cc'
         $prepared = Invoke-ProtectionStep 'protection-prepare-cc-readback'
         Assert-ReadbackFields $prepared.result @{active_mode='fixed';function='CC';range='low';
@@ -2069,8 +2098,8 @@ try {
         $phase = 'cases'
         $entry = $report.results | Where-Object { $_.name -ceq $step.name }
         $entry.status = 'FAIL'
-        if ($step.command -ceq 'pytest') { Invoke-OfflineTests $step }
-        $entry.status = 'PASS'
+        if ($step.command -ceq 'pytest') { Invoke-OfflineTests $step $entry }
+        else { $entry.status = 'PASS' }
     }
     $phase = 'plan'
     if ($offlineOnly -or (-not [Console]::IsInputRedirected -and [Environment]::UserInteractive)) {
