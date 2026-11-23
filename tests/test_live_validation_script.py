@@ -946,10 +946,18 @@ def test_new_modes_run_independently_without_a_resource(run_script, mode, comman
     assert not list(path.parents[1].rglob('results.xml'))
 
 
-@pytest.mark.parametrize('scenario,status', [('collect-only', 'NOT RUN'), ('one-skipped', 'SKIP')])
-def test_new_modes_report_incomplete_simulator_checks(run_script, tmp_path, scenario, status):
+@pytest.mark.parametrize('scenario,status,diagnostic', [
+    ('collect-only', 'NOT RUN', 'tests collected'),
+    ('partly-deselected', 'NOT RUN', 'excluded from the offline test selection'),
+    ('one-skipped', 'SKIP', 'offline test skip probe'),
+])
+def test_new_modes_report_incomplete_simulator_checks(run_script, tmp_path, scenario, status, diagnostic):
     if scenario == 'collect-only':
         overrides = {'PYTEST_ADDOPTS': '--collect-only'}
+    elif scenario == 'partly-deselected':
+        overrides = {'PYTEST_ADDOPTS': (
+            '--deselect=tests/test_control_core.py::test_average_native_write_readback_and_query_while_on'
+        )}
     else:
         (tmp_path / 'skip_one.py').write_text(
             'import pytest\n'
@@ -966,7 +974,7 @@ def test_new_modes_report_incomplete_simulator_checks(run_script, tmp_path, scen
     case = report['cases'][-1]
     assert case['command'] == 'pytest' and case['status'] == status
     log = (path.parents[1] / 'private' / f"{case['name']}.txt").read_text(encoding='utf-8-sig')
-    assert ('tests collected' if scenario == 'collect-only' else 'offline test skip probe') in log
+    assert diagnostic in log
     assert not list(path.parents[1].rglob('results.xml'))
 
 

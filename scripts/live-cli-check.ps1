@@ -463,7 +463,31 @@ function Invoke-OfflineCommand([string]$Command, [string[]]$ExtraArgs = @(), [sw
 function Invoke-OfflineTests($Step, $Entry) {
     $base = Join-Path $script:reportDirectory "$($Step.name)-pytest"
     $resultsFile = Join-Path $base 'results.xml'
-    $arguments = @('-m','pytest','-q','-rs','-p','no:cacheprovider',
+    # JUnit records results for selected tests only. Check the complete collection before running it.
+    $launcher = @'
+import pytest
+
+
+class CompleteOfflineSelection:
+    def __init__(self):
+        self.collected = set()
+
+    def pytest_itemcollected(self, item):
+        self.collected.add(item.nodeid)
+
+    @pytest.hookimpl(trylast=True)
+    def pytest_collection_finish(self, session):
+        excluded = self.collected.difference(item.nodeid for item in session.items)
+        if excluded:
+            pytest.exit(
+                f'{len(excluded)} tests excluded from the offline test selection',
+                returncode=pytest.ExitCode.NO_TESTS_COLLECTED,
+            )
+
+
+raise SystemExit(pytest.main(plugins=[CompleteOfflineSelection()]))
+'@
+    $arguments = @('-c',$launcher,'-q','-rs','-p','no:cacheprovider',
         '--basetemp',$base,'--junitxml',$resultsFile) + $Step.args
     try {
         $execution = Invoke-OfflineProcess $arguments

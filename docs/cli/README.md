@@ -1414,16 +1414,18 @@ with only `-Target itech-it8812c` and `-Modes`. For example:
 In a mixed selection, the extension checks run before the physical approval
 gate. If that gate blocks execution, physical cases remain `NOT RUN`.
 `-PlanOnly` validates dry-run requests and leaves case results `NOT RUN`.
-All selected pytest cases must run successfully for an extension to pass.
-The report records `NOT RUN` when no test ran and `SKIP` when tests were
-skipped. Either result leaves the run incomplete.
+All pytest cases specified by the mode must run successfully for an extension
+to pass. If pytest deselects any of those cases, the script stops the group
+before running it. The report records `NOT RUN` when no test ran and `SKIP`
+when tests were skipped. Either result leaves the run incomplete.
 
 三個擴充模式使用 CLI dry-run 與開發環境中既有的 Simulator 或 Fake VISA
 聚焦測試。可用上例組合執行，也可只選其中一個模式，均只需提供 `-Target`
 與 `-Modes`。混合選取時，擴充模式先執行，實機確認被擋下時實機案例維持
 `NOT RUN`。`-PlanOnly` 驗證 dry-run 請求，案例結果維持 `NOT RUN`。
-擴充模式須實際執行且通過所有選取的 pytest 案例才算通過。沒有案例執行時記錄
-`NOT RUN`，有案例跳過時記錄 `SKIP`。兩者都表示本次驗證未完成。
+擴充模式指定的 pytest 案例須全部執行並通過。若 pytest 篩選排除任何指定案例，
+腳本會在測試開始前停止整組。沒有案例執行時記錄 `NOT RUN`，有案例跳過時記錄
+`SKIP`。兩者都表示本次驗證未完成。
 
 Readback queries the existing configuration with Input OFF before any setup.
 The current mode determines which Fixed, Slew, Transient or LIST case is
