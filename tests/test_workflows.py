@@ -2,6 +2,7 @@
 
 import csv
 import json
+from contextlib import contextmanager
 from threading import TIMEOUT_MAX, Event
 
 import pytest
@@ -10,6 +11,8 @@ from electronicload_tool_cli.cli import main
 from electronicload_tool_core import control, workflows
 from electronicload_tool_core.errors import LoadError
 from electronicload_tool_core.simulator import ControlSimulator
+from test_control_core import RESOURCE
+from test_hardware_validation import ValidationFake
 
 
 class Clock(Event):
@@ -29,6 +32,7 @@ class Clock(Event):
 def clock(monkeypatch):
     clock = Clock()
     monkeypatch.setattr(workflows, "monotonic", lambda: clock.now)
+    monkeypatch.setattr(workflows, "monotonic_ns", lambda: int(clock.now * 10**9))
     monkeypatch.setattr(control, "monotonic", lambda: clock.now)
     monkeypatch.setattr(control, "sleep", clock.wait)
     return clock
@@ -460,6 +464,86 @@ def test_workflow_contributor_cli_uses_one_readonly_visa_session(fake_visa, caps
     assert fake_visa.calls.index("*IDN?") < fake_visa.calls.index("INP:STAT?") < fake_visa.calls.index("MEAS:VOLT?")
     assert fake_visa.calls.count("MEAS:VOLT?") == count
     assert fake_visa.calls.count("open_resource") == fake_visa.calls.count("session_close") == 1
+
+
+@pytest.mark.parametrize("scenario", ["timed", "capacity", "stop", "lost", "late_off", "voltage"])
+def test_contributor_cc_owns_bounded_on_and_cleanup(clock, monkeypatch, capsys, scenario):
+    class PhysicalLoad(ValidationFake):
+        query_delay = 0.15
+
+        def write(self, command):
+            super().write(command)
+            if command == "INP ON":
+                self.dispatched = clock.now
+                assert self.timeout <= 500
+                clock.now += 1.25  # Time spent in the SCPI ON write counts against loading time.
+                if scenario == "stop":
+                    clock.set()
+            if command == "INP OFF":
+                self.off_at = clock.now
+                if scenario == "late_off":
+                    clock.now = self.dispatched + 10.01  # Native backend did not meet the configured timeout.
+
+        def query(self, command):
+            if command == "MEAS:CURR?" and scenario == "lost":
+                self.calls.append(command)
+                raise TimeoutError()
+            if command == "MEAS:VOLT?" and scenario == "voltage" and self.input:
+                self.calls.append(command)
+                return "4.4"
+            return super().query(command)
+
+    fake = PhysicalLoad()
+    fake.range = 6
+    fake.values.update({"INP:TIM": "0", "MEAS:VOLT": "5", "MEAS:CURR": "0.1", "FETC:POW": "0.5"})
+    opened = []
+
+    @contextmanager
+    def open_fake(resource):
+        opened.append(resource)
+        yield fake, {}
+
+    monkeypatch.setattr(workflows, "open_session", open_fake)
+    clock.now = 10
+    reported_start = []
+    discharge = scenario in {"capacity", "voltage"}
+    command = "cc-discharge" if discharge else "cc-timed-load"
+    settings = (["--cutoff-voltage", "4.5", "--cutoff-capacity-ah", "0.00010", "--interval-s", "0.5",
+                 "--timeout-s", "6"] if discharge else ["--duration-s", "5"])
+    args = [command, "--resource", RESOURCE, "--hardware-validation", "workflow", "--current", "0.1",
+            *settings, "--json"]
+    assert main(args) == 2
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "confirmation_required"
+    assert not opened
+    status = main([*args, "--confirm"], contributor_stop=clock, workflow_on_write_started=reported_start.append)
+    outcome = json.loads(capsys.readouterr().out)
+    assert opened == [RESOURCE]
+    assert reported_start == [int(fake.dispatched * 10**9)]
+    assert fake.calls.count("INP ON") == 1
+    if scenario == "lost":
+        assert status == 3 and outcome["error"]["details"]["manual_action_required"]
+        assert "INP OFF" not in fake.calls and fake.calls[-1] == "MEAS:CURR?"
+        return
+    assert fake.calls.count("INP OFF") == 1
+    if scenario == "late_off":
+        assert status == 3 and outcome["error"]["code"] == "workflow_cleanup_unconfirmed"
+        assert outcome["error"]["details"]["manual_action_required"]
+        return
+    assert not fake.input
+    if scenario in {"stop", "voltage"}:
+        assert status == 3
+        error = outcome["error"]
+        assert error["code"] == ("stopping" if scenario == "stop" else "capacity_cutoff_unconfirmed")
+        assert error["details"]["cleanup"]["off_confirmed"]
+        return
+    assert status == 0
+    result = outcome["result"]
+    assert result["input_state"] == "OFF" and result["cleanup"]["off_confirmed"]
+    assert result["off_confirmed_ns"] - result["on_write_started_ns"] <= 10**10
+    if scenario == "timed":
+        assert fake.off_at - fake.dispatched == 5
+    else:
+        assert result["stop_reason"] == "capacity_cutoff" and result["capacity_ah"] >= 0.00010
 
 
 @pytest.mark.parametrize("flags", [[], ["--count", "1", "--duration-s", "1"]])

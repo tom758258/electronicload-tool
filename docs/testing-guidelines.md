@@ -538,9 +538,14 @@ measurements and Average, VON/Short/CC Slew, or LIST CC setup/Save/Recall/Exit.
 Check `-LiveExtensions` for explicit single, mixed and Full selection and
 verify that it never falls back to the offline cases. Exercise the contributor
 read-only sampling and measurements and the Input OFF guards for Workflow and
-Average with recording Fake VISA. Verify VON, Short and indexed LIST queries
-in PlanOnly and the separate LIST readback required when a mode-changing trial
-is selected. For Timer expiry, use a controlled clock for early OFF refusal and
+Average with recording Fake VISA. For the CC trials, verify the write-start
+clock, capacity/voltage outcomes, confirmed OFF within the 10-second limit,
+Stop cleanup and the independent-cutoff notice when communication fails.
+For isolated settings, record the test and restored readbacks and cover refusal
+before an unrestorable baseline, Short without `INP ON`, and LIST B before
+Recall A. In PlanOnly, check the previews and the separate isolated run when
+source-connected or mode-changing trials are selected. For Timer expiry, use
+a controlled clock for early OFF refusal and
 operator confirmation after cleanup. Use a delayed Fake VISA ON reply to verify
 that the SCPI write-start deadline already applies while the ON subprocess is
 still running. With a process substitute that stays running after termination is
@@ -550,8 +555,11 @@ Select affected Fake VISA cases in `tests/test_input_timer.py`. Physical expiry
 remains a separately authorized check with an independent hardware cutoff.
 
 離線檢查使用虛構 Resource 並阻擋實體 VISA。以 Fake VISA 驗證 Workflow
-和 Average 的 Input OFF 前置，並核對 PlanOnly 的 VON、Short 及 LIST 索引
-查詢。混選含會切換模式的試驗時，LIST 讀回須分開執行。Timer 使用可控制的
+和 Average 的 Input OFF 前置。CC 案例核對 SCPI 寫入起點、容量及電壓截止、
+10 秒內確認 OFF、Stop 的清理及通訊失信時的獨立停損提示。隔離設定核對測試值與
+還原值、無法還原原值時拒絕寫入、Short 不開啟 Input，以及 LIST 召回 A 前確實
+為 B。PlanOnly 核對計畫和預覽。混選含需接電源或切換模式的試驗時，隔離案例須
+分開執行。Timer 使用可控制的
 時鐘驗證過早 OFF 拒絕與清理完畢後由操作者確認。以 Fake VISA 模擬延遲的
 ON 回覆，驗證 ON 子程序尚在執行時已受 SCPI 寫入起點的期限約束。用收到
 終止要求後仍在執行的程序替身，確認提示在觀察期限到達時發出，且清理時

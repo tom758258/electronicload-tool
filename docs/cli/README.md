@@ -1391,41 +1391,70 @@ interactive physical validation procedure.
 The hardware case results carry `execution: live`.
 
 With Input OFF, `workflow` verifies two scheduled measurement samples and
-completion of a voltage condition at 1 V or above. `measurement-extensions`
-queries native Min/Max and Discharge values and verifies Average set to 8.
-The Average case leaves the count set to 8 after operator confirmation.
-`auxiliary-controls` can query VON and Short state, and `list-cc` can read
-an already configured, selected LIST with Input OFF. The LIST preview shows an
-indexed query for each step field, repeated for the step count read from the
-instrument. Full and selections with a trial that can change the load mode
-leave the LIST CC readback `NOT RUN` with a reason and preserve its preview.
-Start those trials in their required mode with LIST deselected. Protection
-requires Fixed CC, CV or CW. Use `-Modes list-cc -LiveExtensions` separately with
-LIST selected and Input OFF, or combine it with readback, system query and
-other contributor extension modes that preserve the LIST selection. Powered
-workflows, VON/Short/Slew changes and the LIST CC configuration and slot
-cycle require their own approved operating procedures. If a selected case
-has no executable procedure, it stays `NOT RUN` with a reason and the
-requested hardware validation remains incomplete.
+completion of a voltage condition at 1 V or above. The two CC cases start in
+Fixed CC Low with a dedicated 5 V source limited to 0.8 A and use a 0.1 A
+setpoint. Timed Load requests OFF at 5 seconds. Discharge samples every
+0.5 seconds and must reach 0.00010 Ah. It stops on a voltage of 4.5 V or lower
+or after 6 seconds if capacity is still below the target. Timing starts at
+the SCPI `INP ON` write. For each case, arm an independent hardware cutoff
+before confirming the trial so that load time, including OFF confirmation,
+cannot exceed 10 seconds from the write. If communication is lost, use that
+cutoff immediately. Skip physical execution if the site cannot enforce this
+limit. After OFF is confirmed, verify that the source remained on throughout
+the load interval. The CC trials leave the Fixed CC setpoint at 0.1 A with
+Input OFF.
+
+`measurement-extensions` queries native Min/Max and Discharge values and
+verifies Average set to 8. The Average case leaves that setting after operator
+confirmation.
+
+For `auxiliary-controls` and `list-cc`, physically disconnect the source and
+DUT and start in Fixed CC with Input, Short, Transient and Input Timer OFF.
+VON and same-range Slew save the original values, verify test readback, then
+restore and verify the original values. The Short trial checks ON and OFF
+state with isolated terminals and verifies Input OFF. It does not exercise
+load current. LIST reads and records the original working configuration,
+uses different first-step widths for A and B, saves A to `-ListScratchSlot`,
+and checks all steps after recalling A. Enter `OVERWRITE <slot>` only if that
+slot may retain A. The trial returns to Fixed CC and verifies the original
+working buffer. If the baseline cannot be restored, configuration writes are
+refused. If restoration cannot be verified after a write, keep the terminals
+isolated and complete the recovery at the instrument.
+
+Run the isolated trials separately from source-connected or mode-changing
+trials. Full and incompatible selections preserve the isolated case previews
+as `NOT RUN` with the separate-run reason. The isolated cases may be combined
+with each other, native measurements, readback and system query.
 
 使用 `-LiveExtensions` 搭配單選、多選或 `-Modes full`，明確選擇
 Contributor 實機項目。指定與 `-Connection` 相符的 `-Resource`，
 可用 `-PlanOnly` 先檢視 CLI 操作與擴充模式的 SCPI 預覽，預覽不會開啟 VISA。
 執行時需遵循互動式實機驗證流程，硬體項目會標記 `execution: live`。
 
-Input OFF 時，`workflow` 驗證定時取樣兩次及電壓達到 1 V 的條件。
-`measurement-extensions` 查詢原生 Min/Max 與放電讀值，經操作者
-確認後將 Average 設為 8、驗證讀回並保留設定。`auxiliary-controls`
-可觀察 VON 和 Short 狀態，`list-cc` 可在 Input OFF 時讀回已設定並
-選取的 LIST。LIST 預覽列出每個步進欄位的索引查詢，依儀器讀出的步數逐步
-執行。Full 或含任何會切換負載模式的混選將 LIST CC 讀回列為 `NOT RUN`，
-保留原因及預覽。其餘試驗須依各自要求的模式起始，並確認未選取 LIST。
-Protection 要求 Fixed CC、CV 或 CW。請在已選取 LIST 且 Input OFF 時
-單獨執行 `-Modes list-cc -LiveExtensions`，也可與不會切換 LIST 選取的
-Readback、System Query 或其他 Contributor 擴充模式混選。CC 帶載流程、
-VON／Short／Slew 設定變更和 LIST CC
-設定與記憶槽操作均需各自核准的操作流程。沒有可執行
-流程的案例會保留為 `NOT RUN` 並列出原因，該次實機驗證維持未完成。
+Input OFF 時，`workflow` 驗證定時取樣兩次及電壓達到 1 V 的條件。兩個
+CC 案例從 Fixed CC Low 開始，使用專用的 5 V、限流 0.8 A 電源，負載
+設定為 0.1 A。Timed Load 在第 5 秒要求 OFF。放電每 0.5 秒取樣，須達到
+0.00010 Ah 才通過，電壓降至 4.5 V 以下（含）或第 6 秒容量仍未達標時即停止。
+兩項都從 SCPI `INP ON` 寫入起算。每次確認前先備妥獨立硬體停損，確保從
+寫入至 OFF 確認不超過 10 秒。通訊失信時立即使用停損。現場無法確保期限時，
+不執行實機測試。確認 OFF 後，確認電源在帶載期間持續供電。CC 案例結束後，
+Fixed CC 設定保留 0.1 A，Input 為 OFF。
+
+`measurement-extensions` 查詢原生 Min/Max 與放電讀值，經操作者確認後
+將 Average 設為 8、驗證讀回並保留設定。
+
+`auxiliary-controls` 與 `list-cc` 須物理隔離來源及待測物，從 Fixed CC 開始，
+確認 Input、Short、Transient 與 Input Timer 皆為 OFF。VON 與同檔 Slew
+保存原值、確認測試值讀回，再還原並比對原值。Short 只在端子隔離時驗證 ON／OFF
+狀態並確認 Input OFF，不測帶載電流。LIST 先讀回並記錄原工作設定，只修改第一步
+寬度來區分 A 與 B，存 A 至 `-ListScratchSlot`，召回後逐步核對 A。只有容許該槽
+保留 A 時，才輸入 `OVERWRITE <槽號>`。最後退出至 Fixed CC 並驗證原工作設定。
+原始設定無法安全還原時，拒絕設定寫入。寫入後若無法確認還原，維持端子隔離並由
+現場完成還原。
+
+請將隔離設定案例與需接電源或切換模式的試驗分開執行。Full 或不相容的混選將隔離
+案例列為 `NOT RUN`，並保留預覽及另跑原因。隔離案例可彼此混選，也可搭配原生量測、
+設定讀回及 System Query。
 
 ### Script parameters
 
@@ -1437,6 +1466,7 @@ VON／Short／Slew 設定變更和 LIST CC
 | `-Backend` | `system` | System VISA (`@ivi`) only |
 | `-Modes` | `full` | FULL, a single mode or a comma-separated selection |
 | `-LiveExtensions` | Off | Request contributor hardware cases for Workflow and extension modes |
+| `-ListScratchSlot` | 1 | LIST test slot (1–7) with per-run overwrite confirmation |
 | `-InputTimerOnly` | Off | Backward-compatible Timer-only shortcut, incompatible with `-Modes` |
 | `-SourceVoltageLimitV` | **5 V** | Operator-declared external source voltage, override >0 to 18 V |
 | `-SourceCurrentLimitA` | **0.8 A** | Operator-declared external source current limit, override >0 to 2 A |
@@ -1444,8 +1474,8 @@ VON／Short／Slew 設定變更和 LIST CC
 | `-DebugArtifacts` | Off | Additionally retain raw private diagnostics |
 | `-Verbose` | Off | Print individual planned CLI steps and arguments |
 
-Both Source parameters are optional. Protection and Sequence require the
-standard values whenever selected. The standard external supply setup
+Both Source parameters are optional. Protection, Sequence and Contributor
+Workflow load trials require the standard values. The standard external supply setup
 is **5 V with a 0.8 A current limit** (nominal 4 W envelope). The script
 **does not set, query or verify** this supply. The operator must configure
 and verify it, along with wiring and the DUT, before a physical run. A declared

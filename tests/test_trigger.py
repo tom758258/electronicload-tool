@@ -42,6 +42,51 @@ def physical(command, **arguments):
     return control.execute(command, resource=RESOURCE, hardware_validation="trigger", **arguments)
 
 
+@pytest.mark.parametrize("scenario", ["recall_works", "recall_ignored", "unrestorable"])
+def test_contributor_list_requires_independent_recall_then_restores_working_buffer(
+    monkeypatch, capsys, scenario,
+):
+    class SettingsList(TriggerFake):
+        def __init__(self):
+            super().__init__()
+            self.list_steps = {f"LIST:{key}? {index}": value for index in (1, 2)
+                               for key, value in (("LEV", ".2"), ("SLEW", ".1"), ("WID", "0.3"))}
+            self.slots = {}
+
+        def write(self, command):
+            super().write(command)
+            if command == "LIST:SAV 1":
+                self.slots[1] = self.list_steps.copy()
+            if command == "LIST:RCL 1" and scenario == "recall_works":
+                self.list_steps = self.slots[1].copy()
+
+    fake = SettingsList()
+    if scenario == "unrestorable":
+        fake.values["LIST:RANG"] = "0.1"  # Readable number without a restorable LIST range mapping.
+    start = fake.list_steps.copy()
+    session(fake, monkeypatch)
+    args = ["contributor-settings", "--trial", "list-cc", "--slot", "1", "--resource", RESOURCE, "--json"]
+    assert cli.main(args) == 2 and not fake.calls
+    capsys.readouterr()
+    assert cli.main([*args, "--confirm-isolated"]) == (0 if scenario == "recall_works" else 3)
+    result = json.loads(capsys.readouterr().out)
+    if scenario == "unrestorable":
+        assert result["error"]["code"] == "list_baseline_unrestorable"
+        assert result["error"]["details"]["no_settings_written"]
+        assert all("?" in command for command in fake.calls)
+        return
+    if scenario == "recall_works":
+        assert result["result"]["recall_confirmed"] and result["result"]["restored"]
+    else:
+        assert result["error"]["code"] == "readback_mismatch" and result["error"]["details"]["restored"]
+    assert fake.list_steps == start and fake.mode == "FIX" and not fake.input
+    assert fake.slots[1]["LIST:WID? 1"] == "1"
+    assert [command for command in fake.calls if "?" not in command] == [
+        "SYST:REM", "LIST:WID 1,1", "FUNC:MODE LIST", "LIST:SAV 1", "LIST:WID 1,2", "LIST:RCL 1",
+        "FUNC:MODE FIX", "LIST:WID 1,0.3",
+    ]
+
+
 @pytest.mark.parametrize("function,sources", [
     ("CC", ("MANUAL", "BUS", "HOLD", "TIMER", "EXTERNAL")),
     ("CV", ("BUS",)),

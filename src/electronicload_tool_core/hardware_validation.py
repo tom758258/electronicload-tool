@@ -437,17 +437,21 @@ def _require_trigger_input_on(session, stop, function):
     _stopping(stop)
 
 
-def _list_writes(configuration):
+def list_program_writes(configuration):
     ceiling = c.RANGE_LIMITS[configuration["range"]]
     steps = configuration["steps"]
-    # Use a known zero fixed-current setting before selecting and arming LIST.
-    writes = ["FUNC:MODE FIX", "FUNC CURR", "CURR 0", f"LIST:RANG {ceiling:g}",
+    writes = [f"LIST:RANG {ceiling:g}",
               f"LIST:COUN {configuration['repeat_count']}", f"LIST:STEP {len(steps)}"]
     for index, step in enumerate(steps, 1):
         writes.extend([f"LIST:LEV {index},{step['current_a']:f}",
                        f"LIST:SLEW {index},{step['slew_a_per_us']:f}",
                        f"LIST:WID {index},{step['width_s']:f}"])
-    return [*writes, "FUNC:MODE LIST"]
+    return writes
+
+
+def _list_writes(configuration):
+    # Use a known zero fixed-current setting before selecting and arming LIST.
+    return ["FUNC:MODE FIX", "FUNC CURR", "CURR 0", *list_program_writes(configuration), "FUNC:MODE LIST"]
 
 
 def _list_snapshot(session, configuration):

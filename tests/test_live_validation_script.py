@@ -884,22 +884,29 @@ try {
         assert 5.75 <= (handled_ns - write_ns) / 1e9 <= 7.5
 
 
-def test_input_timer_deadline_notifies_operator_before_waiting_for_stuck_process(run_script):
-    result = run_script([], harness="""
+@pytest.mark.parametrize('scenario,command,deadline,code', [
+    ('Timer', 'input-on', 7_000_000_000, 'timer_expiry_unconfirmed'),
+    ('Workflow', 'cc-timed-load', 11_000_000_000, 'workflow_cleanup_unconfirmed'),
+])
+def test_powered_deadline_notifies_operator_before_waiting_for_stuck_process(run_script, scenario, command, deadline,
+                                                                           code):
+    result = run_script(['-Scenario', scenario], harness="""
 $script:nowNs = 1000000000L
-$script:report = @{status='NOT RUN';results=@([ordered]@{name='timer-on';status='NOT RUN'})}
+$case = if ($Scenario -ceq 'Timer') { 'timer-on' } else { 'workflow-cc-timed-load' }
+$command = if ($Scenario -ceq 'Timer') { 'input-on' } else { 'cc-timed-load' }
+$script:report = @{status='NOT RUN';results=@([ordered]@{name=$case;status='NOT RUN'})}
 $script:perCommandDeadlineMs = 30000
 $script:totalDeadlineMs = 900000
 $script:watch = [Diagnostics.Stopwatch]::StartNew()
-$script:timerPowered = $true
-$inputOnAttempted = $true
-$timerEnableAttempted = $true
+$script:timerPowered = $Scenario -ceq 'Timer'
+$inputOnAttempted = $script:timerPowered
+$timerEnableAttempted = $script:timerPowered
 $TimerSeconds = '5'
 $script:calls = @()
 function Get-TimerMonotonicNs { $script:nowNs }
 function New-LiveCliProcess([string[]]$Arguments) {
     $script:calls += $Arguments[2]
-    $signal = [Text.Encoding]::UTF8.GetBytes("Timer INP ON write started: 1000000000`n")
+    $signal = [Text.Encoding]::UTF8.GetBytes("$Scenario INP ON write started: 1000000000`n")
     $process = [pscustomobject]@{
         HasExited = $false
         StandardOutput = [IO.StreamReader]::new([IO.MemoryStream]::new())
@@ -927,9 +934,9 @@ function Write-Host([string]$Message) {
 }
 $main = $ast.EndBlock.Statements | Where-Object { $null -ne $_.Finally } | Select-Object -Last 1
 $cleanup = $main.Finally.Extent.Text
-try { Invoke-LiveCommand -Command 'input-on' -CaseName 'timer-on' }
+try { Invoke-LiveCommand -Command $command -CaseName $case }
 catch {
-    if ($script:report.results[0].error_code -cne 'timer_expiry_unconfirmed') { throw }
+    if (-not $script:report.results[0].error_code) { throw }
     $script:report.status = 'FAIL'
 } finally {
     . ([scriptblock]::Create($cleanup.Substring(1, $cleanup.Length - 2)))
@@ -941,12 +948,54 @@ catch {
     assert result.returncode == 0, result.stdout + result.stderr
     evidence = json.loads(result.stdout.splitlines()[-1])
     assert evidence['notice'] == {
-        'at_ns': 7_000_000_000, 'status': 'FAIL', 'error_code': 'timer_expiry_unconfirmed',
+        'at_ns': deadline, 'status': 'FAIL', 'error_code': code,
     }
-    assert evidence['kill_ns'] == 7_000_000_000
-    assert evidence['completed_ns'] == 12_000_000_000
-    assert evidence['calls'] == ['input-on']
-    assert evidence['statuses'] == ['FAIL', 'NOT RUN', 'NOT RUN', 'NOT RUN']
+    assert evidence['kill_ns'] == deadline
+    assert evidence['completed_ns'] == deadline + 5_000_000_000
+    assert evidence['calls'] == [command]
+    assert evidence['statuses'] == ['FAIL'] + (['NOT RUN'] * 3 if scenario == 'Timer' else [])
+
+
+def test_contributor_workflow_script_accepts_confirmed_off_within_write_start_deadline(run_script, tmp_path):
+    with (tmp_path / 'sitecustomize.py').open('a', encoding='utf-8') as preload:
+        preload.write("""
+import sys
+from contextlib import contextmanager
+
+sys.path.insert(0, str(Path.cwd() / 'tests'))
+from test_hardware_validation import ValidationFake
+from electronicload_tool_core import workflows
+
+@contextmanager
+def fake_session(_resource):
+    fake = ValidationFake()
+    fake.range = 6
+    fake.query_delay = 0.15
+    fake.values.update({'INP:TIM': '0', 'MEAS:CURR': '0.1'})
+    yield fake, {'library': 'fake', 'manufacturer': 'fake'}
+
+workflows.open_session = fake_session
+""")
+    result = run_script([], extra_env={'FAKE_WORKFLOW_PYTHON': sys.executable, 'FAKE_WORKFLOW_RESOURCE': RESOURCE},
+                        harness="""
+$python = $env:FAKE_WORKFLOW_PYTHON
+$repo = (Get-Location).Path
+$script:connectionArgs = @('--resource', $env:FAKE_WORKFLOW_RESOURCE)
+$script:report = @{status='NOT RUN';results=@([ordered]@{name='workflow-cc-timed-load';status='NOT RUN'})}
+$script:perCommandDeadlineMs = 30000
+$script:totalDeadlineMs = 900000
+$watch = [Diagnostics.Stopwatch]::StartNew()
+$response = Invoke-LiveCommand -Command 'cc-timed-load' -CaseName 'workflow-cc-timed-load' -ExtraArgs @(
+    '--hardware-validation', 'workflow', '--current', '0.1', '--range', 'low', '--duration-s', '5', '--confirm')
+@{result=$response.result;status=$script:report.results[0].status} | ConvertTo-Json -Depth 6 -Compress
+""")
+    assert result.returncode == 0, result.stdout + result.stderr
+    evidence = json.loads(result.stdout.splitlines()[-1])
+    assert evidence['status'] == 'NOT RUN'  # The live script still requires the operator's observation.
+    workflow = evidence['result']
+    assert workflow['stop_reason'] == 'duration_elapsed' and workflow['input_state'] == 'OFF'
+    assert workflow['cleanup']['off_confirmed']
+    assert 5 <= (workflow['off_confirmed_ns'] - workflow['on_write_started_ns']) / 1e9 <= 10
 
 
 def test_input_timer_script_uses_default_source_limits(run_script):
@@ -1188,16 +1237,21 @@ def test_workflow_only_stays_offline_with_optional_connection(run_script, plan_o
 
 @pytest.mark.parametrize('mode,connection,resource,plan_only', [
     ('measurement-extensions', 'usb', RESOURCE, True),
+    ('auxiliary-controls', 'usb', RESOURCE, True),
     ('list-cc', 'usb', RESOURCE, False),
     ('list-cc', 'usb', RESOURCE, True),
     ('list-cc,protection', 'usb', RESOURCE, True),
     ('list-cc,input-timer', 'usb', RESOURCE, True),
+    ('list-cc,auxiliary-controls', 'asrl', ASRL, True),
     ('workflow,auxiliary-controls,list-cc,measurement-extensions', 'asrl', ASRL, False),
     ('full', 'usb', RESOURCE, True),
     ('full', 'asrl', ASRL, True),
 ])
 def test_explicit_live_extensions_never_use_simulation(run_script, mode, connection, resource, plan_only):
     flags = ['-Modes', mode, '-LiveExtensions', '-Connection', connection]
+    slot = 2 if mode == 'list-cc,auxiliary-controls' else 1
+    if slot != 1:
+        flags += ['-ListScratchSlot', str(slot)]
     result = run_script([*flags, *(['-PlanOnly'] if plan_only else [])], resource=resource)
     assert result.returncode == (0 if plan_only else 2), result.stdout + result.stderr
     path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)[-1])
@@ -1205,31 +1259,32 @@ def test_explicit_live_extensions_never_use_simulation(run_script, mode, connect
     assert report['overall_status'] == ('PLAN ONLY' if plan_only else 'BLOCKED')
     assert not report['hardware_touched'] and report['resource'] == '<redacted>'
     cases = {case['name']: case for case in report['cases']}
+    if mode == 'full':
+        assert len(report['modes']) == 21
     assert all(case['status'] == 'NOT RUN' for case in cases.values())
     assert all(case.get('execution') in (None, 'live') for case in cases.values())
     if mode in ('full', 'measurement-extensions'):
         assert 'MEAS:VOLT:MIN?' in cases['measurement-extensions-min-max']['queries']
         assert 'SENS:AVER:COUN 8' in cases['measurement-extensions-average']['planned_writes']
-    if mode != 'measurement-extensions':
-        assert cases['list-cc-save']['error_code'] == 'live_procedure_unapproved'
-        assert cases['list-cc-status']['planned_writes'] == []
-        assert cases['list-cc-status']['queries'] == [
-            '*IDN?', 'FUNC:MODE?', 'FUNC?', 'TRAN?', 'LIST:RANG?', 'LIST:STEP?', 'LIST:COUN?',
-            'LIST:LEV? {step}', 'LIST:SLEW? {step}', 'LIST:WID? {step}', 'INP:STAT?',
-        ]
-        if mode in ('full', 'list-cc,protection', 'list-cc,input-timer'):
-            assert cases['list-cc-status']['error_code'] == 'list_requires_separate_live_run'
-            assert 'without LIST selected' in cases['list-cc-status']['condition']
-            first_setup = 'timer-cc-setup' if mode == 'list-cc,input-timer' else 'protection-start-state'
-            assert list(cases).index(first_setup) < list(cases).index('list-cc-status')
+    if 'list-cc-settings' in cases:
+        trial = cases['list-cc-settings']
+        assert 'LIST:WID? {step}' in trial['queries']
+        assert f'LIST:SAV {slot}' in trial['planned_writes'] and f'LIST:RCL {slot}' in trial['planned_writes']
+        assert 'INP ON' not in trial['planned_writes'] and '*TRG' not in trial['planned_writes']
+        if mode not in ('list-cc', 'list-cc,auxiliary-controls'):
+            assert trial['error_code'] == 'settings_require_isolated_run'
         else:
-            assert 'error_code' not in cases['list-cc-status']
+            assert 'error_code' not in trial
+    if 'auxiliary-controls-von' in cases:
+        assert {'VOLT:ON?', 'VOLT:LATC?'} <= set(cases['auxiliary-controls-von']['queries'])
+        assert cases['auxiliary-controls-short']['planned_writes'] == ['SYST:REM', 'INP:SHOR 1', 'INP:SHOR 0']
+        assert not any(write.startswith('CURR:RANG ') for write in cases['auxiliary-controls-slew']['planned_writes'])
     if 'workflow-measure-log' in cases:
         assert cases['workflow-measure-log']['queries'][:2] == ['*IDN?', 'INP:STAT?']
         assert cases['workflow-measure-until']['queries'] == ['*IDN?', 'INP:STAT?', 'MEAS:VOLT?']
-        assert cases['auxiliary-controls-von-status']['queries'] == ['*IDN?', 'VOLT:ON?', 'VOLT:LATC?']
-        assert cases['auxiliary-controls-short-status']['queries'] == ['*IDN?', 'INP:SHOR:STAT?']
-        assert cases['workflow-cc-discharge']['error_code'] == 'live_procedure_unapproved'
+        for name in ('workflow-cc-timed-load', 'workflow-cc-discharge'):
+            assert {'INP ON', 'INP OFF'} <= set(cases[name]['planned_writes'])
+            assert 'error_code' not in cases[name]
 
 
 @pytest.mark.parametrize('mode,commands', [
