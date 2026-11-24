@@ -201,6 +201,18 @@ def test_default_offline_preflight(run_script):
     # Keep the existing Windows PowerShell 5.1 boundary, with the child VISA blocker.
     result = run_script([], preflight=True, windows_powershell=True)
     assert result.returncode == 0, result.stdout + result.stderr
+    for marker in (
+        'PASS: Software Sequence offline preflight',
+        'PASS: Readback preflight',
+        'PASS: Input Timer preflight',
+        'PASS: Fixed CC Slew, VON and Short preflight',
+        'PASS: Fixed Auto required Range, manual High, LIVE refusal and Manifest',
+        'PASS: Transient Auto High fallback and exact slew reporting',
+        'PASS: offline control commands and Worker manifest',
+    ):
+        assert marker in result.stdout
+    for mode in ('cv', 'cr', 'cw'):
+        assert f'PASS: set-transient-{mode}' in result.stdout
 
 
 def test_fixed_auto_offline_preflight(run_script):
@@ -214,60 +226,60 @@ def test_protection_offline_preflight(run_script):
 
 
 def test_protection_explicit_mode_report_without_visa(run_script):
-    for args, expected in [(['-PlanOnly'], 'PLAN ONLY'), ([], 'BLOCKED')]:
-        result = run_script(['-Modes', 'protection', *args])
-        assert result.returncode == (0 if args else 2), result.stdout + result.stderr
-        paths = re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)
-        assert len(paths) == 1, result.stdout + result.stderr
-        path = Path(paths[0])
-        text = path.read_text(encoding='utf-8-sig')
-        report = json.loads(text)
-        assert report['overall_status'] == expected and report['prechecks']['plan'] == 'PASS'
-        assert report['hardware_touched'] is False and RESOURCE not in text
-        assert not (path.parents[1] / 'private').exists()
-        assert report['declared_source_limits']['voltage_v'] == 5
-        assert report['declared_source_limits']['current_a'] == 0.8
-        assert report['protection_trials'] == {
-            trial: 'NOT RUN' for trial in ('software-current', 'software-power', 'hardware-power')
-        }
-        cases = {case['name']: case for case in report['cases']}
-        assert list(cases)[:2] == ['input-state', 'measure-off']
-        assert list(cases)[2:6] == [
-            'protection-start-state', 'protection-prepare-cc',
-            'protection-prepare-cc-readback', 'protection-software-current-original',
+    result = run_script(['-Modes', 'protection'])
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert 'requires an interactive console' in result.stdout
+    paths = re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)
+    assert len(paths) == 1, result.stdout + result.stderr
+    path = Path(paths[0])
+    text = path.read_text(encoding='utf-8-sig')
+    report = json.loads(text)
+    assert report['overall_status'] == 'BLOCKED' and report['prechecks']['plan'] == 'PASS'
+    assert report['hardware_touched'] is False and RESOURCE not in text
+    assert not (path.parents[1] / 'private').exists()
+    assert report['declared_source_limits']['voltage_v'] == 5
+    assert report['declared_source_limits']['current_a'] == 0.8
+    assert report['protection_trials'] == {
+        trial: 'NOT RUN' for trial in ('software-current', 'software-power', 'hardware-power')
+    }
+    cases = {case['name']: case for case in report['cases']}
+    assert list(cases)[:2] == ['input-state', 'measure-off']
+    assert list(cases)[2:6] == [
+        'protection-start-state', 'protection-prepare-cc',
+        'protection-prepare-cc-readback', 'protection-software-current-original',
+    ]
+    assert cases['protection-prepare-cc']['arguments'] == ['--current', '0.20', '--range', 'low']
+    assert cases['protection-prepare-cc-readback']['arguments'] == ['--hardware-validation', 'readback']
+    assert all(name.startswith('protection-') for name in list(cases)[2:])
+    assert all(case['status'] == 'NOT RUN' for case in cases.values())
+    assert report['summary_counts']['total'] == report['summary_counts']['not_run'] == len(cases)
+    for trial in ('software-current', 'software-power', 'hardware-power'):
+        prefix = f'protection-{trial}'
+        assert cases[f'{prefix}-cc']['arguments'][:2] == ['--current', '0.20']
+        assert cases[f'{prefix}-on']['command'] == 'operator-observation'
+        assert cases[f'{prefix}-trial']['arguments'] == [
+            '--hardware-validation', 'protection', '--confirm', '--protection-trial', trial,
         ]
-        assert cases['protection-prepare-cc']['arguments'] == ['--current', '0.20', '--range', 'low']
-        assert cases['protection-prepare-cc-readback']['arguments'] == ['--hardware-validation', 'readback']
-        assert all(name.startswith('protection-') for name in list(cases)[2:])
-        assert all(case['status'] == 'NOT RUN' for case in cases.values())
-        assert report['summary_counts']['total'] == report['summary_counts']['not_run'] == len(cases)
-        for trial in ('software-current', 'software-power', 'hardware-power'):
-            prefix = f'protection-{trial}'
-            assert cases[f'{prefix}-cc']['arguments'][:2] == ['--current', '0.20']
-            assert cases[f'{prefix}-on']['command'] == 'operator-observation'
-            assert cases[f'{prefix}-trial']['arguments'] == [
-                '--hardware-validation', 'protection', '--confirm', '--protection-trial', trial,
+        assert cases[f'{prefix}-off']['command'] == 'input-off'
+        assert '--events' in cases[f'{prefix}-events']['arguments']
+        assert cases[f'{prefix}-final']['command'] == 'protection-status'
+        if trial.startswith('software-'):
+            assert cases[f'{prefix}-source-off']['command'] == 'operator-observation'
+            assert list(cases).index(f'{prefix}-source-off') < list(cases).index(f'{prefix}-clear')
+        else:
+            assert f'{prefix}-clear' not in cases
+            assert cases[f'{prefix}-baseline-on']['command'] == 'operator-observation'
+            assert cases[f'{prefix}-baseline-trial']['arguments'] == [
+                '--hardware-validation', 'protection', '--confirm', '--protection-trial',
+                'hardware-power-baseline',
             ]
-            assert cases[f'{prefix}-off']['command'] == 'input-off'
-            assert '--events' in cases[f'{prefix}-events']['arguments']
-            assert cases[f'{prefix}-final']['command'] == 'protection-status'
-            if trial.startswith('software-'):
-                assert cases[f'{prefix}-source-off']['command'] == 'operator-observation'
-                assert list(cases).index(f'{prefix}-source-off') < list(cases).index(f'{prefix}-clear')
-            else:
-                assert f'{prefix}-clear' not in cases
-                assert cases[f'{prefix}-baseline-on']['command'] == 'operator-observation'
-                assert cases[f'{prefix}-baseline-trial']['arguments'] == [
-                    '--hardware-validation', 'protection', '--confirm', '--protection-trial',
-                    'hardware-power-baseline',
-                ]
-                assert cases[f'{prefix}-baseline-off']['command'] == 'input-off'
-                baseline_start = list(cases).index(f'{prefix}-cc') + 1
-                assert list(cases)[baseline_start:baseline_start + 5] == [
-                    f'{prefix}-{step}' for step in ('baseline-on', 'baseline-trial', 'baseline-off', 'set', 'on')
-                ]
-        for group in ('software-power', 'hardware-power'):
-            assert cases[f'protection-default-{group}-set']['arguments'][-2:] == ['--restore-defaults', group]
+            assert cases[f'{prefix}-baseline-off']['command'] == 'input-off'
+            baseline_start = list(cases).index(f'{prefix}-cc') + 1
+            assert list(cases)[baseline_start:baseline_start + 5] == [
+                f'{prefix}-{step}' for step in ('baseline-on', 'baseline-trial', 'baseline-off', 'set', 'on')
+            ]
+    for group in ('software-power', 'hardware-power'):
+        assert cases[f'protection-default-{group}-set']['arguments'][-2:] == ['--restore-defaults', group]
 
 
 @pytest.mark.parametrize('extra', [['-SourceCurrentLimitA', '1'], ['-SourceVoltageLimitV', '6']])
@@ -393,11 +405,9 @@ def test_cr_led_slow_rise_offline_preflight(run_script):
 
 @pytest.mark.parametrize('modes', [('cr-led',), ('current-slow-rise',), ('cr-led', 'current-slow-rise')])
 def test_cr_led_slow_rise_script_plans_and_refuses_unattended(run_script, modes):
-    selection = ['-Modes', ','.join(modes)]
-    for args, expected in [(selection + ['-PlanOnly'], 'PLAN ONLY'), (selection, 'BLOCKED')]:
-        result = run_script(args)
-        report = assert_report(result, expected, modes)
-        assert all(case['command'] != 'input-on' for case in report['cases'])
+    result = run_script(['-Modes', ','.join(modes)])
+    report = assert_report(result, 'BLOCKED', modes)
+    assert all(case['command'] != 'input-on' for case in report['cases'])
     assert 'requires an interactive console' in result.stdout
 
 
@@ -405,15 +415,6 @@ def test_fixed_slew_von_short_offline_preflight(run_script):
     result = run_script(['-FixedSlewVonShortOnly'], preflight=True)
     assert result.returncode == 0, result.stdout + result.stderr
     assert 'PASS: Fixed CC Slew, VON and Short preflight' in result.stdout
-
-
-def test_fixed_auto_script_plan_uses_core_resolution_and_original_values(run_script):
-    resistance = '10.000000000000000001'
-    result = run_script(['-PlanOnly', '-Modes', 'cv,cr', '-Voltage', '12.0000',
-                         '-ResistanceHigh', resistance])
-    report = assert_report(result, 'PLAN ONLY', ('cv', 'cr'))
-    setup = next(case for case in report['cases'] if case['name'] == 'cr-auto-high-setup')
-    assert setup['arguments'][setup['arguments'].index('--resistance') + 1] == resistance
 
 
 @pytest.mark.parametrize('current', ['0', '3', '0.1000000000000000001'])
@@ -424,24 +425,58 @@ def test_fixed_auto_script_current_bounds_and_no_rounding(run_script, current):
 
 
 @pytest.mark.parametrize('selection,modes', [
-    ('cc', ('cc',)), ('cv', ('cv',)), ('cr', ('cr',)), ('cw', ('cw',)),
-    ('transient-cc', ('transient-cc',)),
+    ('cv', ('cv',)), ('cr', ('cr',)), ('cw', ('cw',)),
     ('transient-cv', ('transient-cv',)), ('transient-cr', ('transient-cr',)),
-    ('transient-cw', ('transient-cw',)),
-    ('cc,transient-cc', ('cc', 'transient-cc')),
-    ('CV,cc,cv', ('cc', 'cv')),
+    ('transient-cw', ('transient-cw',)), ('CV,cc,cv', ('cc', 'cv')),
 ])
 def test_hardware_script_mode_plans(run_script, selection, modes):
-    extra = ['-PlanOnly'] + (['-Modes', selection] if selection is not None else [])
+    token = '0.000020000000000000000001'
+    extra = ['-PlanOnly', '-Modes', selection]
+    if selection == 'cv':
+        # CC and Transient CC settings must not affect a CV-only plan.
+        extra += ['-Current', '3', '-LevelA', '3']
+    resistance = '10.000000000000000001'
+    if selection == 'cr':
+        extra += ['-ResistanceHigh', resistance]
+    if selection == 'CV,cc,cv':
+        extra += ['-Voltage', '12.0000']
+    if selection.startswith('transient-'):
+        extra += ['-WidthA', token, '-PulseWidth', token]
+    if selection == 'transient-cv':
+        extra += ['-Verbose']
     result = run_script(extra)
     report = assert_report(result, 'PLAN ONLY', modes)
+    cases = {case['name']: case for case in report['cases']}
     if selection == 'cv':
         assert report['declared_source_limits']['current_a'] == 0.8
         assert report['declared_source_limits']['voltage_v'] == 5
-    if selection == 'cc,transient-cc':
-        assert 'Selected modes:' in result.stdout
-        assert 'transient-continuous-auto-setup:' not in result.stdout
-        assert '--validation-settings-json' not in result.stdout
+        for name in ('cv-low-setup', 'cv-high-setup'):
+            args = cases[name]['arguments']
+            assert args[args.index('--voltage') + 1] == '3'
+    if selection == 'cr':
+        args = cases['cr-auto-high-setup']['arguments']
+        assert args[args.index('--resistance') + 1] == resistance
+    if selection == 'CV,cc,cv':
+        args = cases['cv-auto-setup']['arguments']
+        assert args[args.index('--voltage') + 1] == '12.0000'
+    if selection.startswith('transient-'):
+        scope = selection.removeprefix('transient-')
+        case = cases[f'transient-{scope}-continuous-setup']
+        assert case['arguments'][case['arguments'].index('--width-a') + 1] == token
+        if scope in ('cv', 'cr'):
+            assert case['expected_range'] == ('low' if scope == 'cv' else 'high')
+        for case in cases.values():
+            assert '--rise-slew' not in case['arguments'] and '--fall-slew' not in case['arguments']
+            if case['command'] == 'set-transient-cw':
+                assert '--range' not in case['arguments']
+    if selection == 'transient-cv':
+        for name in ('transient-cv-continuous-setup', 'transient-cv-pulse-setup',
+                     'transient-cv-toggle-setup'):
+            args = cases[name]['arguments']
+            assert args[args.index('--level-a') + 1] == '3'
+            assert args[args.index('--level-b') + 1] == '4'
+        assert 'transient-cv-continuous-setup:' in result.stdout
+        assert '--validation-settings-json' in result.stdout
         assert result.stdout.count('Report: ') == 1
 
 
@@ -458,6 +493,7 @@ def test_default_usb_and_explicit_asrl_full_plan_share_the_matrix(run_script):
         assert report['connection'] == connection and report['resource'] == '<redacted>'
         assert report['overall_status'] == 'PLAN ONLY' and report['hardware_touched'] is False
         assert report['prechecks']['identify'] == 'NOT RUN'
+        assert report['prechecks']['plan'] == 'PASS'
         for case in report['cases']:
             arguments = case.get('arguments', [])
             for index, argument in enumerate(arguments):
@@ -490,19 +526,26 @@ def test_default_usb_and_explicit_asrl_full_plan_share_the_matrix(run_script):
     for mode in expected[-3:]:
         assert names.count(f'{mode}-simulation') == 1
         assert names.index(f'{mode}-simulation') < names.index('input-state')
-
-
-def test_plan_only_verbose_steps(run_script):
-    verbose = run_script(['-PlanOnly', '-Verbose', '-Modes', 'transient-cv'])
-    assert verbose.returncode == 0, verbose.stdout + verbose.stderr
-    assert 'transient-cv-continuous-setup:' in verbose.stdout
-    assert '--validation-settings-json' in verbose.stdout
-    assert verbose.stdout.count('Report: ') == 1
+    by_name = {case['name']: case for case in cases}
+    for name in ('fixed-slew-status', 'von-status', 'short-status', 'average-status'):
+        case = by_name[name]
+        assert case['readback_comparison'] == 'NOT RUN'
+        assert 'expected_readback' not in case and case['condition']
 
 
 def test_hardware_script_powershell_mode_array(run_script):
-    result = run_script(['-PlanOnly'], mode_array='cc,transient-cc')
-    assert_report(result, 'PLAN ONLY', ('cc', 'transient-cc'))
+    override = run_script([
+        '-PlanOnly', '-Current', '1',
+        '-LevelA', '0.9', '-LevelB', '1',
+        '-SourceCurrentLimitA', '1.2', '-SourceVoltageLimitV', '12',
+    ], mode_array='cc,transient-cc')
+    report = assert_report(override, 'PLAN ONLY', ('cc', 'transient-cc'))
+    assert report['declared_source_limits']['current_a'] == 1.2
+    assert report['declared_source_limits']['voltage_v'] == 12
+    assert 'Selected modes:' in override.stdout
+    assert 'transient-continuous-auto-setup:' not in override.stdout
+    assert '--validation-settings-json' not in override.stdout
+    assert override.stdout.count('Report: ') == 1
 
 
 @pytest.mark.parametrize('selection', ['unknown', 'cc,unknown', '', 'full,cc'])
@@ -515,18 +558,10 @@ def test_hardware_script_invalid_modes(run_script, selection):
 
 @pytest.mark.parametrize('selection', ['cc', 'transient-cc'])
 def test_hardware_script_unattended_refusal(run_script, selection):
-    result = run_script(['-Modes', selection])
+    extra = ['-LevelA', '3'] if selection == 'cc' else []
+    result = run_script(['-Modes', selection, *extra])
     assert_report(result, 'BLOCKED', (selection,))
     assert 'requires an interactive console' in result.stdout
-
-
-def test_hardware_script_selected_parameter_checks(run_script):
-    # Unselected Transient settings do not affect CC-only planning.
-    assert_report(run_script(['-PlanOnly', '-Modes', 'cc', '-LevelA', '3'], source_limits=False),
-                  'PLAN ONLY', ('cc',))
-    # A CV-only plan does not validate CC/Transient-only settings.
-    assert_report(run_script(['-PlanOnly', '-Modes', 'cv', '-Current', '3', '-LevelA', '3']),
-                  'PLAN ONLY', ('cv',))
 
 
 @pytest.mark.parametrize('parameter,value', [
@@ -555,50 +590,11 @@ def test_hardware_script_current_respects_source_limit(run_script, selection, ex
     assert 'Report:' not in result.stdout
 
 
-def test_hardware_script_source_override_and_cv_defaults(run_script):
-    override = run_script([
-        '-PlanOnly', '-Modes', 'cc,transient-cc', '-Current', '1',
-        '-LevelA', '0.9', '-LevelB', '1',
-        '-SourceCurrentLimitA', '1.2', '-SourceVoltageLimitV', '12',
-    ])
-    report = assert_report(override, 'PLAN ONLY', ('cc', 'transient-cc'))
-    assert report['declared_source_limits']['current_a'] == 1.2
-    assert report['declared_source_limits']['voltage_v'] == 12
-
-    cv = assert_report(run_script(['-PlanOnly', '-Modes', 'cv,transient-cv']),
-                       'PLAN ONLY', ('cv', 'transient-cv'))
-    cases = {case['name']: case for case in cv['cases']}
-    for name in ('cv-low-setup', 'cv-high-setup'):
-        args = cases[name]['arguments']
-        assert args[args.index('--voltage') + 1] == '3'
-    for name in ('transient-cv-continuous-setup', 'transient-cv-pulse-setup',
-                 'transient-cv-toggle-setup'):
-        args = cases[name]['arguments']
-        assert args[args.index('--level-a') + 1] == '3'
-        assert args[args.index('--level-b') + 1] == '4'
-
-
 def test_transient_offline_preflight(run_script):
     result = run_script(['-TransientOnly'], preflight=True)
     assert result.returncode == 0, result.stdout + result.stderr
     for mode in ('cv', 'cr', 'cw'):
         assert f'PASS: set-transient-{mode}' in result.stdout
-
-
-def test_new_transient_script_precision_and_core_auto_selection(run_script):
-    token = '0.000020000000000000000001'
-    result = run_script(['-PlanOnly', '-Modes', 'transient-cv,transient-cr,transient-cw',
-                         '-WidthA', token, '-PulseWidth', token])
-    report = assert_report(result, 'PLAN ONLY', ('transient-cv', 'transient-cr', 'transient-cw'))
-    cases = {case['name']: case for case in report['cases']}
-    for scope, resolved in (('cv', 'low'), ('cr', 'high')):
-        case = cases[f'transient-{scope}-continuous-setup']
-        assert case['expected_range'] == resolved
-        assert case['arguments'][case['arguments'].index('--width-a') + 1] == token
-    for case in cases.values():
-        assert '--rise-slew' not in case['arguments'] and '--fall-slew' not in case['arguments']
-        if case['command'] == 'set-transient-cw':
-            assert '--range' not in case['arguments']
 
 
 @pytest.mark.parametrize('scope,args', [
@@ -619,15 +615,15 @@ def test_input_timer_offline_preflight(run_script):
     assert 'PASS: Input Timer preflight' in result.stdout
 
 
-@pytest.mark.parametrize('planned', [True, False])
-def test_input_timer_script_plan_and_live_refusal(run_script, planned):
-    result = run_script(['-InputTimerOnly', *(['-PlanOnly'] if planned else [])])
-    assert result.returncode == (0 if planned else 2), result.stdout + result.stderr
+def test_input_timer_script_plan_and_live_refusal(run_script):
+    result = run_script(['-InputTimerOnly'])
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert 'requires an interactive console' in result.stdout
     paths = re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)
     assert paths
     text = Path(paths[-1]).read_text(encoding='utf-8-sig')
     report = json.loads(text)
-    assert report['overall_status'] == ('PLAN ONLY' if planned else 'BLOCKED')
+    assert report['overall_status'] == 'BLOCKED' and report['prechecks']['plan'] == 'PASS'
     assert report['hardware_touched'] is False
     assert report['summary_counts']['passed'] == report['summary_counts']['failed'] == 0
     assert all(c['status'] == 'NOT RUN' for c in report['cases'])
@@ -641,6 +637,9 @@ def test_input_timer_script_plan_and_live_refusal(run_script, planned):
     assert '--confirm' in on['arguments'] and 'input-timer' in on['arguments']
     assert report['declared_source_limits']['current_a'] == 0.8
     assert report['declared_source_limits']['voltage_v'] == 5
+    cases = {case['name']: case for case in report['cases']}
+    assert '10 s cutoff' in cases['timer-on']['condition']
+    assert 'SCPI ON write start' in cases['timer-expiry']['condition']
 
 
 @pytest.mark.parametrize('extra', [['-Modes', 'cc'], ['-TimerSeconds', '0'],
@@ -655,21 +654,22 @@ def test_input_timer_script_invalid_settings_and_selection(run_script, extra):
 
 
 def test_input_timer_is_also_selectable_with_modes(run_script):
-    result = run_script(['-PlanOnly', '-Modes', 'input-timer'])
+    result = run_script(['-PlanOnly', '-Modes', 'input-timer', '-TimerSeconds', '3'])
     assert result.returncode == 0, result.stdout + result.stderr
     report_path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)[-1])
     report = json.loads(report_path.read_text(encoding='utf-8-sig'))
     names = [case['name'] for case in report['cases']]
     assert 'timer-on' in names and 'timer-disable' in names
     assert 'trigger-snapshot' not in names and 'set-cc-high' not in names
+    assert report['overall_status'] == 'PLAN ONLY' and report['prechecks']['plan'] == 'PASS'
     assert report['hardware_touched'] is False
     assert all(case['status'] == 'NOT RUN' for case in report['cases'])
     cases = {case['name']: case for case in report['cases']}
     assert '10 s cutoff' in cases['timer-on']['condition']
     assert 'SCPI ON write start' in cases['timer-expiry']['condition']
+    args = cases['timer-setup']['arguments']
+    assert args[args.index('--seconds') + 1] == '3'
 
-    preview = run_script(['-PlanOnly', '-Modes', 'input-timer', '-TimerSeconds', '3'])
-    assert preview.returncode == 0, preview.stdout + preview.stderr
     refused = run_script(['-Modes', 'input-timer', '-TimerSeconds', '3'])
     assert refused.returncode == 2, refused.stdout + refused.stderr
     assert 'cutoff applies only to the 5 s Timer trial' in refused.stdout
@@ -1218,12 +1218,13 @@ def test_trace_validation_preflight_only(run_script):
 
 
 def test_trace_validation_script_plan_only_and_noninteractive_refusal(run_script):
-    planned = run_script(['-PlanOnly', '-Modes', 'trace'])
-    assert planned.returncode == 0, planned.stdout + planned.stderr
+    planned = run_script(['-Modes', 'trace'])
+    assert planned.returncode == 2, planned.stdout + planned.stderr
+    assert 'requires an interactive console' in planned.stdout
     paths = re.findall(r'Report: (.+?/shareable/report\.json)', planned.stdout)
     assert paths, planned.stdout
     report = json.loads(Path(paths[-1]).read_text(encoding='utf-8-sig'))
-    assert report['overall_status'] == 'PLAN ONLY'
+    assert report['overall_status'] == 'BLOCKED' and report['prechecks']['plan'] == 'PASS'
     assert report['hardware_touched'] is False
     assert report['trace_start_deadline_ms'] == 120000
     cases = {case['name']: case for case in report['cases']}
@@ -1246,18 +1247,16 @@ def test_trace_validation_script_plan_only_and_noninteractive_refusal(run_script
     assert RESOURCE not in Path(paths[-1]).read_text(encoding='utf-8-sig')
     assert not (Path(paths[-1]).parents[1] / 'trace-powered.csv').exists()
 
-    refused = run_script(['-Modes', 'trace'])
-    assert refused.returncode == 2, refused.stdout + refused.stderr
-    assert 'requires an interactive console' in refused.stdout
-
 
 def test_trigger_validation_script_plan_and_noninteractive_refusal(run_script):
-    plan = run_script(['-Modes', 'trigger', '-PlanOnly'])
-    assert plan.returncode == 0, plan.stdout + plan.stderr
+    plan = run_script(['-Modes', 'trigger'])
+    assert plan.returncode == 2, plan.stdout + plan.stderr
+    assert 'requires an interactive console' in plan.stdout
     report_path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', plan.stdout)[-1])
     text = report_path.read_text(encoding='utf-8-sig')
     report = json.loads(text)
-    assert report['overall_status'] == 'PLAN ONLY' and report['hardware_touched'] is False
+    assert report['overall_status'] == 'BLOCKED' and report['hardware_touched'] is False
+    assert report['prechecks']['plan'] == 'PASS'
     assert report['trigger_restore_status'] == 'NOT RUN'
     assert RESOURCE not in text and not (report_path.parents[1] / 'private').exists()
     cases = {entry['name']: entry for entry in report['cases']}
@@ -1300,8 +1299,6 @@ def test_trigger_validation_script_plan_and_noninteractive_refusal(run_script):
                   ['-TriggerObservationSeconds', '40', '-TriggerListWidthA', '20', '-TriggerListWidthB', '20']):
         refused_plan = run_script(['-Modes', 'trigger', '-PlanOnly', *flags])
         assert refused_plan.returncode == 2, refused_plan.stdout + refused_plan.stderr
-    refused = run_script(['-Modes', 'trigger'])
-    assert refused.returncode == 2 and 'requires an interactive console' in refused.stdout
     mixed = run_script(['-Modes', 'transient-cc,trigger', '-PlanOnly'])
     assert mixed.returncode == 0, mixed.stdout + mixed.stderr
     mixed_report_path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', mixed.stdout)[-1])
@@ -1345,13 +1342,13 @@ def test_configuration_readback_script_plan_and_noninteractive_refusal(run_scrip
     assert auto_report['per_command_deadline_ms'] == 30000
     assert all(case.get('deadline_ms', 30000) == 30000 for case in auto_report['cases'])
     for options, status in [(['-PlanOnly', *baseline], 'PLAN ONLY'),
-                            (['-PlanOnly'], 'PLAN ONLY'),
                             (['-ExpectedRiseSlew', '0.1'], 'BLOCKED')]:
         result = run_script(['-Modes', 'readback', *options])
         assert result.returncode == (0 if status == 'PLAN ONLY' else 2), result.stdout + result.stderr
         path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)[-1])
         report = json.loads(path.read_text(encoding='utf-8-sig'))
         assert report['overall_status'] == status and report['hardware_touched'] is False
+        assert report['prechecks']['plan'] == 'PASS'
         assert [case['command'] for case in report['cases'][:1]] == ['input-state']
         assert [case['name'] for case in report['cases']] == expected
         assert [case['command'] for case in report['cases'][3:7]] == ['fixed-status'] * 4
@@ -1368,31 +1365,30 @@ def test_configuration_readback_script_plan_and_noninteractive_refusal(run_scrip
             assert 'requires an interactive console' in result.stdout
 
 
-@pytest.mark.parametrize("plan_only", [True, False])
-def test_sequence_plan_or_noninteractive_refusal(run_script, plan_only):
-    result = run_script(["-Modes", "sequence", *(["-PlanOnly"] if plan_only else [])])
-    assert result.returncode == (0 if plan_only else 2), result.stdout + result.stderr
+def test_sequence_plan_or_noninteractive_refusal(run_script):
+    result = run_script(["-Modes", "sequence"])
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "requires an interactive console" in result.stdout
     paths = re.findall(r"Report: (.+?/shareable/report\.json)", result.stdout)
     assert paths, result.stdout + result.stderr
     path = Path(paths[-1])
     report_text = path.read_text(encoding="utf-8-sig")
     report = json.loads(report_text)
-    assert report["overall_status"] == ("PLAN ONLY" if plan_only else "BLOCKED")
+    assert report["overall_status"] == "BLOCKED" and report["prechecks"]["plan"] == "PASS"
     assert not report["hardware_touched"]
     assert RESOURCE not in report_text and not (path.parents[1] / "private").exists()
     assert all(case["status"] == "NOT RUN" for case in report["cases"])
-    if plan_only:
-        cases = report["cases"][2:]
-        assert [case["name"] for case in cases] == ["sequence-cc", "sequence-cv", "sequence-cr", "sequence-cw"]
-        assert report["per_command_deadline_ms"] == 30000 and report["total_deadline_ms"] == 900000
-        for case in cases:
-            assert "<redacted>" in case["arguments"] and "--confirm" in case["arguments"]
-            actions = [step["action"] for step in case["sequence_plan"]]
-            assert actions == [
-                case["name"].replace("sequence-", "set-"), "input-on", "input-state",
-                "wait", "measure", "input-off", "input-state",
-            ]
-            assert case["sequence_plan"][3]["arguments"] == {"seconds": "0.25"}
+    cases = report["cases"][2:]
+    assert [case["name"] for case in cases] == ["sequence-cc", "sequence-cv", "sequence-cr", "sequence-cw"]
+    assert report["per_command_deadline_ms"] == 30000 and report["total_deadline_ms"] == 900000
+    for case in cases:
+        assert "<redacted>" in case["arguments"] and "--confirm" in case["arguments"]
+        actions = [step["action"] for step in case["sequence_plan"]]
+        assert actions == [
+            case["name"].replace("sequence-", "set-"), "input-on", "input-state",
+            "wait", "measure", "input-off", "input-state",
+        ]
+        assert case["sequence_plan"][3]["arguments"] == {"seconds": "0.25"}
 
 
 def test_sequence_focused_preflight(run_script):
@@ -1450,8 +1446,10 @@ def test_system_query_focused_plan(run_script):
     assert all(case['arguments'] == ['--hardware-validation', 'system-query'] for case in cases)
 
 
-@pytest.mark.parametrize('plan_only', [True, False])
-@pytest.mark.parametrize('connection,resource', [('usb', None), ('usb', RESOURCE), ('asrl', ASRL)])
+@pytest.mark.parametrize('plan_only,connection,resource', [
+    (True, 'usb', None),
+    (False, 'usb', None), (False, 'usb', RESOURCE), (False, 'asrl', ASRL),
+])
 def test_workflow_only_stays_offline_with_optional_connection(run_script, plan_only, connection, resource):
     result = run_script(['-Connection', connection, '-Modes', 'workflow',
                          *(['-PlanOnly'] if plan_only else [])], resource=resource)
@@ -1478,7 +1476,6 @@ def test_workflow_only_stays_offline_with_optional_connection(run_script, plan_o
     ('measurement-extensions', 'usb', RESOURCE, True),
     ('auxiliary-controls', 'usb', RESOURCE, True),
     ('list-cc', 'usb', RESOURCE, False),
-    ('list-cc', 'usb', RESOURCE, True),
     ('list-cc,protection', 'usb', RESOURCE, True),
     ('list-cc,input-timer', 'usb', RESOURCE, True),
     ('sequence,auxiliary-controls,list-cc', 'usb', RESOURCE, True),
@@ -1501,6 +1498,7 @@ def test_explicit_live_extensions_never_use_simulation(run_script, mode, connect
     report = json.loads(path.read_text(encoding='utf-8-sig'))
     assert report['overall_status'] == ('PLAN ONLY' if plan_only else 'BLOCKED')
     assert not report['hardware_touched'] and report['resource'] == '<redacted>'
+    assert report['prechecks']['plan'] == 'PASS'
     assert report['connection'] == connection
     cases = {case['name']: case for case in report['cases']}
     if mode == 'full':

@@ -38,14 +38,20 @@ The existing two Windows jobs partition `test_live_validation_script.py` using
 use the child-process VISA blocker. Default and Trigger preflight retain the
 Windows PowerShell 5.1 boundary; Trigger also retains the existing pwsh check.
 A missing required PowerShell executable fails CI.
-Keep individual and mixed mode selection and refusal contracts, default Full
-USB/ASRL plan equivalence, both full LiveExtensions transport plans, and
-focused LiveExtensions combinations. Consolidate assertions that repeat the
-same invocation without changing the test conditions. Preserve distinct safety
-and error paths. Python Core/CLI/Worker tests own command, sequencing and
-failure behavior; CI does not duplicate these as Linux pseudo-terminal operator
-simulations. Unrelated changes skip the PowerShell checks; packaging changes
-retain the wheel/sdist installation smoke. Skipping a CI job does not imply
+Keep the default preflight's included checks and distinct focused-switch
+entry points; overlapping CLI work alone does not make the entry points
+equivalent. Retain default Full USB/ASRL plan equivalence and both full
+LiveExtensions transport plans with real offline CLI processes. For a focused
+mode whose noninteractive refusal follows successful planning, verify the
+complete plan, NOT RUN cases, privacy and refusal in the same invocation rather
+than repeat the plan just to obtain PLAN ONLY. Keep representative successful
+PlanOnly entry points, single and mixed selection, native mode arrays, explicit
+settings, transport options, and distinct safety, simulation and error paths.
+Check Workflow's standalone PlanOnly without a resource and all optional-resource
+simulation variants; both use the common offline plan. Python Core/CLI/Worker
+tests own command, sequencing and failure behavior; CI does not duplicate these
+as Linux pseudo-terminal operator simulations. Unrelated changes skip the
+PowerShell checks; packaging changes retain the wheel/sdist installation smoke. Skipping a CI job does not imply
 real-instrument validation. Run focused tests from the repository root.
 No CI job is authorized to access physical VISA.
 
