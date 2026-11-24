@@ -9,17 +9,17 @@ No automatic retries, rollback, Input OFF, local switch or error-queue reads.
 
 from datetime import datetime, timezone
 from decimal import Decimal, localcontext
-from time import monotonic_ns
+from time import monotonic_ns, sleep
 
 from . import control as c
 from .errors import LoadError
-from .identity import parse_identity
+from .identity import MODEL_ID, parse_identity
 from .readback import TRANSIENT_LEVEL_QUERIES, fixed_slew_status, transient_mode, transient_values
 from .simulator import ControlSimulator
-from .visa import open_request_session
+from .visa import open_request_session, require_trusted_session, validate_request_connection
 from .trigger import (SOURCE_TOKENS, TRIGGER_COMMANDS, TRIGGER_INTERVAL_QUERY,
-                      TRIGGER_SOURCE_QUERY, read_source, software_trigger, validate_interval,
-                      validate_setup)
+                      TRIGGER_SOURCE_QUERY, read_source, sampled_waveform_evidence,
+                      software_trigger, validate_interval, validate_setup)
 
 
 FUNCTIONS = {"cv": ("VOLT", "VOLTAGE"), "cr": ("RES", "RESISTANCE"),
@@ -615,6 +615,137 @@ def execute_trigger(command, *, mode, resource, source, interval, transient, lis
             else:
                 result = _validation_list(session, command, configuration, trigger, writes, stop)
         return {**result, **marker, "visa": runtime}
+
+
+
+TRIGGER_OBSERVATION_COMMAND = "trigger-observe"
+
+
+def execute_trigger_observation(*, mode, resource, backend, model_id, expected, seconds,
+                                confirmed, deadline_ns=None, asrl=None, on_external_ready=None):
+    """Contributor-only sampling of an already authorized, powered Trigger trial."""
+    if (model_id != MODEL_ID or mode not in {"live", "dry-run"} or type(seconds) is not int
+            or not 1 <= seconds <= 900 or not isinstance(expected, dict)
+            or set(expected) != {"function", "configuration", "trigger"}
+            or not isinstance(expected["trigger"], dict)
+            or set(expected["trigger"]) not in ({"source"}, {"source", "interval_s"})):
+        raise LoadError("argument_error", "Supply the bounded Contributor Trigger observation settings.")
+    trigger = validate_setup(**expected["trigger"])
+    source = trigger["source"]
+    is_list = source in {"BUS", "EXTERNAL"}
+    if source == "MANUAL" or expected["function"] != ("LIST" if is_list else "CC"):
+        raise LoadError("unsupported_live_scope", "Observation is limited to the four Contributor Trigger trials.")
+    config = _finite_list(expected["configuration"]) if is_list else _configuration(
+        "transient-cc", expected["configuration"])
+    if is_list:
+        if len(config["steps"]) != 2:
+            raise LoadError("unsupported_live_scope", "Observation requires the two-step finite LIST trial.")
+        a, b = config["steps"]
+        levels = {"level_a": a["current_a"], "level_b": b["current_a"],
+                  "width_a": a["width_s"], "width_b": b["width_s"], "repeats": config["repeat_count"]}
+        needed = (a["width_s"] + b["width_s"]) * config["repeat_count"]
+        if min(a["current_a"], b["current_a"]) <= 0:
+            raise LoadError("argument_error", "LIST observation requires levels distinguishable from the zero baseline.")
+    else:
+        if config["transient_mode"] != "pulse":
+            raise LoadError("unsupported_live_scope", "Observation requires the Transient CC pulse trial.")
+        levels = {"level_a": config["level_a"], "level_b": config["level_b"], "width_a": config["pulse_width"]}
+        needed = config["pulse_width"]
+        if source == "TIMER":
+            levels["interval"] = trigger["interval_s"]
+            needed += 2 * trigger["interval_s"]
+    if levels["level_a"] == levels["level_b"] or needed > seconds:
+        raise LoadError("argument_error", "Trigger observation needs distinct levels and a sufficient window.")
+    if not confirmed:
+        raise LoadError("confirmation_required", "Authorize the bounded Trigger observation.")
+    validate_request_connection(resource, backend, mode=mode, asrl=asrl, allowed=True)
+    marker = {"validation_only": True, "validation_scope": "trigger"}
+    software = source in {"HOLD", "BUS"}
+    if mode == "dry-run":
+        return {**marker, "hardware_access": False,
+                "planned_writes": ["SYST:REM", software_trigger(source)] if software else [],
+                "queries": ["*IDN?", "FUNC:MODE?", "FUNC?", "INP:STAT?", "TRAN?",
+                            "INP:TIM?", "INP:SHOR:STAT?", TRIGGER_SOURCE_QUERY,
+                            TRIGGER_INTERVAL_QUERY, "MEAS:CURR?",
+                            *(["LIST:RANG?", "LIST:COUN?", "LIST:STEP?", "LIST:LEV? {step}",
+                               "LIST:SLEW? {step}", "LIST:WID? {step}", "CURR?"] if is_list else
+                              ["CURR:RANG?", "CURR:TRAN:MODE?", "CURR:TRAN:ALEV?", "CURR:TRAN:BLEV?",
+                               "CURR:SLEW:POS?", "CURR:SLEW:NEG?", "CURR:TRAN:AWID?"])],
+                "observation_seconds": seconds}
+    now = monotonic_ns()
+    if (type(deadline_ns) is not int or deadline_ns <= now
+            or deadline_ns - now > seconds * 10**9):
+        raise LoadError("argument_error", "A current, bounded observation deadline is required.")
+    # The script owns the existing powered trial and OFF reserve. This command
+    # never switches Input ON/OFF or starts a second VISA session.
+    with open_request_session(resource, asrl, c.open_session) as (session, runtime):
+        require_trusted_session(session)
+        parse_identity(c._query(session, "*IDN?"))
+
+        def guard():
+            if monotonic_ns() >= deadline_ns:
+                raise LoadError("trigger_observation_unconfirmed", "Observation deadline reached.", 3)
+            _check_trigger(session, trigger)
+            if c._flag(session, "INP:TIM?") != "OFF" or c._flag(session, "INP:SHOR:STAT?") != "OFF":
+                raise LoadError("unsafe_mode", "Trigger observation requires Timer and Short OFF.")
+            _require_trigger_input_on(session, None, "Trigger observation")
+            if is_list:
+                if c._flag(session, "TRAN?") != "OFF":
+                    raise LoadError("unsafe_mode", "LIST observation requires Transient OFF.")
+                _list_snapshot(session, config)
+            else:
+                observed = _snapshot(session, "transient-cc", require_hold=False)
+                _match(observed, config)
+                if not observed["enabled"] or observed["input_state"] != "ON":
+                    raise LoadError("unsafe_mode", "Transient pulse must be enabled with Input ON.")
+
+        guard()
+        if software:
+            c._write(session, "SYST:REM")
+            guard()
+        started = monotonic_ns()
+        samples = []
+
+        def sample():
+            before = monotonic_ns()
+            current = _number(session, "MEAS:CURR?")
+            after = monotonic_ns()
+            if abs(current) > Decimal(str(c.RANGE_LIMITS["high"])):
+                raise LoadError("invalid_response", "Trigger current sample exceeds model bounds.", 3)
+            if after >= deadline_ns:
+                raise LoadError("trigger_observation_unconfirmed", "Current sample arrived after the deadline.", 3)
+            samples.append({"started_s": (before - started) / 1e9, "completed_s": (after - started) / 1e9,
+                            "current_a": float(current)})
+            return current
+
+        baseline = sample()
+        if source != "TIMER":
+            wanted = Decimal(0) if is_list else levels["level_b"]
+            tolerance = min(Decimal("0.01"), abs(levels["level_a"] - levels["level_b"]) / 4)
+            if is_list:
+                tolerance = min(tolerance, levels["level_a"] / 4, levels["level_b"] / 4)
+            if abs(baseline - wanted) > tolerance:
+                raise LoadError("trigger_observation_unconfirmed", "Pre-trigger current baseline was not observed.", 3)
+        if software:
+            if monotonic_ns() >= deadline_ns:
+                raise LoadError("trigger_observation_unconfirmed", "No time remains for software Trigger.", 3)
+            c._write(session, software_trigger(source))
+        elif source == "EXTERNAL" and on_external_ready is not None:
+            on_external_ready()
+        # Leave time for the final state query and process return. An overrun or
+        # lost exchange is still handled by the existing script deadline.
+        while monotonic_ns() + 300_000_000 < deadline_ns and len(samples) < 10000:
+            sample()
+            evidence = sampled_waveform_evidence(samples, source=source, **levels)
+            if evidence is not None:
+                _require_trigger_input_on(session, None, "Trigger observation")
+                if monotonic_ns() >= deadline_ns:
+                    break
+                return {**marker, "visa": runtime, "input_state": "ON", "trigger_source": source,
+                        "waveform_completion_known": True, "observation": evidence, "samples": samples}
+            sleep(min(0.05, max(0, (deadline_ns - monotonic_ns()) / 1e9)))
+        raise LoadError("trigger_observation_unconfirmed", "Current samples did not establish the expected waveform.",
+                        3, sample_count=len(samples), trigger_source=source)
 
 
 def _execute_led_or_slow_rise(command, *, scope, mode, resource, current, resistance,

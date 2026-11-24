@@ -8,6 +8,7 @@ import pytest
 from electronicload_tool_cli import cli
 from electronicload_tool_core import control
 from electronicload_tool_core.errors import LoadError
+from electronicload_tool_core.trigger import sampled_waveform_evidence
 from electronicload_tool_core.simulator import ControlSimulator
 from test_control_core import RESOURCE, session
 from test_hardware_validation import ValidationFake, transient
@@ -133,6 +134,56 @@ def test_readback_list_buffer_without_slot_or_trigger(monkeypatch, capsys):
     assert fake.list_steps == original and fake.mode == "FIX" and not fake.input
     assert not any(call.startswith(("LIST:SAV", "LIST:RCL", "INP ON", "TRIG")) and "?" not in call
                    for call in fake.calls)
+
+
+
+@pytest.mark.parametrize("source,scenario", [
+    ("HOLD", "expected"), ("HOLD", "missing"), ("HOLD", "short"),
+    ("TIMER", "expected"), ("TIMER", "wrong_interval"),
+    ("BUS", "expected"), ("BUS", "wrong_order"), ("EXTERNAL", "expected"),
+    ("HOLD", "sparse"),
+])
+def test_sampled_trigger_evidence_requires_levels_and_time_brackets(source, scenario):
+    is_list = source in {"BUS", "EXTERNAL"}
+    step = 1.0 if scenario == "sparse" else 0.2
+    samples = []
+    for index in range(int(14 / step) + 1):
+        t = index * step
+        current = 0.0 if is_list else 0.2
+        if is_list:
+            if 1 <= t < 3:
+                current = 0.2 if scenario == "wrong_order" else 0.1
+            elif 3 <= t < 5:
+                current = 0.1 if scenario == "wrong_order" else 0.2
+        elif scenario != "missing":
+            starts = [1] if source == "HOLD" else [1, 8 if scenario == "wrong_interval" else 6]
+            if any(start <= t < start + (0.4 if scenario == "short" else 2) for start in starts):
+                current = 0.1
+        samples.append({"started_s": t, "completed_s": t + 0.02, "current_a": current})
+    evidence = sampled_waveform_evidence(
+        samples, source=source, level_a=control._decimal("0.1"), level_b=control._decimal("0.2"),
+        width_a=2, width_b=2 if is_list else None, interval=5 if source == "TIMER" else None,
+    )
+    assert (evidence is not None) == (scenario == "expected")
+    if evidence:
+        assert evidence["events_confirmed"] == (2 if source == "TIMER" else 1)
+
+
+def test_contributor_trigger_observation_plan_and_refusal_before_visa(monkeypatch, capsys):
+    fake = TriggerFake()
+    session(fake, monkeypatch)
+    expected = {"function": "CC", "trigger": {"source": "HOLD"},
+                "configuration": {**transient("pulse", "low"), "pulse_width": "2"}}
+    args = ["trigger-observe", "--hardware-validation", "trigger",
+            "--validation-settings-json", json.dumps(expected), "--observation-seconds", "15",
+            "--resource", RESOURCE, "--json"]
+    assert cli.main(args) == 2 and not fake.calls
+    capsys.readouterr()
+    assert cli.main([*args, "--confirm", "--dry-run"]) == 0
+    plan = json.loads(capsys.readouterr().out)["result"]
+    assert not plan["hardware_access"] and plan["planned_writes"] == ["SYST:REM", "TRIG:IMM"]
+    assert "MEAS:CURR?" in plan["queries"] and not fake.calls
+    assert cli.main([*args, "--confirm"]) == 2 and not fake.calls
 
 
 @pytest.mark.parametrize("function,sources", [
