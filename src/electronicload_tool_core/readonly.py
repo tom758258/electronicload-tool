@@ -3,6 +3,7 @@
 import math
 import re
 
+from .control import MEASUREMENT_VALIDATION_SCOPE
 from .discovery import verify_asrl_identity
 from .errors import LoadError
 from .identity import MODEL_ID, parse_identity
@@ -204,15 +205,19 @@ def execute(
         return execute_readback(command, mode=mode, resource=resource, backend=backend,
                                 model_id=model_id, simulator=simulator,
                                 hardware_validation=hardware_validation, asrl=asrl)
-    if hardware_validation is not None and (
-            hardware_validation != "system-query" or command not in SYSTEM_QUERIES or mode == "simulate"):
-        raise LoadError("argument_error", "System Query contributor validation requires live or dry-run.")
+    validation_commands = {
+        "system-query": SYSTEM_QUERIES,
+        MEASUREMENT_VALIDATION_SCOPE: NATIVE_MEASUREMENTS,
+    }
+    if hardware_validation is not None and (not isinstance(hardware_validation, str)
+            or command not in validation_commands.get(hardware_validation, ()) or mode == "simulate"):
+        raise LoadError("argument_error", "Command does not match a live or dry-run contributor scope.")
     validation_result = ({"validation_only": True, "validation_scope": hardware_validation}
                          if hardware_validation else {})
     if model_id != MODEL_ID:
         raise LoadError("unsupported_model", "The requested model profile is not registered.")
     validate_request_connection(resource, backend, mode=mode, asrl=asrl,
-                                allowed=hardware_validation == "system-query")
+                                allowed=hardware_validation is not None)
     if mode == "dry-run":
         return {
             "queries": (["*IDN?", NATIVE_MEASUREMENTS[command][metric][1]]

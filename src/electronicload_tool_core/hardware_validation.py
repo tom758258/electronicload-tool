@@ -9,6 +9,7 @@ No automatic retries, rollback, Input OFF, local switch or error-queue reads.
 
 from datetime import datetime, timezone
 from decimal import Decimal, localcontext
+from time import monotonic_ns
 
 from . import control as c
 from .errors import LoadError
@@ -28,19 +29,25 @@ FUNCTIONS = {"cv": ("VOLT", "VOLTAGE"), "cr": ("RES", "RESISTANCE"),
 MODES = {"continuous": "CONT", "pulse": "PULS", "toggle": "TOGG"}
 
 
-def _input_timer_snapshot(session):
+def _input_timer_snapshot(session, *, timing=False):
     # IT8800 Programming Guide V2.1 printed pp.45–46, including IT8812C.
     # DELay's command-syntax line omits :DELay; its example and query include it.
     value = _number(session, "INP:TIM:DEL?")
     if value != value.to_integral_value() or not 1 <= value <= 60000:
         raise LoadError("invalid_response", "Invalid Input Timer seconds readback.", 3)
-    return {"seconds": int(value), "enabled": c._flag(session, "INP:TIM?") == "ON",
-            "input_state": c._flag(session, "INP:STAT?"),
-            "state_source": "instrument_readback"}
+    enabled = c._flag(session, "INP:TIM?") == "ON"
+    query_started = monotonic_ns() if timing else None
+    state = c._flag(session, "INP:STAT?")
+    result = {"seconds": int(value), "enabled": enabled, "input_state": state,
+              "state_source": "instrument_readback"}
+    if timing:
+        result["timer_timing"] = {"query_started_ns": query_started,
+                                  "query_completed_ns": monotonic_ns()}
+    return result
 
 
 def execute_input_timer(command, *, mode, resource, seconds, current, range_name,
-                        expected, confirmed, stop, asrl=None):
+                        expected, confirmed, stop, asrl=None, on_write_started=None):
     """CLI-only bounded CC validation. Normal Product/Worker Timer LIVE stays closed."""
     if mode not in {"live", "dry-run"} or command not in {*c.INPUT_TIMER_COMMANDS,
                                                            "input-on", "input-off"}:
@@ -93,7 +100,7 @@ def execute_input_timer(command, *, mode, resource, seconds, current, range_name
                                 power=None, range_name=None, confirmed=False, stop=stop,
                                 allow_cv=False, allow_cr=False, allow_cw=False)
         elif command == "input-timer-status":
-            result = _input_timer_snapshot(session)
+            result = _input_timer_snapshot(session, timing=True)
         else:
             guard(session)
             c._write(session, "SYST:REM")
@@ -101,13 +108,18 @@ def execute_input_timer(command, *, mode, resource, seconds, current, range_name
             _stopping(stop)
             if command == "input-on":
                 try:
+                    on_started = monotonic_ns()
+                    # Notify the validation runner before the VISA call can block.
+                    if on_write_started is not None:
+                        on_write_started(on_started)
                     c._write(session, writes[command])
                     if not c._confirm_input_state(session, "ON"):
                         raise LoadError("input_on_not_confirmed", "Input ON was not confirmed.", 3)
                 except LoadError as exc:
                     exc.details.update(input_state="UNKNOWN", input_on_attempted=True)
                     raise
-                result = {"input_state": "ON"}
+                result = {"input_state": "ON", "timer_timing": {
+                    "on_write_started_ns": on_started, "on_confirmed_ns": monotonic_ns()}}
             else:
                 c._write(session, writes[command])
                 result = _input_timer_snapshot(session)
@@ -425,17 +437,21 @@ def _require_trigger_input_on(session, stop, function):
     _stopping(stop)
 
 
-def _list_writes(configuration):
+def list_program_writes(configuration):
     ceiling = c.RANGE_LIMITS[configuration["range"]]
     steps = configuration["steps"]
-    # Use a known zero fixed-current setting before selecting and arming LIST.
-    writes = ["FUNC:MODE FIX", "FUNC CURR", "CURR 0", f"LIST:RANG {ceiling:g}",
+    writes = [f"LIST:RANG {ceiling:g}",
               f"LIST:COUN {configuration['repeat_count']}", f"LIST:STEP {len(steps)}"]
     for index, step in enumerate(steps, 1):
         writes.extend([f"LIST:LEV {index},{step['current_a']:f}",
                        f"LIST:SLEW {index},{step['slew_a_per_us']:f}",
                        f"LIST:WID {index},{step['width_s']:f}"])
-    return [*writes, "FUNC:MODE LIST"]
+    return writes
+
+
+def _list_writes(configuration):
+    # Use a known zero fixed-current setting before selecting and arming LIST.
+    return ["FUNC:MODE FIX", "FUNC CURR", "CURR 0", *list_program_writes(configuration), "FUNC:MODE LIST"]
 
 
 def _list_snapshot(session, configuration):

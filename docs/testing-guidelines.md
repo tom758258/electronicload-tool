@@ -535,7 +535,38 @@ Use fictional resources with VISA blocked to verify the extension modes alone,
 duplicate selections, mixed noninteractive refusal and Full PlanOnly for USB
 and ASRL. The extension modes run focused Core and CLI tests for native
 measurements and Average, VON/Short/CC Slew, or LIST CC setup/Save/Recall/Exit.
-For Timer expiry, use a controlled clock to verify the retry window and
-Input OFF requirement, and select the affected Fake VISA cases in
-`tests/test_input_timer.py`. Physical expiry remains a separately authorized
-check.
+Check `-LiveExtensions` for explicit single, mixed and Full selection and
+verify that it never falls back to the offline cases. Exercise the contributor
+read-only sampling and measurements and the Input OFF guards for Workflow and
+Average with recording Fake VISA. For the CC trials, verify the write-start
+clock, capacity/voltage outcomes, confirmed OFF within the 10-second limit,
+Stop cleanup and the independent-cutoff notice when communication fails.
+Model an early drop during Timed Load and require the operator's current-trace
+confirmation for script PASS. For isolated settings, cover refusal before
+an unrestorable baseline, display of the private recovery baseline before
+writes, and no blind writes after communication is lost. Cover Short without
+`INP ON`, LIST B before Recall A, and an ignored Save when the slot holds
+a result from a previous run. In PlanOnly, check the safety queries,
+conditional cleanup writes and separate isolated run for a source-connected
+or mode-changing selection. For Timer expiry, use
+a controlled clock for early OFF refusal and
+operator confirmation after cleanup. Use a delayed Fake VISA ON reply to verify
+that the SCPI write-start deadline already applies while the ON subprocess is
+still running. With a process substitute that stays running after termination is
+requested, verify that the operator gets the cutoff prompt at the observation
+deadline and that the script opens no new VISA session during cleanup.
+Select affected Fake VISA cases in `tests/test_input_timer.py`. Physical expiry
+remains a separately authorized check with an independent hardware cutoff.
+
+離線檢查使用虛構 Resource 並阻擋實體 VISA。以 Fake VISA 驗證 Workflow
+和 Average 的 Input OFF 前置。CC 案例核對 SCPI 寫入起點、容量及電壓截止、
+10 秒內確認 OFF、Stop 的清理及通訊失信時的獨立停損提示。Timed Load 模擬
+提前掉載，核對腳本須由操作者確認電流記錄才判為 PASS。隔離設定核對無法還原原值
+時拒絕寫入、寫入前顯示私有復原基準，以及通訊失信後停止寫入。Short 不開啟
+Input。LIST 核對召回 A 前確實為 B，並涵蓋 Save 被忽略且槽內仍為舊結果。
+PlanOnly 核對安全查詢及條件式清理。混選含需接電源或切換模式的試驗時，隔離
+案例須分開執行。Timer 使用可控制的
+時鐘驗證過早 OFF 拒絕與清理完畢後由操作者確認。以 Fake VISA 模擬延遲的
+ON 回覆，驗證 ON 子程序尚在執行時已受 SCPI 寫入起點的期限約束。用收到
+終止要求後仍在執行的程序替身，確認提示在觀察期限到達時發出，且清理時
+未另開 VISA Session。實機到期驗證仍需另行授權及獨立的硬體停損。

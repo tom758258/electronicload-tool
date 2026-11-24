@@ -3,10 +3,13 @@
 import argparse
 import json
 import sys
+from collections.abc import Callable
 from decimal import Decimal, InvalidOperation
 from importlib.metadata import version
 from pathlib import Path
 
+from electronicload_tool_core.contributor_settings import (COMMAND as SETTINGS_COMMAND, TRIALS as SETTINGS_TRIALS,
+                                                          execute as settings_execute)
 from electronicload_tool_core.discovery import discover_resources
 from electronicload_tool_core.errors import LoadError
 from electronicload_tool_core.identity import MODEL_ID
@@ -26,13 +29,14 @@ from electronicload_tool_core.control import (CONTROL_COMMANDS, execute as contr
                                               validate_power, TRANSIENT_FIELDS, LIST_COMMANDS,
                                               FIXED_RANGE_COMMANDS, FIXED_RANGE_CHOICES,
                                               TRANSIENT_SETUP_COMMANDS, AUXILIARY_COMMANDS,
-                                              AVERAGE_COMMANDS, CR_COMMANDS)
+                                              AVERAGE_COMMANDS, CR_COMMANDS, MEASUREMENT_VALIDATION_SCOPE)
 from electronicload_tool_core.trace import (CONFIG_FIELDS, CSV_FIELDS, SAMPLE_FIELDS,
                                            TRACE_COMMANDS, execute as trace_execute)
 from electronicload_tool_core.trigger import TRIGGER_SOURCES
 from electronicload_tool_core.visa import SERIAL_CHOICES, SerialOptions
 from electronicload_tool_core.workflows import (ARGUMENTS as WORKFLOW_ARGUMENTS,
-                                                COMMANDS as WORKFLOW_COMMANDS, MAX_INTERVAL, MAX_SAMPLES,
+                                                COMMANDS as WORKFLOW_COMMANDS, CONTRIBUTOR_SCOPE,
+                                                MAX_INTERVAL, MAX_SAMPLES,
                                                 MIN_INTERVAL, OPERATORS,
                                                 execute as workflow_execute)
 from .json_input import decode_decimal_json
@@ -73,14 +77,20 @@ def _workflow_number(value: str) -> Decimal:
         raise argparse.ArgumentTypeError("Expected a number.") from exc
 
 
-def main(argv: list[str] | None = None) -> int:
+def _show_settings_baseline(settings):
+    print("Settings recovery baseline (private):", json.dumps(settings, default=str), file=sys.stderr, flush=True)
+
+
+def main(argv: list[str] | None = None, *, timer_on_write_started: Callable[[int], None] | None = None,
+         workflow_on_write_started: Callable[[int], None] | None = None, contributor_stop=None,
+         settings_on_baseline=_show_settings_baseline) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     json_output = ("--json" in argv or
                    (argv and argv[0] in (SEQUENCE_COMMAND, *WORKFLOW_COMMANDS)
                     and not {"--help", "-h"}.intersection(argv)))
     mode = "dry-run" if "--dry-run" in argv else "simulate" if "--simulate" in argv else "live"
     command_names = (*COMMANDS, *CONTROL_COMMANDS, *TRACE_COMMANDS, *PROTECTION_COMMANDS, SEQUENCE_COMMAND,
-                     *WORKFLOW_COMMANDS,
+                     *WORKFLOW_COMMANDS, SETTINGS_COMMAND,
                      "list-resources", "manifest", "worker",
                      "send-command", "status", "stop", "wait-ready")
     command = argv[0] if argv and argv[0] in command_names else None
@@ -133,12 +143,29 @@ def main(argv: list[str] | None = None) -> int:
         modes = sub.add_mutually_exclusive_group()
         modes.add_argument("--dry-run", action="store_true")
         modes.add_argument("--simulate", action="store_true")
-        sub.add_argument("--resource", help=("Optional USB INSTR resource for connection option validation."
-                                             if name in WORKFLOW_COMMANDS else
-                                             "Explicit USB INSTR, or ASRL INSTR for contributor validation."))
+        sub.add_argument("--resource", help="Explicit USB INSTR, or ASRL INSTR for contributor validation.")
         sub.add_argument("--backend", default="system")
         sub.add_argument("--model", default=MODEL_ID)
         sub.add_argument("--json", action="store_true")
+        sub.add_argument("--validation-connection", choices=("asrl",),
+                         help="Use explicit ASRL INSTR for standalone contributor validation.")
+        sub.add_argument("--serial-baud-rate", type=int, default=argparse.SUPPRESS)
+        sub.add_argument("--serial-data-bits", type=int, default=argparse.SUPPRESS)
+        for field, choices in SERIAL_CHOICES.items():
+            sub.add_argument("--serial-" + field.replace("_", "-"), choices=tuple(choices),
+                             default=argparse.SUPPRESS)
+        if name == SETTINGS_COMMAND:
+            sub.add_argument("--trial", required=True, choices=SETTINGS_TRIALS)
+            sub.add_argument("--slot", type=int, help="Explicit scratch slot to overwrite for the LIST trial.")
+            sub.add_argument("--previous-slot-width", type=_workflow_number,
+                             help="Previously verified first-step width in seconds for that scratch slot.")
+            sub.add_argument("--confirm-isolated", action="store_true",
+                             help="Confirm source and DUT isolation, Input OFF, and permission to overwrite the specified slot.")
+            continue
+        if name in NATIVE_MEASUREMENTS or name == "set-average" or name in WORKFLOW_COMMANDS:
+            scope = CONTRIBUTOR_SCOPE if name in WORKFLOW_COMMANDS else MEASUREMENT_VALIDATION_SCOPE
+            sub.add_argument("--hardware-validation", choices=(scope,),
+                             help="Explicit CLI-only contributor hardware validation.")
         if name in WORKFLOW_COMMANDS:
             required, optional = WORKFLOW_ARGUMENTS[name]
             choices = {"metric": tuple(BASIC_MEASUREMENTS), "operator": tuple(OPERATORS),
@@ -153,7 +180,7 @@ def main(argv: list[str] | None = None) -> int:
             for field in (*required, *optional):
                 if field == "confirm_input_on":
                     sub.add_argument("--confirm", dest=field, action="store_true",
-                                     help="Confirm simulated Input ON.")
+                                     help="Confirm simulated Input ON or the Contributor source and independent hardware cutoff.")
                 else:
                     sub.add_argument("--" + field.replace("_", "-"), required=field in required,
                                      default=argparse.SUPPRESS, choices=choices.get(field),
@@ -161,13 +188,6 @@ def main(argv: list[str] | None = None) -> int:
             continue
         sub.add_argument("--validation-allow-pending-live-support", action="store_true",
                          help=argparse.SUPPRESS)
-        sub.add_argument("--validation-connection", choices=("asrl",),
-                         help="Use explicit ASRL INSTR for standalone contributor validation.")
-        sub.add_argument("--serial-baud-rate", type=int, default=argparse.SUPPRESS)
-        sub.add_argument("--serial-data-bits", type=int, default=argparse.SUPPRESS)
-        for field, choices in SERIAL_CHOICES.items():
-            sub.add_argument("--serial-" + field.replace("_", "-"), choices=tuple(choices),
-                             default=argparse.SUPPRESS)
         if name in ASRL_READONLY_COMMANDS:
             sub.add_argument("--hardware-validation", choices=(ASRL_READONLY_SCOPE,),
                              help="Explicit CLI-only IT8812C ASRL read-only validation.")
@@ -235,6 +255,8 @@ def main(argv: list[str] | None = None) -> int:
             sub.add_argument("--csv-time-columns", default=argparse.SUPPRESS, metavar="elapsed,delta")
         elif name == "set-average":
             sub.add_argument("--count", required=True, type=int, help="Integer average count, 2 through 16.")
+            sub.add_argument("--confirm", action="store_true",
+                             help="Confirm a contributor hardware Average change.")
         elif name == "set-input-timer":
             sub.add_argument("--seconds", required=True, type=int, help="Integer seconds, 1 through 60000.")
         elif name == "trigger-configure":
@@ -362,8 +384,15 @@ def main(argv: list[str] | None = None) -> int:
             arguments = {field: getattr(args, field) for field in (*required, *optional)
                          if hasattr(args, field)}
             result = workflow_execute(args.command, mode=mode, model_id=args.model,
-                                      backend=args.backend, resource=args.resource, arguments=arguments)
+                                      backend=args.backend, resource=args.resource, arguments=arguments,
+                                      hardware_validation=scope, asrl=asrl, stop=contributor_stop,
+                                      on_write_started=workflow_on_write_started)
             args.json = True
+        elif args.command == SETTINGS_COMMAND:
+            result = settings_execute(args.trial, mode=mode, model_id=args.model, backend=args.backend,
+                                      resource=args.resource, confirmed=args.confirm_isolated, slot=args.slot,
+                                      previous_slot_width=args.previous_slot_width, asrl=asrl, stop=contributor_stop,
+                                      on_baseline=settings_on_baseline)
         elif (args.command in PROTECTION_COMMANDS
               or getattr(args, "hardware_validation", None) == "protection"):
             if getattr(args, "validation_settings_json", None) is not None:
@@ -431,6 +460,7 @@ def main(argv: list[str] | None = None) -> int:
                 count=getattr(args, "count", None),
                 trigger_source=getattr(args, "source", None),
                 trigger_interval=getattr(args, "interval_s", None),
+                timer_on_write_started=timer_on_write_started,
                 asrl=asrl,
             )
         else:

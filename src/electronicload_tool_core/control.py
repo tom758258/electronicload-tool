@@ -3,6 +3,7 @@
 No hidden write retry, automatic input OFF or VISA connection selection.
 """
 
+from collections.abc import Callable
 from decimal import Decimal, InvalidOperation, localcontext
 from datetime import datetime, timezone
 import math
@@ -29,6 +30,7 @@ AUXILIARY_COMMANDS = ("set-von", "von-status", "short-on", "short-off", "short-s
 INPUT_TIMER_COMMANDS = ("set-input-timer", "input-timer-enable", "input-timer-disable",
                         "input-timer-status")
 AVERAGE_COMMANDS = ("set-average", "average-status")
+MEASUREMENT_VALIDATION_SCOPE = "measurement-extensions"
 CR_COMMANDS = ("set-cr", "set-cr-led")
 SLOW_RISE_COMMANDS = ("current-slow-rise-enable", "current-slow-rise-disable",
                       "current-slow-rise-status")
@@ -1207,6 +1209,7 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
             latch: str | None = None, seconds: int | None = None,
             count: int | None = None, vdrop: object | None = None,
             trigger_source: str | None = None, trigger_interval: object | None = None,
+            timer_on_write_started: Callable[[int], None] | None = None,
             asrl=None) -> dict:
     if command not in CONTROL_COMMANDS or mode not in {"live", "simulate", "dry-run"}:
         raise LoadError("argument_error", "Unknown control command or mode.")
@@ -1285,14 +1288,32 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
             return _slow_rise(simulated, command, stop)
     if command in AVERAGE_COMMANDS:
         if (any(value is not None for value in (current, voltage, resistance, power, range_name,
-                transient, hardware_validation, validation_settings, list_configuration, slot,
-                rise_slew, fall_slew, latch, seconds)) or confirmed
+                transient, validation_settings, list_configuration, slot,
+                rise_slew, fall_slew, latch, seconds, vdrop, trigger_source, trigger_interval))
                 or (command == "average-status" and count is not None)):
             raise LoadError("argument_error", "Unexpected Average arguments.")
+        contributor = hardware_validation == MEASUREMENT_VALIDATION_SCOPE and command == "set-average"
+        if hardware_validation is not None and (not contributor or mode == "simulate"):
+            raise LoadError("argument_error", "Average contributor validation requires live or dry-run setup.")
+        if confirmed and not contributor:
+            raise LoadError("argument_error", "Unexpected Average confirmation.")
         if command == "set-average":
             count = validate_average(count)
-        if mode == "live":
+        if contributor and not confirmed:
+            raise LoadError("confirmation_required", "Average setup needs explicit confirmation.")
+        if mode == "live" and not contributor:
             raise LoadError("unsupported_live_scope", "Measurement Average is offline only.")
+        if contributor:
+            marker = {"validation_only": True, "validation_scope": hardware_validation}
+            if mode == "dry-run":
+                return {**marker, "command": command, "hardware_access": False,
+                        "planned_writes": ["SYST:REM", f"SENS:AVER:COUN {count}"],
+                        "queries": ["*IDN?", "INP:STAT?", "INP:STAT?", "SENS:AVER:COUN?"],
+                        "average_count": count}
+            with open_request_session(resource, asrl, open_session) as (session, runtime):
+                require_trusted_session(session)
+                result = _average(session, command, count, stop)
+                return {**result, **marker, "visa": runtime}
         if mode == "dry-run":
             return {"command": command, "hardware_access": False,
                     **({"average_count": count} if count is not None else {})}
@@ -1309,7 +1330,8 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
 
         return execute_input_timer(command, mode=mode, resource=resource, seconds=seconds,
                                    current=current, range_name=range_name, expected=validation_settings,
-                                   confirmed=confirmed, stop=stop, asrl=asrl)
+                                   confirmed=confirmed, stop=stop, asrl=asrl,
+                                   on_write_started=timer_on_write_started)
     if command in INPUT_TIMER_COMMANDS:
         if mode == "live":
             raise LoadError("unsupported_live_scope", "Input Timer is offline only.")

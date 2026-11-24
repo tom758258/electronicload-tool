@@ -31,6 +31,26 @@ def test_average_cli_invalid_count(fake_visa, capsys, args):
     assert json.loads(output.out)['ok'] is False and output.err == ''
     assert fake_visa.calls == []
 
+def test_average_contributor_cli_requires_confirmation_and_input_off(fake_visa, capsys):
+    resource = 'USB0::0xFFFF::0x0001::SYNTHETIC::INSTR'
+    args = ['set-average', '--count', '8', '--resource', resource, '--json']
+    scope = ['--hardware-validation', 'measurement-extensions']
+    assert main([*args, *scope]) == 2
+    assert json.loads(capsys.readouterr().out)['error']['code'] == 'confirmation_required'
+    assert fake_visa.calls == []
+
+    writes = []
+    fake_visa.session.write = writes.append
+    assert main([*args, *scope, '--confirm']) == 2
+    assert json.loads(capsys.readouterr().out)['error']['code'] == 'input_not_off'
+    assert writes == []
+
+    fake_visa.responses.update({'INP:STAT?': '0', 'SENS:AVER:COUN?': '8'})
+    assert main([*args, *scope, '--confirm']) == 0
+    result = json.loads(capsys.readouterr().out)['result']
+    assert result['average_count'] == 8 and result['validation_only']
+    assert writes == ['SYST:REM', 'SENS:AVER:COUN 8']
+
 
 @pytest.mark.parametrize('mode', ['simulate', 'dry-run'])
 @pytest.mark.parametrize('command,field,value,expected', [

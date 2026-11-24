@@ -457,4 +457,5 @@ def test_configuration_readback_fixed_slew_uses_instrument_values(fake_visa):
     with pytest.raises(LoadError) as failure:
         execute("fixed-slew-status", resource=RESOURCE, hardware_validation="readback")
     assert failure.value.code == "invalid_response" and failure.value.exit_code == 3
-    assert failure.value.details == {"query": "CURR:SLEW:NEG?", "range": "low", "observed": "2"}
+    assert failure.value.details == {"query": "CURR:SLEW:NEG?", "range": "low", "observed": "2",
+                                     "minimum": "0.0001", "maximum": "0.25"}

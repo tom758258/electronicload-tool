@@ -56,9 +56,12 @@ def run_script(tmp_path):
                 "$ast = [System.Management.Automation.Language.Parser]::ParseFile("
                 "$source, [ref]$null, [ref]$null)\n"
                 "foreach ($node in $ast.EndBlock.Statements) {\n"
-                "    if ($node.Name -in @('Invoke-ProtectionValidation','Assert-InputOff',"
+                "    if ($node.Name -in @('Invoke-ProtectionValidation','Invoke-ProtectionStep',"
+                "'Get-ProtectionWriteProgress','Assert-InputOff',"
                 "'Assert-ReadbackFields','Fail-Case','Invoke-TimerExpiry','Invoke-LiveCommand',"
-                "'Assert-Runtime','Save-Report')) {\n"
+                "'Get-TimerMonotonicNs','Get-TimerRemainingMs','Get-TimerObservationDeadlineNs',"
+                "'Confirm-TimerExpiry','Confirm-WorkflowLoad','Assert-Runtime','Save-Report',"
+                "'New-CliProcessInfo','New-LiveCliProcess')) {\n"
                 "        Invoke-Expression $node.Extent.Text\n"
                 "    }\n}\n" + harness, encoding='utf-8')
             args = [str(harness_path)]
@@ -245,10 +248,15 @@ def test_protection_preflight_and_explicit_mode_report_without_visa(run_script):
 
 
 @pytest.mark.parametrize('extra', [['-SourceCurrentLimitA', '1'], ['-SourceVoltageLimitV', '6']])
-def test_protection_precheck_rejects_overrides(run_script, extra):
-    result = run_script(['-Modes', 'protection', '-PlanOnly', *extra])
+@pytest.mark.parametrize('mode,expected', [
+    ('protection', 'Sequence and Protection require a dedicated 5 V / 0.8 A source.'),
+    ('workflow', 'Contributor Workflow load trials require a dedicated 5 V / 0.8 A source.'),
+])
+def test_source_precheck_rejects_overrides(run_script, mode, expected, extra):
+    opt_in = ['-LiveExtensions'] if mode == 'workflow' else []
+    result = run_script(['-Modes', mode, '-PlanOnly', *opt_in, *extra])
     assert result.returncode == 2
-    assert 'Sequence and Protection require a dedicated 5 V / 0.8 A source.' in result.stdout
+    assert expected in result.stdout
 
 
 @pytest.mark.parametrize('scenario,calls,code', [
@@ -300,6 +308,58 @@ catch {
 """)
     assert result.returncode == 0, result.stdout + result.stderr
     assert json.loads(result.stdout.splitlines()[-1]) == {'calls': calls, 'error_code': code}
+
+def test_protection_defaults_refusal_leaves_restore_not_run(run_script, tmp_path):
+    fake_cli = tmp_path / 'fake_protection_cli.py'
+    fake_cli.write_text(
+        'import json, sys\n'
+        'if sys.argv[1] == "protection-status":\n'
+        '    result = {"visa": {"library": "fake", "manufacturer": "fake"}, "input_state": "OFF"}\n'
+        '    print(json.dumps({"ok": True, "result": result}))\n'
+        '    sys.exit()\n'
+        'details = {"default_rejected_before_write": True, "input_state": "OFF", "confirmed": {},\n'
+        '           "unconfirmed": [], "not_attempted": ["hardware_power_limit"]}\n'
+        'print(json.dumps({"ok": False, "error": {"code": "invalid_response", "details": details}}))\n'
+        'sys.exit(3)\n', encoding='utf-8')
+    result = run_script([], extra_env={
+        'FAKE_PROTECTION_PYTHON': sys.executable, 'FAKE_PROTECTION_CLI': str(fake_cli),
+    }, harness="""
+$script:protectionTrials = @()
+$script:protectionTrusted = $true
+$script:expectedLibrary = 'fake'
+$script:expectedManufacturer = 'fake'
+$script:watch = [Diagnostics.Stopwatch]::StartNew()
+$script:totalDeadlineMs = 900000
+$script:protectionPlans = @(foreach ($group in @('software-power','hardware-power')) {
+    @{name="protection-default-$group-original";command='protection-status';args=@()}
+    @{name="protection-default-$group-set";command='protection-set';args=@()}
+})
+$script:report = @{results=@(foreach ($name in @('start-state','prepare-cc','prepare-cc-readback')) {
+    [ordered]@{name="protection-$name";status='NOT RUN'}
+}) + @(foreach ($step in $script:protectionPlans) {
+    [ordered]@{name=$step.name;status='NOT RUN'}
+})}
+function New-CliProcessInfo([string[]]$Arguments) {
+    $start = [Diagnostics.ProcessStartInfo]::new($env:FAKE_PROTECTION_PYTHON)
+    $start.Arguments = '"{0}" {1}' -f $env:FAKE_PROTECTION_CLI, $Arguments[2]
+    $start.UseShellExecute = $false
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    return $start
+}
+function Restore-Protection { throw 'Unexpected restore after a read-only refusal.' }
+Invoke-ProtectionValidation @{active_mode='fixed';function='CC';input_state='OFF';short_state='OFF'}
+$defaults = $script:report.results | Where-Object { $_.name -like 'protection-default-*' }
+@{statuses=@($defaults | ForEach-Object { $_.status }); codes=@($defaults.error_code);
+  off_unconfirmed=$script:report.protection_input_off_unconfirmed} | ConvertTo-Json -Compress
+""")
+    assert result.returncode == 0, result.stdout + result.stderr
+    evidence = json.loads(result.stdout.splitlines()[-1])
+    assert evidence == {
+        'statuses': ['PASS', 'NOT RUN', 'PASS', 'NOT RUN'],
+        'codes': ['protection_default_out_of_bounds'] * 2,
+        'off_unconfirmed': False,
+    }
 
 
 def test_cr_led_slow_rise_offline_preflight(run_script):
@@ -581,36 +641,67 @@ def test_input_timer_is_also_selectable_with_modes(run_script):
     assert 'trigger-snapshot' not in names and 'set-cc-high' not in names
     assert report['hardware_touched'] is False
     assert all(case['status'] == 'NOT RUN' for case in report['cases'])
+    cases = {case['name']: case for case in report['cases']}
+    assert '10 s cutoff' in cases['timer-on']['condition']
+    assert 'SCPI ON write start' in cases['timer-expiry']['condition']
+
+    preview = run_script(['-PlanOnly', '-Modes', 'input-timer', '-TimerSeconds', '3'])
+    assert preview.returncode == 0, preview.stdout + preview.stderr
+    refused = run_script(['-Modes', 'input-timer', '-TimerSeconds', '3'])
+    assert refused.returncode == 2, refused.stdout + refused.stderr
+    assert 'cutoff applies only to the 5 s Timer trial' in refused.stdout
 
 
 @pytest.mark.parametrize('scenario,checks,status,code', [
-    ('off-after-retry', 2, 'PASS', None),
+    ('off-after-late-write', 3, 'PASS', None),
+    ('external-off', 3, 'FAIL', 'timer_automatic_off_unconfirmed'),
     ('stays-on', 4, 'FAIL', 'timer_expiry_unconfirmed'),
     ('invalid', 1, 'FAIL', 'readback_mismatch'),
     ('late-off', 1, 'FAIL', 'timer_expiry_unconfirmed'),
     ('late-on-confirmation', 0, 'FAIL', 'timer_expiry_unconfirmed'),
+    ('early-off', 1, 'FAIL', 'timer_expiry_early'),
+    ('unconfirmed-timing', 1, 'FAIL', 'timer_timing_unconfirmed'),
 ])
-def test_timer_expiry_requires_off_within_original_window(run_script, scenario, checks, status, code):
+def test_timer_expiry_requires_automatic_off_within_scpi_window(run_script, scenario, checks, status, code):
     result = run_script(['-Scenario', scenario], harness="""
-$script:watch = @{ElapsedMilliseconds=$(if ($Scenario -eq 'late-on-confirmation') { 2001 } else { 500 })}
+$script:watch = @{ElapsedMilliseconds=$(if ($Scenario -eq 'late-on-confirmation') { 9801 } else { 4000 })}
 $script:timerOnStartMs = 0
-$script:timerOnConfirmedMs = 450
+$script:timerOnConfirmedMs = $script:watch.ElapsedMilliseconds
+$script:timerOnTiming = @{on_write_started_ns=4800000000L;on_confirmed_ns=$(
+    if ($Scenario -eq 'late-on-confirmation') { 10801000000L } else { 5000000000L }
+)}
 $script:checks = 0
 $script:perCommandDeadlineMs = 30000
-$TimerSeconds = '1'
+$TimerSeconds = '5'
 $script:report = @{results=@([ordered]@{name='timer-expiry';status='NOT RUN'})}
+function Get-TimerMonotonicNs { 1000000000L + $script:watch.ElapsedMilliseconds * 1000000L }
 function Start-Sleep([int]$Milliseconds) { $script:watch.ElapsedMilliseconds += $Milliseconds }
 function Assert-Runtime($Result, [string]$Name) {}
-function Invoke-LiveCommand([string]$Command, [string]$CaseName, [string[]]$ExtraArgs, [int]$DeadlineMs) {
+function Read-ValidationAnswer {
+    if ($Scenario -eq 'external-off') { 'EXTERNAL' } else { 'AUTO' }
+}
+function Invoke-LiveCommand([string]$Command, [string]$CaseName, [string[]]$ExtraArgs,
+                            [int]$DeadlineMs, [long]$TimerObservationDeadlineNs) {
+    if ($TimerObservationDeadlineNs -ne 10800000000L) { throw 'Unexpected observation deadline.' }
     $script:checks++
-    $script:watch.ElapsedMilliseconds += $(if ($Scenario -eq 'late-off') { 1001 } else { 100 })
+    $queryStarted = Get-TimerMonotonicNs
+    $script:watch.ElapsedMilliseconds += $(if ($Scenario -eq 'late-off') { 2001 } else { 350 })
     $script:report.results[0]['observed_at_ms'] = $script:watch.ElapsedMilliseconds
-    $off = $Scenario -eq 'late-off' -or ($Scenario -eq 'off-after-retry' -and $script:checks -eq 2)
-    return @{result=@{seconds=1;enabled=(-not $off);input_state=$(
+    $script:report.results[0]['observed_at_ns'] = Get-TimerMonotonicNs
+    $off = $Scenario -in @('late-off','early-off') -or
+        ($Scenario -in @('off-after-late-write','external-off') -and $script:checks -eq 3)
+    $timing = if ($Scenario -ne 'unconfirmed-timing') {
+        @{query_started_ns=$queryStarted;query_completed_ns=($queryStarted + 10000000L)}
+    }
+    return @{result=@{seconds=5;enabled=(-not $off);timer_timing=$timing;input_state=$(
         if ($off) { 'OFF' } elseif ($Scenario -eq 'invalid') { 'UNKNOWN' } else { 'ON' }
     )}}
 }
-try { Invoke-TimerExpiry @{name='timer-expiry';command='input-timer-status';args=@()} }
+try {
+    Invoke-TimerExpiry @{name='timer-expiry';command='input-timer-status';args=@()}
+    if ($script:report.results[0].status -ne 'NOT RUN') { throw 'Expiry was marked before operator confirmation.' }
+    Confirm-TimerExpiry
+}
 catch { if ($script:report.results[0].status -ne 'FAIL') { throw } }
 $entry = $script:report.results[0]
 @{checks=$script:checks;status=$entry.status;error_code=$entry.error_code} | ConvertTo-Json -Compress
@@ -624,6 +715,7 @@ $entry = $script:report.results[0]
 @pytest.mark.parametrize('scenario,code', [
     ('late-readback', 'timer_expiry_unconfirmed'),
     ('command-timeout', 'deadline_expired'),
+    ('observation-timeout', 'timer_expiry_unconfirmed'),
 ])
 def test_timer_expiry_preserves_cleanup_when_communication_is_trusted(run_script, tmp_path, scenario, code):
     fake_cli = tmp_path / 'fake_timer_cli.py'
@@ -634,8 +726,9 @@ def test_timer_expiry_preserves_cleanup_when_communication_is_trusted(run_script
         'command = sys.argv[1]\n'
         'result = {"visa": {"library": "fake", "manufacturer": "fake"}, "input_state": "OFF"}\n'
         'if command == "input-timer-status":\n'
-        '    time.sleep(1.2)\n'
-        '    result.update(seconds=1, enabled=True, input_state="ON")\n'
+        '    if sys.argv[2] != "late-readback":\n'
+        '        time.sleep(1.2)\n'
+        '    result.update(seconds=5, enabled=True, input_state="ON")\n'
         'print(json.dumps({"ok": True, "result": result}))\n', encoding='utf-8')
     result = run_script(['-Scenario', scenario], extra_env={
         'FAKE_TIMER_PYTHON': sys.executable, 'FAKE_TIMER_CLI': str(fake_cli),
@@ -650,14 +743,22 @@ $script:triggerSelected = $true
 $script:triggerTrusted = $true
 $inputOnAttempted = $true
 $timerEnableAttempted = $true
-$TimerSeconds = '1'
+$TimerSeconds = '5'
 $script:timerOnStartMs = -1000
 $script:timerOnConfirmedMs = -750
+$script:timerOnTiming = @{on_write_started_ns=1000000000L;on_confirmed_ns=1100000000L}
+$script:clockReads = 0
+function Get-TimerMonotonicNs {
+    $script:clockReads++
+    if ($Scenario -eq 'late-readback' -and $script:clockReads -ge 5) { return 7001000000L }
+    if ($Scenario -eq 'observation-timeout') { return 6600000000L }
+    return 5500000000L
+}
 function New-CliProcessInfo([string[]]$Arguments) {
     $command = $Arguments[2]
     $script:calls += $command
     $start = [Diagnostics.ProcessStartInfo]::new($env:FAKE_TIMER_PYTHON)
-    $start.Arguments = '\"{0}\" {1}' -f $env:FAKE_TIMER_CLI, $command
+    $start.Arguments = '\"{0}\" {1} {2}' -f $env:FAKE_TIMER_CLI, $command, $Scenario
     $start.UseShellExecute = $false
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
@@ -687,6 +788,300 @@ catch {
         assert evidence['calls'] == ['input-timer-status']
         assert evidence['statuses'][1:] == ['NOT RUN'] * 3
         assert 'independent operator action required' in result.stdout
+
+
+@pytest.mark.parametrize('scenario', ['timely', 'late-on', 'late-on-with-trigger'])
+def test_input_timer_on_subprocess_respects_scpi_deadline(run_script, tmp_path, scenario):
+    write_stamp = tmp_path / 'on-write-ns'
+    with (tmp_path / 'sitecustomize.py').open('a', encoding='utf-8') as preload:
+        preload.write("""
+import os
+import sys
+from contextlib import contextmanager
+from time import monotonic_ns, sleep
+
+sys.path.insert(0, str(Path.cwd() / 'tests'))
+from test_hardware_validation import ValidationFake
+from electronicload_tool_core import control, readonly
+
+class TimerFake(ValidationFake):
+    def write(self, command):
+        if command == 'INP ON':
+            Path(os.environ['FAKE_TIMER_WRITE_STAMP']).write_text(str(monotonic_ns()))
+        super().write(command)
+
+    def query(self, command):
+        if self.input and command == 'INP:STAT?' and os.environ['FAKE_TIMER_SCENARIO'] != 'timely':
+            sleep(12)
+        return super().query(command)
+
+@contextmanager
+def fake_session(_resource):
+    fake = TimerFake()
+    fake.current = 1
+    fake.values.update({'INP:TIM:DEL': '5', 'INP:TIM': '1'})
+    if 'input-on' in sys.argv:
+        sleep(0.8)
+    yield fake, {'library': 'fake', 'manufacturer': 'fake'}
+
+control.open_session = readonly.open_session = fake_session
+""")
+    result = run_script(['-Scenario', scenario], extra_env={
+        'FAKE_TIMER_PYTHON': sys.executable, 'FAKE_TIMER_RESOURCE': RESOURCE,
+        'FAKE_TIMER_WRITE_STAMP': str(write_stamp), 'FAKE_TIMER_SCENARIO': scenario,
+    }, harness="""
+$python = $env:FAKE_TIMER_PYTHON
+$repo = (Get-Location).Path
+$script:connectionArgs = @('--resource', $env:FAKE_TIMER_RESOURCE)
+$script:report = @{status='NOT RUN';results=@([ordered]@{name='timer-on';status='NOT RUN'})}
+$script:perCommandDeadlineMs = 30000
+$script:totalDeadlineMs = 900000
+$script:expectedLibrary = 'fake'
+$script:expectedManufacturer = 'fake'
+$script:triggerSelected = $Scenario -eq 'late-on-with-trigger'
+$script:triggerTrusted = $true
+$script:timerPowered = $true
+$inputOnAttempted = $true
+$timerEnableAttempted = $true
+$TimerSeconds = '5'
+$main = $ast.EndBlock.Statements | Where-Object { $null -ne $_.Finally } | Select-Object -Last 1
+$cleanup = $main.Finally.Extent.Text
+$watch = [Diagnostics.Stopwatch]::StartNew()
+$realProcessInfo = ${function:New-CliProcessInfo}
+function New-CliProcessInfo([string[]]$Arguments) {
+    if ($Arguments[2] -ceq 'input-off') { $script:cleanupDispatchedNs = Get-TimerMonotonicNs }
+    & $realProcessInfo $Arguments
+}
+try {
+    $on = Invoke-LiveCommand -Command 'input-on' -CaseName 'timer-on' -ExtraArgs @(
+        '--hardware-validation', 'input-timer', '--confirm', '--validation-settings-json',
+        '{"seconds":5,"range":"high","current":1}')
+} catch {
+    $failureNs = Get-TimerMonotonicNs
+    if ($script:report.results[0].status -ne 'FAIL') { throw }
+    $script:report.status = 'FAIL'
+} finally {
+    . ([scriptblock]::Create($cleanup.Substring(1, $cleanup.Length - 2)))
+}
+@{failure_ns=$failureNs;cleanup_dispatched_ns=$script:cleanupDispatchedNs;
+  timing=$on.result.timer_timing;error_code=$script:report.results[0].error_code;
+  statuses=@($script:report.results | ForEach-Object { $_.status })} | ConvertTo-Json -Compress
+""")
+    assert result.returncode == 0, result.stdout + result.stderr
+    evidence = json.loads(result.stdout.splitlines()[-1])
+    assert write_stamp.exists(), result.stdout + result.stderr
+    write_ns = int(write_stamp.read_text())
+    if scenario == 'timely':
+        assert evidence['statuses'] == ['PASS'] * 4
+        assert evidence['timing']['on_write_started_ns'] <= write_ns <= evidence['timing']['on_confirmed_ns']
+    else:
+        assert evidence['error_code'] == 'timer_expiry_unconfirmed'
+        if scenario == 'late-on-with-trigger':
+            assert evidence['statuses'] == ['FAIL', 'NOT RUN', 'NOT RUN', 'NOT RUN']
+            assert evidence['cleanup_dispatched_ns'] is None
+            assert 'independent operator action required' in result.stdout
+            handled_ns = evidence['failure_ns']
+        else:
+            assert evidence['statuses'] == ['FAIL', 'PASS', 'PASS', 'PASS']
+            handled_ns = evidence['cleanup_dispatched_ns']
+        # Allow process scheduling overhead while distinguishing a launch-relative timeout
+        # and the late reply from the approved six seconds after the write starts.
+        assert 5.75 <= (handled_ns - write_ns) / 1e9 <= 7.5
+
+
+@pytest.mark.parametrize('scenario,command,deadline,code', [
+    ('Timer', 'input-on', 7_000_000_000, 'timer_expiry_unconfirmed'),
+    ('Workflow', 'cc-timed-load', 11_000_000_000, 'workflow_cleanup_unconfirmed'),
+])
+def test_powered_deadline_notifies_operator_before_waiting_for_stuck_process(run_script, scenario, command, deadline,
+                                                                           code):
+    result = run_script(['-Scenario', scenario], harness="""
+$script:nowNs = 1000000000L
+$case = if ($Scenario -ceq 'Timer') { 'timer-on' } else { 'workflow-cc-timed-load' }
+$command = if ($Scenario -ceq 'Timer') { 'input-on' } else { 'cc-timed-load' }
+$script:report = @{status='NOT RUN';results=@([ordered]@{name=$case;status='NOT RUN'})}
+$script:perCommandDeadlineMs = 30000
+$script:totalDeadlineMs = 900000
+$script:watch = [Diagnostics.Stopwatch]::StartNew()
+$script:timerPowered = $Scenario -ceq 'Timer'
+$inputOnAttempted = $script:timerPowered
+$timerEnableAttempted = $script:timerPowered
+$TimerSeconds = '5'
+$script:calls = @()
+function Get-TimerMonotonicNs { $script:nowNs }
+function New-LiveCliProcess([string[]]$Arguments) {
+    $script:calls += $Arguments[2]
+    $signal = [Text.Encoding]::UTF8.GetBytes("$Scenario INP ON write started: 1000000000`n")
+    $process = [pscustomobject]@{
+        HasExited = $false
+        StandardOutput = [IO.StreamReader]::new([IO.MemoryStream]::new())
+        StandardError = [IO.StreamReader]::new([IO.MemoryStream]::new($signal))
+    }
+    $process | Add-Member ScriptMethod Start { $true }
+    $process | Add-Member ScriptMethod Kill { $script:killNs = Get-TimerMonotonicNs }
+    $process | Add-Member ScriptMethod WaitForExit {
+        param([int]$Milliseconds)
+        $script:nowNs += [long]$Milliseconds * 1000000L
+        $false
+    }
+    $process | Add-Member ScriptMethod Dispose {
+        $this.StandardOutput.Dispose()
+        $this.StandardError.Dispose()
+    }
+    return $process
+}
+function Write-Host([string]$Message) {
+    if ($Message -like '*independent*' -and -not $script:notice) {
+        $script:notice = @{at_ns=(Get-TimerMonotonicNs);status=$script:report.status;
+                           error_code=$script:report.results[0].error_code}
+    }
+    Microsoft.PowerShell.Utility\\Write-Host $Message
+}
+$main = $ast.EndBlock.Statements | Where-Object { $null -ne $_.Finally } | Select-Object -Last 1
+$cleanup = $main.Finally.Extent.Text
+try { Invoke-LiveCommand -Command $command -CaseName $case }
+catch {
+    if (-not $script:report.results[0].error_code) { throw }
+    $script:report.status = 'FAIL'
+} finally {
+    . ([scriptblock]::Create($cleanup.Substring(1, $cleanup.Length - 2)))
+}
+@{notice=$script:notice;kill_ns=$script:killNs;completed_ns=(Get-TimerMonotonicNs);
+  calls=@($script:calls);statuses=@($script:report.results | ForEach-Object { $_.status })} |
+    ConvertTo-Json -Compress
+""")
+    assert result.returncode == 0, result.stdout + result.stderr
+    evidence = json.loads(result.stdout.splitlines()[-1])
+    assert evidence['notice'] == {
+        'at_ns': deadline, 'status': 'FAIL', 'error_code': code,
+    }
+    assert evidence['kill_ns'] == deadline
+    assert evidence['completed_ns'] == deadline + 5_000_000_000
+    assert evidence['calls'] == [command]
+    assert evidence['statuses'] == ['FAIL'] + (['NOT RUN'] * 3 if scenario == 'Timer' else [])
+
+
+def test_contributor_workflow_script_accepts_confirmed_off_within_write_start_deadline(run_script, tmp_path):
+    with (tmp_path / 'sitecustomize.py').open('a', encoding='utf-8') as preload:
+        preload.write("""
+import sys
+from contextlib import contextmanager
+
+sys.path.insert(0, str(Path.cwd() / 'tests'))
+from test_hardware_validation import ValidationFake
+from electronicload_tool_core import workflows
+
+@contextmanager
+def fake_session(_resource):
+    fake = ValidationFake()
+    fake.range = 6
+    fake.query_delay = 0.15
+    fake.values.update({'INP:TIM': '0', 'MEAS:CURR': '0.1'})
+    yield fake, {'library': 'fake', 'manufacturer': 'fake'}
+
+workflows.open_session = fake_session
+""")
+    result = run_script([], extra_env={'FAKE_WORKFLOW_PYTHON': sys.executable, 'FAKE_WORKFLOW_RESOURCE': RESOURCE},
+                        harness="""
+$python = $env:FAKE_WORKFLOW_PYTHON
+$repo = (Get-Location).Path
+$script:connectionArgs = @('--resource', $env:FAKE_WORKFLOW_RESOURCE)
+$script:report = @{status='NOT RUN';results=@([ordered]@{name='workflow-cc-timed-load';status='NOT RUN'})}
+$script:perCommandDeadlineMs = 30000
+$script:totalDeadlineMs = 900000
+$watch = [Diagnostics.Stopwatch]::StartNew()
+$response = Invoke-LiveCommand -Command 'cc-timed-load' -CaseName 'workflow-cc-timed-load' -ExtraArgs @(
+    '--hardware-validation', 'workflow', '--current', '0.1', '--range', 'low', '--duration-s', '5', '--confirm')
+$entry = $script:report.results[0]
+$statusBeforeObservation = $entry.status
+$script:observation = ''
+function Read-ValidationAnswer($Prompt, $CaseName, [switch]$DiscardPendingKeys) {
+    $script:prompt = $Prompt
+    return $script:observation
+}
+try { Confirm-WorkflowLoad 'workflow-cc-timed-load' } catch { }
+$unconfirmed = $entry.error_code
+$script:observation = 'TRACE CONFIRMED'
+Confirm-WorkflowLoad 'workflow-cc-timed-load'
+@{result=$response.result;status=$statusBeforeObservation;unconfirmed=$unconfirmed;
+  prompt=$script:prompt;operator_confirmed=$entry.load_duration_confirmed} | ConvertTo-Json -Depth 6 -Compress
+""")
+    assert result.returncode == 0, result.stdout + result.stderr
+    evidence = json.loads(result.stdout.splitlines()[-1])
+    assert evidence['status'] == 'NOT RUN'  # The live script still requires the operator's observation.
+    workflow = evidence['result']
+    assert workflow['stop_reason'] == 'duration_elapsed' and workflow['input_state'] == 'OFF'
+    assert workflow['cleanup']['off_confirmed'] and workflow['load_duration_confirmed'] is False
+    assert 5 <= (workflow['off_write_started_ns'] - workflow['on_write_started_ns']) / 1e9 <= 10
+    assert (workflow['off_confirmed_ns'] - workflow['on_write_started_ns']) / 1e9 <= 10
+    assert evidence['unconfirmed'] == 'workflow_load_unconfirmed'
+    assert 'without an early drop' in evidence['prompt']
+    assert evidence['operator_confirmed'] is True
+
+
+def test_contributor_settings_displays_private_baseline_before_write_and_keeps_it_out_of_report(run_script, tmp_path):
+    with (tmp_path / 'sitecustomize.py').open('a', encoding='utf-8') as preload:
+        preload.write("""
+import os
+import sys
+from contextlib import contextmanager
+
+sys.path.insert(0, str(Path.cwd() / 'tests'))
+from test_hardware_validation import ValidationFake
+from electronicload_tool_core import control
+
+@contextmanager
+def fake_session(_resource):
+    class SettingsFake(ValidationFake):
+        def write(self, command):
+            assert (Path(os.environ['FAKE_SETTINGS_REPORT']) / 'baseline-visible').is_file()
+            super().write(command)
+
+        def query(self, command):
+            if command == 'VOLT:ON?' and self.values['VOLT:LATC'] == '0':
+                raise TimeoutError()
+            return super().query(command)
+
+    fake = SettingsFake()
+    fake.values.update({'INP:TIM': '0', 'VOLT:ON': '0.536', 'VOLT:LATC': '1'})
+    yield fake, {'library': 'fake', 'manufacturer': 'fake'}
+
+control.open_session = fake_session
+""")
+    report_dir = tmp_path / 'report'
+    report_dir.mkdir()
+    result = run_script([], extra_env={'FAKE_SETTINGS_PYTHON': sys.executable, 'FAKE_SETTINGS_RESOURCE': RESOURCE,
+                                       'FAKE_SETTINGS_REPORT': str(report_dir)}, harness="""
+$python = $env:FAKE_SETTINGS_PYTHON
+$repo = (Get-Location).Path
+$script:reportDirectory = $env:FAKE_SETTINGS_REPORT
+$script:connectionArgs = @('--resource', $env:FAKE_SETTINGS_RESOURCE)
+$script:report = @{status='FAIL';prechecks=@{};artifact_mode='minimal';
+    results=@([ordered]@{name='auxiliary-controls-von';command='contributor-settings';status='NOT RUN'})}
+$script:perCommandDeadlineMs = 30000
+$script:totalDeadlineMs = 900000
+$watch = [Diagnostics.Stopwatch]::StartNew()
+function Write-Host($Text) {
+    if ($Text.StartsWith('Settings recovery baseline (private): ')) {
+        New-Item -Path (Join-Path $script:reportDirectory 'baseline-visible') -ItemType File | Out-Null
+    }
+    Microsoft.PowerShell.Utility\\Write-Host $Text
+}
+try {
+    Invoke-LiveCommand -Command 'contributor-settings' -CaseName 'auxiliary-controls-von' -ExtraArgs @(
+        '--trial', 'von', '--confirm-isolated')
+} catch { Write-Host $_.Exception.Message }
+""")
+    assert result.returncode == 0, result.stdout + result.stderr
+    baseline = next(line for line in result.stdout.splitlines() if line.startswith('Settings recovery baseline'))
+    assert json.loads(baseline.split(': ', 1)[1])['threshold_v'] == '0.536'
+    assert 'keep the terminals isolated' in result.stdout, result.stdout + result.stderr
+    assert result.stdout.index(baseline) < result.stdout.index('keep the terminals isolated')
+    report_text = (report_dir / 'shareable/report.json').read_text(encoding='utf-8-sig')
+    case, = json.loads(report_text)['cases']
+    assert case['status'] == 'FAIL' and case['error_code'] == 'settings_restore_unconfirmed'
+    assert case['manual_action_required']
+    assert '0.536' not in report_text and not (report_dir / 'private').exists()
 
 
 def test_input_timer_script_uses_default_source_limits(run_script):
@@ -924,6 +1319,68 @@ def test_workflow_only_stays_offline_with_optional_connection(run_script, plan_o
             'completed', 'condition_met', 'duration_elapsed', 'capacity_cutoff',
         ]
         assert all(case['input_state'] == 'OFF' for case in cases[2:])
+
+
+@pytest.mark.parametrize('mode,connection,resource,plan_only', [
+    ('measurement-extensions', 'usb', RESOURCE, True),
+    ('auxiliary-controls', 'usb', RESOURCE, True),
+    ('list-cc', 'usb', RESOURCE, False),
+    ('list-cc', 'usb', RESOURCE, True),
+    ('list-cc,protection', 'usb', RESOURCE, True),
+    ('list-cc,input-timer', 'usb', RESOURCE, True),
+    ('list-cc,auxiliary-controls', 'asrl', ASRL, True),
+    ('workflow,auxiliary-controls,list-cc,measurement-extensions', 'asrl', ASRL, False),
+    ('full', 'usb', RESOURCE, True),
+    ('full', 'asrl', ASRL, True),
+])
+def test_explicit_live_extensions_never_use_simulation(run_script, mode, connection, resource, plan_only):
+    flags = ['-Modes', mode, '-LiveExtensions', '-Connection', connection]
+    slot = 2 if mode == 'list-cc,auxiliary-controls' else 1
+    if slot != 1:
+        flags += ['-ListScratchSlot', str(slot)]
+    result = run_script([*flags, *(['-PlanOnly'] if plan_only else [])], resource=resource)
+    assert result.returncode == (0 if plan_only else 2), result.stdout + result.stderr
+    path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)[-1])
+    report = json.loads(path.read_text(encoding='utf-8-sig'))
+    assert report['overall_status'] == ('PLAN ONLY' if plan_only else 'BLOCKED')
+    assert not report['hardware_touched'] and report['resource'] == '<redacted>'
+    cases = {case['name']: case for case in report['cases']}
+    if mode == 'full':
+        assert len(report['modes']) == 21
+    assert all(case['status'] == 'NOT RUN' for case in cases.values())
+    assert all(case.get('execution') in (None, 'live') for case in cases.values())
+    if mode in ('full', 'measurement-extensions'):
+        assert 'MEAS:VOLT:MIN?' in cases['measurement-extensions-min-max']['queries']
+        assert 'SENS:AVER:COUN 8' in cases['measurement-extensions-average']['planned_writes']
+    if 'list-cc-settings' in cases:
+        trial = cases['list-cc-settings']
+        assert 'LIST:WID? {step}' in trial['queries']
+        assert f'LIST:SAV {slot}' in trial['planned_writes'] and f'LIST:RCL {slot}' in trial['planned_writes']
+        assert 'CURR:SLEW:STAT?' in trial['queries']
+        assert ['LIST:WID 1,<original>'] in [branch['writes'] for branch in trial['conditional_writes']]
+        restoration = trial['conditional_writes'][-1]['writes']
+        assert {write.split()[0] for write in restoration} == {
+            'LIST:RANG', 'LIST:COUN', 'LIST:STEP', 'LIST:LEV', 'LIST:SLEW', 'LIST:WID',
+        }
+        assert not {'INP ON', '*TRG'}.intersection(trial['planned_writes'], restoration)
+        if mode not in ('list-cc', 'list-cc,auxiliary-controls'):
+            assert trial['error_code'] == 'settings_require_isolated_run'
+        else:
+            assert 'error_code' not in trial
+    if 'auxiliary-controls-von' in cases:
+        assert {'VOLT:ON?', 'VOLT:LATC?'} <= set(cases['auxiliary-controls-von']['queries'])
+        short = cases['auxiliary-controls-short']
+        assert short['planned_writes'] == ['SYST:REM', 'INP:SHOR 1', 'INP:SHOR 0']
+        assert short['conditional_writes'][0]['writes'] == ['SYST:REM', 'INP OFF']
+        assert not any(write.startswith('CURR:RANG ') for write in cases['auxiliary-controls-slew']['planned_writes'])
+    if 'workflow-measure-log' in cases:
+        assert cases['workflow-measure-log']['queries'][:2] == ['*IDN?', 'INP:STAT?']
+        assert cases['workflow-measure-until']['queries'] == ['*IDN?', 'INP:STAT?', 'MEAS:VOLT?']
+        for name in ('workflow-cc-timed-load', 'workflow-cc-discharge'):
+            assert {'INP ON', 'INP OFF'} <= set(cases[name]['planned_writes'])
+            assert {'*IDN?', 'INP:STAT?', 'FUNC:MODE?', 'FUNC?', 'CURR:RANG?', 'CURR?', 'TRAN?',
+                    'INP:SHOR:STAT?', 'INP:TIM?'} <= set(cases[name]['queries'])
+            assert 'error_code' not in cases[name]
 
 
 @pytest.mark.parametrize('mode,commands', [

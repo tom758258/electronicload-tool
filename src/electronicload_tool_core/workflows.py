@@ -1,4 +1,4 @@
-"""Bounded, simulator-only measurement and fixed-CC workflows."""
+"""Bounded measurement and fixed-CC workflows."""
 
 import csv
 import math
@@ -6,16 +6,19 @@ import operator
 from decimal import Decimal
 from pathlib import Path
 from threading import TIMEOUT_MAX
-from time import monotonic, sleep
+from time import monotonic, monotonic_ns, sleep
 
 from . import control
 from .errors import LoadError
 from .hardware_validation import sequence_fixed_setup, sequence_input_on
 from .identity import MODEL_ID, parse_identity
-from .readonly import BASIC_MEASUREMENTS, read_measurement
+from .readonly import BASIC_MEASUREMENTS, QUERIES, read_measurement
 from .simulator import ControlSimulator
-from .visa import require_trusted_session, validate_connection
+from .visa import (open_request_session, open_session, require_trusted_session,
+                   validate_request_connection)
 
+CONTRIBUTOR_SCOPE = "workflow"
+MEASUREMENT_COMMANDS = ("measure-log", "measure-until")
 CC_COMMANDS = ("cc-timed-load", "cc-discharge")
 CC_OPTIONS = ("range", "confirm_input_on")
 ARGUMENTS = {
@@ -32,6 +35,70 @@ MIN_INTERVAL = Decimal("0.001")
 MAX_SAMPLES = 10000
 UNTRUSTED = {"query_failed", "write_failed", "invalid_response", "invalid_range_readback",
              "invalid_identity", "identity_mismatch", "trace_session_untrusted"}
+CONTRIBUTOR_CURRENT = Decimal("0.1")
+CONTRIBUTOR_CAPACITY = Decimal("0.00010")
+CONTRIBUTOR_VOLTAGE = Decimal("4.5")
+CONTRIBUTOR_INTERVAL = Decimal("0.5")
+CONTRIBUTOR_TIMED_SECONDS = 5
+CONTRIBUTOR_DISCHARGE_SECONDS = 6
+CONTRIBUTOR_MAX_ON_SECONDS = 10
+CONTRIBUTOR_IO_TIMEOUT_MS = 500
+
+
+class _BoundedCCSession:
+    """Limit physical Workflow I/O once the CC Input ON write is dispatched."""
+
+    def __init__(self, session):
+        self.session = session
+        self.deadline = None
+        self.on_dispatch = None
+        self.off_write_started_ns = None
+        self.timeout_ms = None
+
+    def arm(self, on_dispatch):
+        self.session.timeout = self.timeout_ms = CONTRIBUTOR_IO_TIMEOUT_MS
+        self.on_dispatch = on_dispatch
+
+    def _budget(self, *, query=False):
+        if self.deadline is None:
+            return
+        remaining = self.deadline - monotonic()
+        # A VISA query can include a write, the configured delay and a read.
+        travel = ((remaining - self.session.query_delay) / 2 if query else remaining)
+        if travel < 0.001:
+            raise LoadError("workflow_timeout", "Workflow reached its maximum Input ON deadline.", 3)
+        timeout_ms = min(CONTRIBUTOR_IO_TIMEOUT_MS, int(travel * 1000))
+        if timeout_ms != self.timeout_ms:
+            self.session.timeout = self.timeout_ms = timeout_ms
+
+    def query(self, command):
+        self._budget(query=True)
+        return self.session.query(command)
+
+    def write(self, command):
+        if command == "INP ON" and self.on_dispatch is not None:
+            started_ns = monotonic_ns()
+            self.deadline = started_ns / 1e9 + CONTRIBUTOR_MAX_ON_SECONDS
+            self.on_dispatch(started_ns)
+            self.on_dispatch = None
+        else:
+            self._budget()
+            if command == "INP OFF" and self.deadline is not None:
+                self.off_write_started_ns = monotonic_ns()
+        return self.session.write(command)
+
+
+def _validate_contributor_cc(command, settings, mode):
+    expected = {"current": CONTRIBUTOR_CURRENT, "range": "low"}
+    if command == "cc-timed-load":
+        expected["duration_s"] = CONTRIBUTOR_TIMED_SECONDS
+    else:
+        expected.update(cutoff_voltage=CONTRIBUTOR_VOLTAGE, cutoff_capacity_ah=CONTRIBUTOR_CAPACITY,
+                        interval_s=CONTRIBUTOR_INTERVAL, timeout_s=CONTRIBUTOR_DISCHARGE_SECONDS)
+    if "csv" in settings or any(settings.get(key) != value for key, value in expected.items()):
+        raise LoadError("unsupported_live_scope", "Use the bounded Contributor CC trial settings.")
+    if mode == "live" and not settings.get("confirm_input_on"):
+        raise LoadError("confirmation_required", "Confirm the 5 V, 0.8 A limited source and independent 10 s cutoff.")
 
 
 def _number(value, field):
@@ -119,10 +186,11 @@ def _sample(session, quantities):
                         communication_untrusted=True) from exc
 
 
-def _measure(session, command, settings, quantities, stop, result, record_row):
+def _measure(session, command, settings, quantities, stop, result, record_row, *, load_started=None):
     started = monotonic()
     time_limit = settings.get("duration_s", settings.get("timeout_s"))
-    deadline = started + float(time_limit) if time_limit is not None else math.inf
+    time_origin = started if load_started is None else load_started
+    deadline = time_origin + float(time_limit) if time_limit is not None else math.inf
     interval = float(settings["interval_s"])
     tick = 0
     discharge = command == "cc-discharge"
@@ -197,12 +265,13 @@ def _measure(session, command, settings, quantities, stop, result, record_row):
     raise LoadError("workflow_timeout", "Workflow reached its time limit.", 3)
 
 
-def _run_cc(session, settings, stop, result, run_load):
+def _run_cc(session, settings, stop, result, run_load, *, on_write_started=None):
     cleanup = result["cleanup"]
     setup_in_progress = True
     initial_off = False
     remote_attempted = False
     failure = None
+    timed = isinstance(session, _BoundedCCSession)
 
     def observe(state):
         result["input_state"] = state
@@ -213,19 +282,35 @@ def _run_cc(session, settings, stop, result, run_load):
         remote_attempted = True
         observe("UNKNOWN")
 
-    def input_on_attempt():
-        _check_stop(stop)
+    def dispatched(started_ns):
         cleanup["required"] = True
         observe("UNKNOWN")
+        result["on_write_started_ns"] = started_ns
+        if on_write_started is not None:
+            on_write_started(started_ns)
+
+    def input_on_attempt():
+        _check_stop(stop)
+        if timed:
+            session.arm(dispatched)
+            _check_stop(stop)
+        else:
+            cleanup["required"] = True
+            observe("UNKNOWN")
 
     try:
         _check_stop(stop)
-        require_trusted_session(session)
+        require_trusted_session(session.session if timed else session)
         parse_identity(control._query(session, "*IDN?"))
         observe(read_measurement(session, "input-state")["input_state"])
         if result["input_state"] != "OFF":
             raise LoadError("input_not_off", "Switch off the load before starting the Workflow.")
         initial_off = True
+        if timed:
+            origin = control._settings(session)
+            if (origin["function_mode"] not in {"FIX", "FIXED"} or origin["range"] != "low"
+                    or origin["function"] not in {"CURR", "CURRENT"}):
+                raise LoadError("unsafe_mode", "Contributor CC requires Fixed CC Low before setup.")
         cutoff = settings.get("cutoff_voltage")
         if cutoff is not None:
             result["initial_voltage_v"] = _sample(session, ("voltage",))["voltage_v"]
@@ -241,6 +326,8 @@ def _run_cc(session, settings, stop, result, run_load):
                               on_remote_attempt=remote_attempt, on_input_state=observe)
             observe("ON")
             setup_in_progress = False
+            if timed:
+                _check_stop(stop)
             result["stop_reason"] = run_load()
     except LoadError as exc:
         failure = LoadError("stopping", str(exc), 3, **exc.details) if exc.code == "stopping" else exc
@@ -257,6 +344,11 @@ def _run_cc(session, settings, stop, result, run_load):
         cleanup["attempted"] = True
         try:
             observe(control._turn_input_off(session)["input_state"])
+            if timed:
+                off_confirmed_ns = monotonic_ns()
+                if off_confirmed_ns - result["on_write_started_ns"] > CONTRIBUTOR_MAX_ON_SECONDS * 10**9:
+                    raise LoadError("workflow_timeout", "Input OFF was confirmed after the maximum loading time.", 3)
+                result.update(off_write_started_ns=session.off_write_started_ns, off_confirmed_ns=off_confirmed_ns)
         except (Exception, KeyboardInterrupt) as exc:
             observe("UNKNOWN")
             if isinstance(exc, LoadError):
@@ -290,53 +382,111 @@ def _wait_load(stop, duration_s):
     return "duration_elapsed"
 
 
-def _run(session, command, settings, stop, result, quantities, record_row):
+def _run(session, command, settings, stop, result, quantities, record_row, *, require_input_off=False,
+         on_write_started=None):
     if command in CC_COMMANDS:
-        def run_load():
-            if command == "cc-timed-load":
-                return _wait_load(stop, settings["duration_s"])
-            return _measure(session, command, settings, quantities, stop, result, record_row)
+        if require_input_off:
+            session = _BoundedCCSession(session)
 
-        _run_cc(session, settings, stop, result, run_load)
+        def run_load():
+            start = result["on_write_started_ns"] / 1e9 if require_input_off else None
+            if command == "cc-timed-load":
+                if start is not None:
+                    deadline = start + CONTRIBUTOR_TIMED_SECONDS
+                    current = _sample(session, ("current",))["current_a"]
+                    result["measured_current_a"] = current
+                    if monotonic() > deadline:
+                        raise LoadError("workflow_timeout", "Current readback arrived after the 5 s load window.", 3)
+                    if abs(Decimal(str(current)) - CONTRIBUTOR_CURRENT) > Decimal("0.01"):
+                        raise LoadError("readback_mismatch", "Measured load current differs from 0.1 A.", 3)
+                    # Event waits can return slightly early on Windows.
+                    while (remaining := deadline - monotonic()) > 0:
+                        _wait(stop, remaining)
+                    _check_stop(stop)
+                    return "duration_elapsed"
+                return _wait_load(stop, settings["duration_s"])
+            return _measure(session, command, settings, quantities, stop, result, record_row, load_started=start)
+
+        _run_cc(session, settings, stop, result, run_load, on_write_started=on_write_started)
+        if require_input_off and command == "cc-discharge" and result["stop_reason"] != "capacity_cutoff":
+            raise LoadError("capacity_cutoff_unconfirmed", "Contributor discharge did not reach the capacity cutoff.", 3)
     else:
         _check_stop(stop)
         require_trusted_session(session)
         parse_identity(control._query(session, "*IDN?"))
+        if require_input_off:
+            result.update(read_measurement(session, "input-state"))
+            if result["input_state"] != "OFF":
+                raise LoadError("input_not_off", "Input must be confirmed OFF before Workflow sampling.")
         result["stop_reason"] = _measure(session, command, settings, quantities, stop, result, record_row)
 
 
 def execute(command, *, mode="live", arguments, model_id=MODEL_ID, backend="system",
-            resource=None, simulator=None, stop=None):
+            resource=None, simulator=None, stop=None, hardware_validation=None, asrl=None,
+            on_write_started=None):
     settings = validate_arguments(command, arguments, mode=mode)
     if model_id != MODEL_ID:
         raise LoadError("unsupported_model", "The requested model profile is not registered.")
-    if mode == "live":
+    contributor = hardware_validation == CONTRIBUTOR_SCOPE
+    if hardware_validation is not None and (not contributor or mode == "simulate" or simulator is not None):
+        raise LoadError("argument_error", "Workflow contributor validation accepts only live or dry-run.")
+    if asrl is not None and not contributor:
+        raise LoadError("argument_error", "ASRL Workflow options require the contributor scope.")
+    if mode == "live" and not contributor:
         raise LoadError("unsupported_live_scope", "Product LIVE is not open for Workflows.")
-    validate_connection(resource, backend, required=False)
+    validate_request_connection(resource, backend, mode=mode, asrl=asrl, allowed=contributor)
+    contributor_cc = contributor and command in CC_COMMANDS
+    if contributor_cc:
+        _validate_contributor_cc(command, settings, mode)
+    quantities = tuple(BASIC_MEASUREMENTS)
+    if command == "measure-until":
+        quantities = (settings["metric"],)
+    if contributor_cc and command == "cc-timed-load":
+        quantities = ("current",)
+    marker = {"validation_only": True, "validation_scope": hardware_validation} if contributor else {}
     if mode == "dry-run":
+        queries = list(QUERIES["input-state"])
+        if contributor_cc:
+            queries += ["FUNC:MODE?", "FUNC?", "CURR:RANG?", "CURR?", "TRAN?", "INP:SHOR:STAT?", "INP:TIM?"]
+        queries += [BASIC_MEASUREMENTS[item][1] for item in quantities]
         return {"arguments": {key: str(value) if isinstance(value, Decimal) else value
                               for key, value in settings.items() if key not in {"confirm_input_on", "csv"}},
                 "csv_requested": "csv" in settings, "hardware_access": False,
-                "input_on_requires_confirmation": command in CC_COMMANDS}
+                "input_on_requires_confirmation": command in CC_COMMANDS, **marker,
+                **({"queries": queries} if contributor else {}),
+                **({"planned_writes": ["SYST:REM", "FUNC:MODE FIX", "FUNC CURR", "CURR:RANG 0.1", "CURR 0.1",
+                                       "SYST:REM", "INP ON", "SYST:REM", "INP OFF"],
+                    "max_input_on_s": CONTRIBUTOR_MAX_ON_SECONDS} if contributor_cc else {}),
+                **({"operator_current_trace_required": True}
+                   if contributor_cc and command == "cc-timed-load" else {})}
 
     if simulator is not None and not isinstance(simulator, ControlSimulator):
         raise LoadError("argument_error", "Workflow execution requires a ControlSimulator.")
-    session = simulator if simulator is not None else ControlSimulator()
-    result = {"stop_reason": None}
-    quantities = tuple(BASIC_MEASUREMENTS)
+    result = {"stop_reason": None, **marker}
     if command in CC_COMMANDS:
         result.update(current_a=float(settings["current"]), range=settings["range"],
                       input_state="UNKNOWN",
                       cleanup={"required": False, "attempted": False, "off_confirmed": False})
     if command == "cc-timed-load":
         result["duration_s"] = float(settings["duration_s"])
+        if contributor_cc:
+            # The timed command verifies the schedule and one current reading.
+            # Only an independent trace can verify loading throughout the interval.
+            result["load_duration_confirmed"] = False
     else:
         result.update(sample_count=0, last_measurement=None)
     if command == "cc-discharge":
         result["capacity_ah"] = 0.0
-        quantities = ("voltage", "current", "power")
-    elif command == "measure-until":
-        quantities = (settings["metric"],)
+
+    def run(record_row):
+        if not contributor:
+            session = simulator if simulator is not None else ControlSimulator()
+            _run(session, command, settings, stop, result, quantities, record_row)
+            return
+        with open_request_session(resource, asrl, open_session) as (session, runtime):
+            _run(session, command, settings, stop, result, quantities, record_row, require_input_off=True,
+                 on_write_started=on_write_started)
+        result["visa"] = runtime
 
     started = monotonic()
     csv_created = False
@@ -362,7 +512,7 @@ def execute(command, *, mode="live", arguments, model_id=MODEL_ID, backend="syst
                     rows = []
                     failure = None
                     try:
-                        _run(session, command, settings, stop, result, quantities, rows.append)
+                        run(rows.append)
                     except LoadError as exc:
                         if exc.code == "workflow_cleanup_unconfirmed":
                             raise
@@ -376,10 +526,10 @@ def execute(command, *, mode="live", arguments, model_id=MODEL_ID, backend="syst
                     if failure is not None:
                         raise failure
                 else:
-                    _run(session, command, settings, stop, result, quantities, writer.writerow)
+                    run(writer.writerow)
             result["csv_written"] = True
         else:
-            _run(session, command, settings, stop, result, quantities, None)
+            run(None)
     except (LoadError, OSError, csv.Error, KeyboardInterrupt) as exc:
         error = exc
         if not isinstance(exc, LoadError) and isinstance(exc.__context__, LoadError):

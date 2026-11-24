@@ -8,6 +8,25 @@ from electronicload_tool_cli.cli import main
 
 RESOURCE = "USB0::0xFFFF::0x0001::SYNTHETIC::INSTR"
 
+@pytest.mark.parametrize("command,metric,query,field", [
+    ("measure-min-max", "current-max", "MEAS:CURR:MAX?", "current_max_a"),
+    ("measure-discharge", "time", "MEAS:TIME?", "discharge_time_s"),
+])
+def test_native_measurement_contributor_cli_reads_verified_hardware(fake_visa, capsys, command, metric,
+                                                           query, field):
+    fake_visa.responses[query] = "7.5"
+    args = [command, "--metric", metric, "--resource", RESOURCE, "--json"]
+    scope = ["--hardware-validation", "measurement-extensions"]
+    assert main([*args, *scope, "--dry-run"]) == 0
+    plan = json.loads(capsys.readouterr().out)["result"]
+    assert plan["queries"] == ["*IDN?", query] and fake_visa.calls == []
+    assert main([*args, *scope]) == 0
+    result = json.loads(capsys.readouterr().out)["result"]
+    assert result[field] == 7.5 and result["validation_scope"] == "measurement-extensions"
+    assert [call for call in fake_visa.calls if isinstance(call, str) and call.endswith("?")] == [
+        "*IDN?", query,
+    ]
+
 
 @pytest.mark.parametrize("command,arguments,expected", [
     ("scpi-version", [], {"scpi_version": "1999.0"}),

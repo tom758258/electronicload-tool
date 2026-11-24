@@ -81,6 +81,7 @@ def physical(command, **arguments):
 @pytest.mark.parametrize("query,reply,diagnostic", [
     ("POW:CONF? MAX", "+2.50E+2", "returned 250"),
     ("POW:CONF? MAX", "251", "returned 251"),
+    ("POW:CONF? MAX", "260", "returned 260"),
     ("POW:CONF? MAX", "NaN", "failed: invalid_response"),
     ("POW:CONF?", "251", "returned 251"),
     ("POW:CONF?", "NaN", None),
@@ -108,6 +109,13 @@ def test_hardware_power_readback_keeps_limits_and_private_diagnostics(
             assert failure.value.details["query"] == query
             assert reply not in str(failure.value.details)
             assert instrument.writes == []
+            details = failure.value.details
+            if query.endswith(" MAX") and reply in ("251", "260"):
+                assert details["default_rejected_before_write"] is True
+                assert details["input_state"] == "OFF"
+                assert details["not_attempted"] == ["hardware_power_limit"]
+            else:
+                assert "default_rejected_before_write" not in details
     if diagnostic:
         assert f"Protection {query} {diagnostic}" in caplog.text
     else:

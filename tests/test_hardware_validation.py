@@ -81,6 +81,61 @@ def run(command, scope='transient-cc', **kwargs):
     return control.execute(command, resource=RESOURCE, hardware_validation=scope, **kwargs)
 
 
+@pytest.mark.parametrize('trial', ['von', 'slew', 'short', 'slew_unrestorable', 'short_untrusted', 'short_unexpected'])
+def test_isolated_auxiliary_trial_restores_or_stops_without_input_on(monkeypatch, capsys, trial):
+    fake = ValidationFake()
+    fake.range = 6
+    fake.values.update({'INP:TIM': '0', 'VOLT:ON': '.5', 'VOLT:LATC': '1'})
+    session(fake, monkeypatch)
+    command = trial.split('_')[0]
+    args = ['contributor-settings', '--trial', command, '--resource', RESOURCE, '--json']
+    assert cli.main(args) == 2 and not fake.calls
+    capsys.readouterr()
+
+    def handle_short(device, write):
+        if write in {'INP:SHOR 0', 'INP:SHOR 1'}:
+            device.short = write.endswith('1')
+            if trial == 'short_untrusted':
+                device.response_errors['INP:SHOR:STAT?'] = TimeoutError()
+            if trial == 'short_unexpected' and device.short:
+                device.input = True
+
+    fake.after_write = handle_short
+    if trial == 'slew_unrestorable':
+        fake.values['CURR:SLEW:POS'] = '.5'
+    original = dict(fake.values)
+    exit_code = cli.main([*args, '--confirm-isolated'])
+    output = capsys.readouterr()
+    result = json.loads(output.out)
+    if trial in {'von', 'slew'}:
+        baseline = json.loads(output.err.removeprefix('Settings recovery baseline (private): '))
+        assert baseline['trial'] == trial
+        if trial == 'von':
+            assert Decimal(baseline['threshold_v']) == Decimal('.5') and baseline['latch'] == 'on'
+        else:
+            assert baseline['range'] == 'low'
+            assert Decimal(baseline['rise_slew_a_per_us']) == Decimal(original['CURR:SLEW:POS'])
+            assert Decimal(baseline['fall_slew_a_per_us']) == Decimal(original['CURR:SLEW:NEG'])
+    assert 'INP ON' not in fake.calls
+    if trial == 'slew_unrestorable':
+        assert exit_code == 3 and result['error']['details']['no_settings_written']
+        assert all(call.endswith('?') for call in fake.calls)
+    elif trial == 'short_untrusted':
+        assert exit_code == 3 and result['error']['details']['manual_action_required']
+        assert [call for call in fake.calls if '?' not in call] == ['SYST:REM', 'INP:SHOR 1']
+    elif trial == 'short_unexpected':
+        assert exit_code != 0 and result['error']['details']['restored']
+        assert fake.calls.index('INP OFF') < fake.calls.index('INP:SHOR 0')
+        assert not (fake.short or fake.input)
+    else:
+        assert exit_code == 0 and result['result']['restored'] and result['result']['input_state'] == 'OFF'
+        assert not (fake.short or fake.input)
+        assert original.keys() == fake.values.keys()
+        for field in ('VOLT:ON', 'VOLT:LATC', 'CURR:SLEW:POS', 'CURR:SLEW:NEG'):
+            assert Decimal(original[field]) == Decimal(fake.values[field])
+        assert not any(call.startswith('CURR:RANG ') for call in fake.calls)
+
+
 def test_validation_cr_led_native_settings_and_confirmed_exit(monkeypatch):
     fake = ValidationFake()
     session(fake, monkeypatch)
