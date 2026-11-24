@@ -194,7 +194,7 @@ def test_automatic_readback_trials_restore_original_mode_and_settings(monkeypatc
             assert fake.values[key] == value
 
 
-@pytest.mark.parametrize("origin", ["CURR", "VOLT", "RES", "POW", "LIST", "transient", "short", "timer", "slow", "led"])
+@pytest.mark.parametrize("origin", ["CURR", "VOLT", "RES", "POW", "LIST", "transient", "short", "timer", "slow", "led", "wrong-origin", "input"])
 def test_isolated_mixed_handoff_then_standalone_guard(monkeypatch, capsys, origin):
     fake = ValidationFake()
     fake.range = 6
@@ -202,6 +202,10 @@ def test_isolated_mixed_handoff_then_standalone_guard(monkeypatch, capsys, origi
     fake.function = origin if origin in {"CURR", "VOLT", "RES", "POW"} else "CURR"
     if origin == "LIST":
         fake.mode = "LIST"
+    if origin == "input":
+        fake.input = True
+    if origin == "wrong-origin":
+        fake.function = "VOLT"
     if origin == "transient":
         fake.transient = True
     if origin == "short":
@@ -214,7 +218,9 @@ def test_isolated_mixed_handoff_then_standalone_guard(monkeypatch, capsys, origi
         fake.function = "RES"
         fake.values["RES:LED:STAT"] = "1"
     session(fake, monkeypatch)
-    args = ["contributor-settings", "--trial", "fixed-cc-handoff", "--resource", RESOURCE, "--json"]
+    expected = {"CURR": "CC", "VOLT": "CV", "RES": "CR", "POW": "CW", "led": "CR"}.get(origin, "CC")
+    args = ["contributor-settings", "--trial", "fixed-cc-handoff", "--origin-function", expected,
+            "--resource", RESOURCE, "--json"]
     assert cli.main(args) == 2 and not fake.calls
     capsys.readouterr()
     code = cli.main([*args, "--confirm-isolated"])

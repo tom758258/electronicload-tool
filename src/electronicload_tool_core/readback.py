@@ -180,13 +180,15 @@ def _list_integer(session, query, minimum, maximum):
     return int(value)
 
 
-def _list_configuration(session, *, summary=False):
+def _list_configuration(session, *, summary=False, expected_count=None):
     range_query, count_query, repeat_query = LIST_HEADER_QUERIES
     raw = c._decimal_readback(session, range_query)
     if not 0 <= raw <= c.RANGE_LIMITS["high"]:
         raise LoadError("invalid_range_readback", "LIST range is outside model limits.", 3,
                         query=range_query)
     count = _list_integer(session, count_query, 2, 84)
+    if expected_count is not None and count != expected_count:
+        raise LoadError("readback_mismatch", "LIST step count changed during the settings trial.", 3)
     repeat = _list_integer(session, repeat_query, 1, 65536)
     ranges = {value: name for name, value in c.RANGE_LIMITS.items()}
     metadata = {"range": ranges.get(raw), "range_readback_a": float(raw),
@@ -214,7 +216,7 @@ def _list_configuration(session, *, summary=False):
     return {**metadata, "steps": steps}
 
 
-def _list_status(session, selection, *, summary=False):
+def _list_status(session, selection, *, summary=False, expected_count=None):
     if isinstance(session, ControlSimulator):
         status = session.list_status()
         if not summary:
@@ -224,7 +226,7 @@ def _list_status(session, selection, *, summary=False):
             raise LoadError("invalid_response", "Selected LIST has no simulated configuration.", 3)
         return {"range": configuration["range"], "repeat_count": configuration["repeat_count"],
                 "step_count": len(configuration["steps"])}
-    configuration = _list_configuration(session, summary=summary)
+    configuration = _list_configuration(session, summary=summary, expected_count=expected_count)
     if summary:
         return configuration
     observed = {**configuration, "steps": [
@@ -243,7 +245,7 @@ def von_status(session):
     return {"threshold_v": str(voltage), "latch": c._flag(session, VON_LATCH_QUERY).lower()}
 
 
-def snapshot(session, command):
+def snapshot(session, command, *, expected_list_count=None):
     if command == "von-status":
         return von_status(session)
     if command == "short-status":
@@ -258,7 +260,7 @@ def snapshot(session, command):
     if command == "fixed-slew-status" and function != "CC":
         raise LoadError("mode_not_fixed", "Fixed CC is required to read its slew rates.", **selection)
     if command in ("list-status", "transient-status"):
-        settings = (_list_status(session, selection) if command == "list-status"
+        settings = (_list_status(session, selection, expected_count=expected_list_count) if command == "list-status"
                     else _transient(session, selection))
         return {**settings, "input_state": c._flag(session, "INP:STAT?")}
 

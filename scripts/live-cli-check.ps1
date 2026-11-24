@@ -988,6 +988,7 @@ raise SystemExit(main(contributor_stop=stop, settings_on_baseline=handoff))
             # Allow the CLI that owns VISA to perform its own bounded OFF cleanup.
             try { $process.StandardInput.Close() } catch { }
             $stopWait = if ($TimerObservationDeadlineNs) { Get-TimerRemainingMs $TimerObservationDeadlineNs }
+                elseif ($listSettingsDeadlineNs) { Get-TimerRemainingMs $listSettingsDeadlineNs }
                 elseif ($isolatedSettings) { $DeadlineMs } else { 10000 }
             [void]$process.WaitForExit($stopWait)
         }
@@ -2419,7 +2420,7 @@ try {
             else { 'cc' }
         if ($lastFunction -cin @('cv','cr','cw')) {
             $handoff = @{name='isolated-fixed-cc-handoff';command='contributor-settings';
-                args=@('--trial','fixed-cc-handoff','--confirm-isolated');execution='live';isolated=$true;
+                args=@('--trial','fixed-cc-handoff','--origin-function',$lastFunction.ToUpperInvariant(),'--confirm-isolated');execution='live';isolated=$true;
                 expected=@{input_state='OFF';function='CC'};
                 condition='After successful powered trials and physical isolation, select Fixed CC without changing setpoints; require Fixed mode and all interlocks OFF.'}
             $firstStandalone = $standalone[0].name

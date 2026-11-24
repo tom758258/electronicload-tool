@@ -1526,6 +1526,9 @@ def test_explicit_live_extensions_never_use_simulation(run_script, mode, connect
         handoff = cases['isolated-fixed-cc-handoff']
         names = list(cases)
         assert handoff['command'] == 'contributor-settings'
+        expected_origin = ('CW' if 'sequence' in mode or 'transient-cw' in mode else
+                           'CV' if mode.startswith('cv,') else 'CR')
+        assert handoff['arguments'][handoff['arguments'].index('--origin-function') + 1] == expected_origin
         assert handoff['conditional_writes'][0]['writes'] == ['SYST:REM', 'FUNC CURR']
         assert handoff['planned_writes'] == []
         first = 'auxiliary-controls-von' if 'auxiliary-controls' in mode else 'list-cc-settings'

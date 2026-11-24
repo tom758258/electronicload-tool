@@ -143,10 +143,15 @@ def test_contributor_list_requires_independent_recall_then_restores_working_buff
 
 
 
-@pytest.mark.parametrize("ignored_width,count", [(False, 2), (True, 2), (False, 25), (False, 84)])
-def test_readback_list_buffer_without_slot_or_trigger(monkeypatch, capsys, ignored_width, count):
+@pytest.mark.parametrize("ignored_width,count,origin,remaining_s", [
+    (False, 2, "CURR", 30), (True, 2, "CURR", 30),
+    (False, 2, "VOLT", 30), (False, 2, "RES", 30), (False, 2, "POW", 30),
+    (False, 25, "CURR", 30), (False, 84, "CURR", 30), (False, 2, "CURR", 6),
+])
+def test_readback_list_buffer_without_slot_or_trigger(monkeypatch, capsys, ignored_width, count, origin, remaining_s):
     fake = TriggerFake()
     fake.range = 6
+    fake.function = origin
     fake.values["LIST:STEP"] = str(count)
     fake.list_steps = {f"LIST:{key}? {index}": value for index in range(1, count + 1)
                        for key, value in (("LEV", ".2"), ("SLEW", "0.1234567890123456789"),
@@ -166,14 +171,15 @@ def test_readback_list_buffer_without_slot_or_trigger(monkeypatch, capsys, ignor
     if ignored_width:
         fake.ignore = "LIST:WID 1,1"
     session(fake, monkeypatch)
-    args = ["contributor-settings", "--trial", "list", "--resource", RESOURCE, "--json", "--confirm-isolated"]
+    args = ["contributor-settings", "--trial", "list", "--resource", RESOURCE, "--json", "--confirm-isolated",
+            "--deadline-ns", str(now + remaining_s * 10**9)]
     status = cli.main(args)
     outcome = json.loads(capsys.readouterr().out)
-    if count > 2:
+    if count > 2 or remaining_s < 30:
         assert status == 3 and outcome["error"]["code"] == "settings_budget_insufficient"
         assert outcome["error"]["details"]["no_settings_written"]
         assert all("?" in command for command in fake.calls)
-        assert fake.list_steps == original and fake.mode == "FIX" and not fake.input
+        assert fake.list_steps == original and fake.mode == "FIX" and fake.function == origin and not fake.input
         return
     assert now < 31_000_000_000
     if ignored_width:
@@ -187,7 +193,7 @@ def test_readback_list_buffer_without_slot_or_trigger(monkeypatch, capsys, ignor
         assert steps[0]["width_s"] == "1"
         assert steps[1]["width_s"] == original["LIST:WID? 2"]
         assert steps[0]["slew_a_per_us"] == original["LIST:SLEW? 1"]
-    assert fake.list_steps == original and fake.mode == "FIX" and not fake.input
+    assert fake.list_steps == original and fake.mode == "FIX" and fake.function == origin and not fake.input
     assert not any(call.startswith(("LIST:SAV", "LIST:RCL", "INP ON", "TRIG")) and "?" not in call
                    for call in fake.calls)
 
