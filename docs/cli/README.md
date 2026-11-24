@@ -1398,7 +1398,7 @@ The hardware case results carry `execution: live`.
 With Input OFF, `workflow` verifies two scheduled measurement samples and
 completion of a voltage condition at 1 V or above. The two CC cases establish
 Fixed CC Low with a dedicated 5 V source limited to 0.8 A and use a 0.1 A
-setpoint. At the five-second boundary, Timed Load takes a final bounded current/Input sample pair and immediately begins OFF cleanup; there is no extra dwell. Discharge samples every
+setpoint. Timed Load requests OFF at the five-second boundary without adding queries after that boundary. Discharge samples every
 0.5 seconds and must reach 0.00010 Ah. It stops on a voltage of 4.5 V or lower
 or after 6 seconds if capacity is still below the target. Timing starts at
 the SCPI `INP ON` write. For each case, arm an independent hardware cutoff
@@ -1406,10 +1406,11 @@ before confirming the trial so that load time, including OFF confirmation,
 cannot exceed 10 seconds from the write. If communication is lost, use that
 cutoff immediately. Skip physical execution if the site cannot enforce this
 limit. Timed Load automatically samples instrument current and Input state
-during the 5-second window and at its boundary and checks the current band (0.09–0.11 A), sample
-coverage and OFF timestamps. Discharge checks current during capacity
-sampling. This is sampled instrument evidence, not an independent continuous
-waveform. Missing evidence or early loss of current fails the trial.
+before the five-second OFF schedule and checks the current band (0.09–0.11 A),
+sample coverage and integer-nanosecond OFF timestamps. Discharge checks current
+during capacity sampling. Instrument samples do not establish uninterrupted
+loading after the last sample. Insufficient boundary evidence or observed
+early loss of current fails validation; no manual observation is requested.
 Do not manually intervene or allow the independent cutoff to fire during
 the expected observation except for safety. The CC trials leave Fixed CC at 0.1 A with
 Input OFF.
@@ -1463,13 +1464,14 @@ Contributor 實機項目。指定與 `-Connection` 相符的 `-Resource`，
 
 Input OFF 時，`workflow` 驗證定時取樣兩次及電壓達到 1 V 的條件。兩個
 CC 案例自動設定 Fixed CC Low，使用專用的 5 V、限流 0.8 A 電源，負載
-設定為 0.1 A。Timed Load 在第 5 秒界線取得最後一組有界電流及 Input 取樣，隨即開始 OFF 清理，不增加額外停留時間。放電每 0.5 秒取樣，須達到
+設定為 0.1 A。Timed Load 在第 5 秒要求 OFF，不在期限後增加查詢。放電每 0.5 秒取樣，須達到
 0.00010 Ah 才通過，電壓降至 4.5 V 以下（含）或第 6 秒容量仍未達標時即停止。
 兩項都從 SCPI `INP ON` 寫入起算。每次確認前先備妥獨立硬體停損，確保從
 寫入至 OFF 確認不超過 10 秒。通訊失信時立即使用停損。現場無法確保期限時，
-不執行實機測試。Timed Load 在 5 秒期間及時間界線自動取樣儀器電流及 Input 狀態，
-核對 0.09 至 0.11 A、取樣涵蓋程度及 OFF 時間。放電在容量取樣時核對電流。
-這是儀器自身的取樣證據，而非獨立連續波形；證據不足或提前掉載即失敗。
+不執行實機測試。Timed Load 在 5 秒 OFF 排程前自動取樣儀器電流及 Input 狀態，
+核對 0.09 至 0.11 A、取樣涵蓋程度及整數奈秒 OFF 時間。放電在容量取樣時核對電流。
+儀器取樣無法證明最後取樣後持續帶載；時間界線證據不足或觀察到提前掉載即判驗收失敗，
+不要求人工判讀。
 除安全需要外，不得人工介入或讓獨立停損在預定觀察期間動作。CC 案例結束後，Fixed CC
 設定保留 0.1 A，Input 為 OFF。
 

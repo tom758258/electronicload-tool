@@ -924,6 +924,8 @@ raise SystemExit(main(contributor_stop=stop, settings_on_baseline=handoff))
                 if ($null -eq $offWrite -or $offWrite -lt ($timerWriteStartedNs + 5000000000L) -or $offWrite -gt $finished) {
                     Fail-Case $CaseName 'workflow_load_unconfirmed' 'The SCPI Input OFF time does not confirm the 5 s load schedule.'
                 }
+                $entry['load_duration_confirmed'] = $false
+                $entry['response'] = $result
                 if ($result.result.load_duration_confirmed -ne $true -or
                     $result.result.load_evidence_source -cne 'instrument_current_samples' -or
                     @($result.result.current_samples).Count -lt 2) {
@@ -2097,7 +2099,7 @@ try {
             $planned += @(
                 @{name='workflow-cc-timed-load';command='cc-timed-load';args=$ccArgs + @('--duration-s','5');
                   execution='live';workflow_load=$true;expected=@{stop_reason='duration_elapsed';input_state='OFF'};
-                  condition='5 V / 0.8 A source, Fixed CC Low, 5 s at 0.1 A with bounded final current/Input sampling then immediate OFF; independent cutoff within 10 s of SCPI Input ON including OFF confirmation'},
+                  condition='5 V / 0.8 A source, Fixed CC Low, 5 s at 0.1 A with bounded current/Input sampling before scheduled OFF; insufficient boundary evidence fails; independent cutoff within 10 s of SCPI Input ON including OFF confirmation'},
                 @{name='workflow-cc-discharge';command='cc-discharge';args=$ccArgs + @('--interval-s','0.5',
                   '--cutoff-capacity-ah','0.00010','--cutoff-voltage','4.5','--timeout-s','6');
                   execution='live';workflow_load=$true;expected=@{stop_reason='capacity_cutoff';input_state='OFF'};

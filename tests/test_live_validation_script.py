@@ -654,6 +654,7 @@ def test_input_timer_is_also_selectable_with_modes(run_script):
 
 @pytest.mark.parametrize('scenario,checks,status,code', [
     ('off-after-late-write', 4, 'PASS', None),
+    ('normal-expiry-query-delay', 2, 'FAIL', 'timer_automatic_off_unconfirmed'),
     ('crossing-off', 2, 'FAIL', 'timer_automatic_off_unconfirmed'),
     ('unbracketed-off', 1, 'FAIL', 'timer_automatic_off_unconfirmed'),
     ('stays-on', 4, 'FAIL', 'timer_expiry_unconfirmed'),
@@ -684,6 +685,20 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName, [string[]]$Extr
     if ($TimerObservationDeadlineNs -ne 10800000000L) { throw 'Unexpected observation deadline.' }
     $script:checks++
     if ($Scenario -eq 'unbracketed-off') { $script:watch.ElapsedMilliseconds = 9000 }
+    if ($Scenario -eq 'normal-expiry-query-delay') {
+        # Identity plus two Timer queries precede Input state. Model the
+        # configured 150 ms delays, with no process/open latency credit.
+        $script:watch.ElapsedMilliseconds += 450
+        $queryStarted = Get-TimerMonotonicNs
+        $script:watch.ElapsedMilliseconds += 150
+        $completed = Get-TimerMonotonicNs
+        $script:report.results[0]['observed_at_ms'] = $script:watch.ElapsedMilliseconds
+        $script:report.results[0]['observed_at_ns'] = $completed
+        $off = $queryStarted -ge 9810000000L
+        return @{result=@{seconds=5;enabled=(-not $off);
+            timer_timing=@{query_started_ns=$queryStarted;query_completed_ns=$completed};
+            input_state=$(if ($off) { 'OFF' } else { 'ON' })}}
+    }
     $queryStarted = Get-TimerMonotonicNs
     $script:watch.ElapsedMilliseconds += $(if ($Scenario -eq 'late-off') { 2001 } else { 350 })
     $script:report.results[0]['observed_at_ms'] = $script:watch.ElapsedMilliseconds
@@ -968,7 +983,7 @@ catch {
     assert evidence['statuses'] == ['FAIL'] + (['NOT RUN'] * 3 if scenario == 'Timer' else [])
 
 
-def test_contributor_workflow_script_accepts_confirmed_off_within_write_start_deadline(run_script, tmp_path):
+def test_contributor_workflow_script_requires_duration_evidence_after_confirmed_off(run_script, tmp_path):
     with (tmp_path / 'sitecustomize.py').open('a', encoding='utf-8') as preload:
         preload.write("""
 import sys
@@ -997,25 +1012,28 @@ $script:report = @{status='NOT RUN';results=@([ordered]@{name='workflow-cc-timed
 $script:perCommandDeadlineMs = 30000
 $script:totalDeadlineMs = 900000
 $watch = [Diagnostics.Stopwatch]::StartNew()
-$response = Invoke-LiveCommand -Command 'cc-timed-load' -CaseName 'workflow-cc-timed-load' -ExtraArgs @(
-    '--hardware-validation', 'workflow', '--current', '0.1', '--range', 'low', '--duration-s', '5', '--confirm')
 $entry = $script:report.results[0]
-$statusBeforeObservation = $entry.status
 function Read-ValidationAnswer { throw 'Workflow result must not ask the operator.' }
-Confirm-WorkflowLoad 'workflow-cc-timed-load'
-@{result=$response.result;status=$statusBeforeObservation;final_status=$entry.status;
+try {
+    $null = Invoke-LiveCommand -Command 'cc-timed-load' -CaseName 'workflow-cc-timed-load' -ExtraArgs @(
+        '--hardware-validation', 'workflow', '--current', '0.1', '--range', 'low', '--duration-s', '5', '--confirm')
+    Confirm-WorkflowLoad 'workflow-cc-timed-load'
+} catch {
+    if ($entry.error_code -cne 'workflow_load_unconfirmed') { throw }
+}
+@{result=$entry.response.result;final_status=$entry.status;error_code=$entry.error_code;
   load_confirmed=$entry.load_duration_confirmed} | ConvertTo-Json -Depth 6 -Compress
 """)
     assert result.returncode == 0, result.stdout + result.stderr
     evidence = json.loads(result.stdout.splitlines()[-1])
-    assert evidence['status'] == 'NOT RUN'  # Final status follows the evidence checks.
-    assert evidence['final_status'] == 'PASS'
+    assert evidence['final_status'] == 'FAIL'
+    assert evidence['error_code'] == 'workflow_load_unconfirmed'
     workflow = evidence['result']
     assert workflow['stop_reason'] == 'duration_elapsed' and workflow['input_state'] == 'OFF'
-    assert workflow['cleanup']['off_confirmed'] and workflow['load_duration_confirmed'] is True
+    assert workflow['cleanup']['off_confirmed'] and workflow['load_duration_confirmed'] is False
     assert 5 <= (workflow['off_write_started_ns'] - workflow['on_write_started_ns']) / 1e9 <= 10
     assert (workflow['off_confirmed_ns'] - workflow['on_write_started_ns']) / 1e9 <= 10
-    assert evidence['load_confirmed'] is True
+    assert evidence['load_confirmed'] is False
     assert workflow['load_evidence_source'] == 'instrument_current_samples'
 
 

@@ -540,7 +540,7 @@ read-only sampling and measurements and the Input OFF guards for Workflow and
 Average with recording Fake VISA. For the CC trials, verify the write-start
 clock, capacity/voltage outcomes, confirmed OFF within the 10-second limit,
 Stop cleanup and the independent-cutoff notice when communication fails.
-Model an early drop including immediately before the five-second boundary, missing sample coverage and verified OFF during Timed Load; require automatic boundary current/Input evidence for script PASS. For isolated settings, cover refusal before
+Model early drops, including the unsampled tail, with actual query-delay costs and integer-nanosecond scheduling. Preserve OFF at five seconds without additional boundary queries; report insufficient evidence rather than accepting an unobserved interval. For isolated settings, cover refusal before
 an unrestorable baseline, display of the private recovery baseline before
 writes, and no blind writes after communication is lost. Cover Short without
 `INP ON`, LIST baseline B established by Recall from a different working value,
@@ -560,7 +560,7 @@ remains a separately authorized check with an independent hardware cutoff.
 離線檢查使用虛構 Resource 並阻擋實體 VISA。以 Fake VISA 驗證 Workflow
 和 Average 的 Input OFF 前置。CC 案例核對 SCPI 寫入起點、容量及電壓截止、
 10 秒內確認 OFF、Stop 的清理及通訊失信時的獨立停損提示。Timed Load 模擬
-提前掉載（含第 5 秒前最後一刻）及取樣涵蓋不足，核對腳本須有時間界線的電流及 Input 證據才判為 PASS。隔離設定核對無法還原原值
+提前掉載（含最後未取樣區間）及取樣涵蓋不足，納入實際查詢延遲及整數奈秒排程；維持第 5 秒 OFF，不在期限後增加查詢，不將未觀察區間判為已驗證。隔離設定核對無法還原原值
 時拒絕寫入、寫入前顯示私有復原基準，以及通訊失信後停止寫入。Short 不開啟
 Input。LIST 核對從不同工作值 Recall B 建立基準，再 Save A 並從 B 召回 A；
 不需人工提供舊寬度，涵蓋 Save 或 Recall 未生效。

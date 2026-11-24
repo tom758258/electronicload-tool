@@ -466,7 +466,7 @@ def test_workflow_contributor_cli_uses_one_readonly_visa_session(fake_visa, caps
     assert fake_visa.calls.count("open_resource") == fake_visa.calls.count("session_close") == 1
 
 
-@pytest.mark.parametrize("scenario", ["timed", "early_wake", "early_drop", "late_drop", "capacity", "stop", "lost", "late_off", "voltage"])
+@pytest.mark.parametrize("scenario", ["timed", "timed_latency", "timed_fractional_clock", "early_wake", "early_drop", "late_drop", "capacity", "stop", "lost", "late_off", "voltage"])
 def test_contributor_cc_owns_bounded_on_and_cleanup(clock, monkeypatch, capsys, scenario):
     class PhysicalLoad(ValidationFake):
         query_delay = 0.15
@@ -487,6 +487,13 @@ def test_contributor_cc_owns_bounded_on_and_cleanup(clock, monkeypatch, capsys, 
                     clock.now = self.dispatched + 10.01  # Native backend did not meet the configured timeout.
 
         def query(self, command):
+            if (scenario in {"timed_latency", "timed_fractional_clock", "late_drop"}
+                    and hasattr(self, "dispatched")):
+                # Return the value sampled at query start; the reply takes
+                # the real configured delay even if Input drops in between.
+                response = super().query(command)
+                clock.wait(self.query_delay)
+                return response
             if command == "MEAS:CURR?" and scenario == "lost":
                 self.calls.append(command)
                 raise TimeoutError()
@@ -523,7 +530,7 @@ def test_contributor_cc_owns_bounded_on_and_cleanup(clock, monkeypatch, capsys, 
             return wait(timeout)
 
         monkeypatch.setattr(clock, "wait", drop_early)
-    clock.now = 10
+    clock.now = 10.000000123 if scenario == "timed_fractional_clock" else 10
     reported_start = []
     discharge = scenario in {"capacity", "voltage"}
     command = "cc-discharge" if discharge else "cc-timed-load"
@@ -549,7 +556,7 @@ def test_contributor_cc_owns_bounded_on_and_cleanup(clock, monkeypatch, capsys, 
         assert outcome["error"]["details"]["manual_action_required"]
         return
     assert not fake.input
-    if scenario in {"stop", "voltage", "early_drop", "late_drop"}:
+    if scenario in {"stop", "voltage", "early_drop"} or (scenario == "late_drop" and status != 0):
         assert status == 3
         error = outcome["error"]
         expected = {"stop": "stopping", "voltage": "capacity_cutoff_unconfirmed",
@@ -562,13 +569,14 @@ def test_contributor_cc_owns_bounded_on_and_cleanup(clock, monkeypatch, capsys, 
     assert result["input_state"] == "OFF" and result["cleanup"]["off_confirmed"]
     assert result["off_confirmed_ns"] - result["on_write_started_ns"] <= 10**10
     if not discharge:
-        assert fake.loaded_before_off == (scenario != "early_drop")
-        assert fake.off_at - fake.dispatched == 5
+        assert fake.loaded_before_off == (scenario != "late_drop")
         assert result["off_write_started_ns"] - result["on_write_started_ns"] == 5 * 10**9
-        assert result["load_duration_confirmed"] is True
+        # The authorized OFF schedule is independent of the unobserved tail.
+        # Sampled current alone must not be reported as continuous loading.
+        assert result["load_duration_confirmed"] is False
         assert result["load_evidence_source"] == "instrument_current_samples"
         assert len(result["current_samples"]) >= 2
-        assert result["current_samples"][-1]["started_elapsed_s"] >= 5
+        assert result["current_samples"][-1]["sample_completed_ns"] <= result["off_write_started_ns"]
         assert all(sample["input_state"] == "ON" and sample["current_a"] == 0.1
                    for sample in result["current_samples"])
     else:

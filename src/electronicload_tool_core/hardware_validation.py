@@ -747,8 +747,12 @@ def execute_trigger_observation(*, mode, resource, backend, model_id, expected, 
                 raise LoadError("trigger_observation_unconfirmed", "Pre-trigger current baseline was not observed.", 3)
         if software:
             _require_trigger_input_on(session, None, "Trigger observation")
-            if monotonic_ns() >= deadline_ns:
-                raise LoadError("trigger_observation_unconfirmed", "No time remains for software Trigger.", 3)
+            # Actual process startup and readback latency can consume more
+            # than the preview's minimum. Do not dispatch an event that can
+            # no longer finish within the already authorized capture window.
+            event_reserve_ns = int((float(event_seconds) + 2 * QUERY_DELAY_S + 0.3) * 1e9)
+            if deadline_ns - monotonic_ns() <= event_reserve_ns:
+                raise LoadError("trigger_observation_unconfirmed", "No time remains for the complete software Trigger observation.", 3)
             c._write(session, software_trigger(source))
         elif source == "EXTERNAL" and on_external_ready is not None:
             on_external_ready()
