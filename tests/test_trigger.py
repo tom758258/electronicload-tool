@@ -20,7 +20,7 @@ class TriggerFake(ValidationFake):
     def __init__(self):
         super().__init__()
         self.values.update({"TRIG:SOUR": "EXT", "TRIG:TIM": "0.375", "INP:TIM": "0",
-                            "LIST:RANG": "6", "LIST:COUN": "1", "LIST:STEP": "2"})
+                            "LIST:RANG": "6", "LIST:COUN": "1", "LIST:STEP": "2", "STAT:QUES:COND": "0"})
         self.list_steps = {}
 
     def write(self, command):
@@ -46,7 +46,7 @@ def physical(command, **arguments):
 
 @pytest.mark.parametrize("scenario", [
     "recall_works", "recall_ignored", "unrestorable", "stale_slot", "unknown_slot", "lost_after_recall",
-    "second_save_ignored", "unknown_stale_slot", "transient_enabled",
+    "second_save_ignored", "unknown_stale_slot", "transient_enabled", "fixed_cv", "selected_list",
 ])
 def test_contributor_list_requires_independent_recall_then_restores_working_buffer(
     monkeypatch, capsys, scenario,
@@ -75,6 +75,10 @@ def test_contributor_list_requires_independent_recall_then_restores_working_buff
     fake = SettingsList()
     fake.range = 6
     fake.transient = scenario == "transient_enabled"
+    if scenario == "fixed_cv":
+        fake.function = "VOLT"
+    if scenario == "selected_list":
+        fake.mode = "LIST"
     if scenario == "unrestorable":
         fake.values["LIST:RANG"] = "0.1"  # Readable number without a restorable LIST range mapping.
     start = fake.list_steps.copy()
@@ -87,9 +91,13 @@ def test_contributor_list_requires_independent_recall_then_restores_working_buff
     status = cli.main([*args, "--confirm-isolated"])
     output = capsys.readouterr()
     result = json.loads(output.out)
-    if scenario == "transient_enabled":
+    if scenario in {"transient_enabled", "fixed_cv", "selected_list"}:
         assert status != 0 and result["error"]["details"]["no_settings_written"]
-        assert fake.transient and fake.save_count == 0
+        assert fake.save_count == 0
+        assert fake.transient == (scenario == "transient_enabled")
+        assert fake.mode == ("LIST" if scenario == "selected_list" else "FIX")
+        if scenario == "fixed_cv":
+            assert fake.function == "VOLT"
         assert all("?" in command for command in fake.calls)
         return
     if scenario == "unrestorable":
@@ -162,6 +170,8 @@ def test_readback_list_buffer_without_slot_or_trigger(monkeypatch, capsys, ignor
     ("HOLD", "expected"), ("HOLD", "missing"), ("HOLD", "short"),
     ("TIMER", "expected"), ("TIMER", "wrong_interval"),
     ("BUS", "expected"), ("BUS", "wrong_order"), ("EXTERNAL", "expected"),
+    ("BUS", "stuck"), ("EXTERNAL", "stuck"), ("BUS", "extra_cycle"), ("BUS", "early_end"),
+    ("BUS", "terminal_last"),
     ("HOLD", "sparse"),
 ])
 def test_sampled_trigger_evidence_requires_levels_and_time_brackets(source, scenario):
@@ -180,14 +190,27 @@ def test_sampled_trigger_evidence_requires_levels_and_time_brackets(source, scen
             starts = [1] if source == "HOLD" else [1, 8 if scenario == "wrong_interval" else 6]
             if any(start <= t < start + (0.4 if scenario == "short" else 2) for start in starts):
                 current = 0.1
-        samples.append({"started_s": t, "completed_s": t + 0.02, "current_a": current})
+        sample = {"started_s": t, "completed_s": t + 0.02, "current_a": current}
+        if is_list:
+            end = 4 if scenario == "early_end" else 9 if scenario == "extra_cycle" else 5
+            running = t >= 1 and (t < end or scenario == "stuck")
+            if scenario == "extra_cycle" and 5 <= t < 9:
+                sample["current_a"] = 0.1 if t < 7 else 0.2
+            if scenario in {"stuck", "terminal_last"} and t >= 5:
+                sample["current_a"] = 0.2
+            sample.update(list_running=running, list_status_completed_s=t + 0.04)
+        samples.append(sample)
+        if is_list and t >= 1 and not running:
+            break
     evidence = sampled_waveform_evidence(
         samples, source=source, level_a=control._decimal("0.1"), level_b=control._decimal("0.2"),
         width_a=2, width_b=2 if is_list else None, interval=5 if source == "TIMER" else None,
     )
-    assert (evidence is not None) == (scenario == "expected")
+    assert (evidence is not None) == (scenario in {"expected", "terminal_last"})
     if evidence:
         assert evidence["events_confirmed"] == (2 if source == "TIMER" else 1)
+        if is_list:
+            assert evidence["list_run_completed"] is True
 
 
 def test_contributor_trigger_observation_plan_and_refusal_before_visa(monkeypatch, capsys):

@@ -6,7 +6,7 @@ from threading import Event
 import pytest
 
 from electronicload_tool_cli.cli import main
-from electronicload_tool_core import control
+from electronicload_tool_core import control, hardware_validation
 from electronicload_tool_core.errors import LoadError
 from electronicload_tool_core.simulator import ControlSimulator
 from test_control_core import RESOURCE, session
@@ -199,6 +199,51 @@ def test_input_timer_validation_fake_cycle_and_read_only_status(monkeypatch):
     assert timer_validation('input-off')['input_state'] == 'OFF'
     assert timer_validation('input-timer-status')['enabled'] is True
     assert timer_validation('input-timer-disable')['enabled'] is False
+
+
+@pytest.mark.parametrize("expiry_s,delay_s", [(5.01, 0.15), (4.85, 0.15), (7, 0.15)])
+def test_input_timer_observation_uses_one_session_and_preserves_first_off(monkeypatch, expiry_s, delay_s):
+    # Existing cycle/status coverage cannot expose the per-process polling
+    # cost. Model each actual VISA query delay within the observation session.
+    start = 10_000_000_000
+    now = start + 1_000_000_000
+    fake = ValidationFake()
+    fake.input = True
+    fake.query_delay = delay_s
+    fake.values.update({"INP:TIM:DEL": "5", "INP:TIM": "1"})
+    query = fake.query
+
+    def advance(seconds):
+        nonlocal now
+        now += round(seconds * 10**9)
+
+    def timed_query(command):
+        if command == "INP:STAT?":
+            fake.input = now < start + round(expiry_s * 10**9)
+        response = query(command)
+        advance(delay_s)
+        return response
+
+    monkeypatch.setattr(fake, "query", timed_query)
+    monkeypatch.setattr(hardware_validation, "monotonic_ns", lambda: now)
+    monkeypatch.setattr(hardware_validation, "sleep", advance)
+    session(fake, monkeypatch)
+    settings = {"seconds": 5, "on_write_started_ns": start,
+                "on_confirmed_ns": start + 500_000_000}
+    result = timer_validation("input-timer-status", validation_settings=settings)
+    observations = result["timer_observations"]
+    assert fake.calls.count("*IDN?") == 1
+    assert all(command.endswith("?") for command in fake.calls)
+    assert len(observations) >= 2
+    assert all(item["input_state"] == "ON" for item in observations[:-1])
+    assert observations[-1]["timer_timing"]["query_completed_ns"] <= start + 6 * 10**9
+    if expiry_s < 6:
+        assert observations[-1]["input_state"] == "OFF"
+        bracket = (observations[-1]["timer_timing"]["query_completed_ns"]
+                   - observations[-2]["timer_timing"]["query_started_ns"])
+        assert bracket <= 10**9
+    else:
+        assert observations[-1]["input_state"] == "ON"
 
 
 @pytest.mark.parametrize('change', ['input', 'short', 'mode', 'stop', 'timer', 'current'])

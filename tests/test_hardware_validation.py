@@ -82,13 +82,18 @@ def run(command, scope='transient-cc', **kwargs):
 
 
 @pytest.mark.parametrize('trial', ['von', 'slew', 'short', 'slew_unrestorable', 'short_untrusted', 'short_unexpected',
-                                  'von_transient', 'slew_transient', 'short_transient', 'short_readback'])
+                                  'von_transient', 'slew_transient', 'short_transient', 'short_readback',
+                                  'von_cv', 'slew_cr', 'short_cw', 'short_list'])
 def test_isolated_auxiliary_trial_restores_or_stops_without_input_on(monkeypatch, capsys, trial):
     fake = ValidationFake()
     fake.range = 6
     fake.values.update({'INP:TIM': '0', 'VOLT:ON': '.5', 'VOLT:LATC': '1'})
     session(fake, monkeypatch)
     command = trial.split('_')[0]
+    if trial.endswith(('_cv', '_cr', '_cw')):
+        fake.function = {'cv': 'VOLT', 'cr': 'RES', 'cw': 'POW'}[trial.rsplit('_', 1)[-1]]
+    if trial.endswith('_list'):
+        fake.mode = 'LIST'
     if trial.endswith(('_transient', '_readback')):
         fake.transient = True
         fake.values['TRIG:TIM'] = '5'
@@ -123,9 +128,15 @@ def test_isolated_auxiliary_trial_restores_or_stops_without_input_on(monkeypatch
             assert Decimal(baseline['rise_slew_a_per_us']) == Decimal(original['CURR:SLEW:POS'])
             assert Decimal(baseline['fall_slew_a_per_us']) == Decimal(original['CURR:SLEW:NEG'])
     assert 'INP ON' not in fake.calls
-    if trial.endswith('_transient'):
+    if trial.endswith(('_transient', '_cv', '_cr', '_cw', '_list')):
         assert exit_code != 0 and result['error']['details']['no_settings_written']
-        assert fake.transient and all(call.endswith('?') for call in fake.calls)
+        assert all(call.endswith('?') for call in fake.calls)
+        if trial.endswith('_transient'):
+            assert fake.transient
+        elif trial.endswith('_list'):
+            assert fake.mode == 'LIST'
+        else:
+            assert fake.function == {'cv': 'VOLT', 'cr': 'RES', 'cw': 'POW'}[trial.rsplit('_', 1)[-1]]
     elif trial == 'short_readback':
         assert exit_code == 0 and result['result']['restored']
         assert fake.transient and not fake.input and not fake.short

@@ -652,74 +652,64 @@ def test_input_timer_is_also_selectable_with_modes(run_script):
     assert 'cutoff applies only to the 5 s Timer trial' in refused.stdout
 
 
-@pytest.mark.parametrize('scenario,checks,status,code', [
-    ('off-after-late-write', 4, 'PASS', None),
-    ('normal-expiry-query-delay', 2, 'PASS', None),
-    ('early-expiry-within-resolution', 2, 'PASS', None),
-    ('crossing-off', 2, 'FAIL', 'timer_automatic_off_unconfirmed'),
+@pytest.mark.parametrize('scenario,launches,status,code', [
+    ('normal-expiry-query-delay', 1, 'PASS', None),
+    ('early-expiry-within-resolution', 1, 'PASS', None),
+    ('late-on-observation', 1, 'PASS', None),
+    ('crossing-off', 1, 'FAIL', 'timer_automatic_off_unconfirmed'),
     ('unbracketed-off', 1, 'FAIL', 'timer_automatic_off_unconfirmed'),
-    ('stays-on', 4, 'FAIL', 'timer_expiry_unconfirmed'),
+    ('stays-on', 1, 'FAIL', 'timer_expiry_unconfirmed'),
     ('invalid', 1, 'FAIL', 'readback_mismatch'),
     ('late-off', 1, 'FAIL', 'timer_expiry_unconfirmed'),
     ('late-on-confirmation', 0, 'FAIL', 'timer_expiry_unconfirmed'),
     ('early-off', 1, 'FAIL', 'timer_expiry_early'),
     ('unconfirmed-timing', 1, 'FAIL', 'timer_timing_unconfirmed'),
 ])
-def test_timer_expiry_requires_automatic_off_within_scpi_window(run_script, scenario, checks, status, code):
+def test_timer_expiry_requires_automatic_off_within_scpi_window(run_script, scenario, launches, status, code):
     result = run_script(['-Scenario', scenario], harness="""
-$script:watch = @{ElapsedMilliseconds=$(if ($Scenario -eq 'late-on-confirmation') { 9801 } else { 4000 })}
+$script:watch = @{ElapsedMilliseconds=1000}
 $script:timerOnStartMs = 0
-$script:timerOnConfirmedMs = $script:watch.ElapsedMilliseconds
-$script:timerOnTiming = @{on_write_started_ns=4800000000L;on_confirmed_ns=$(
-    if ($Scenario -eq 'late-on-confirmation') { 10801000000L } else { 5000000000L }
-)}
-$script:checks = 0
+$script:timerOnConfirmedMs = 500
+$script:timerOnTiming = @{on_write_started_ns=10000000000L;on_confirmed_ns=10500000000L}
+$script:launches = 0
 $script:perCommandDeadlineMs = 30000
 $TimerSeconds = '5'
 $script:report = @{results=@([ordered]@{name='timer-expiry';status='NOT RUN'})}
-function Get-TimerMonotonicNs { 1000000000L + $script:watch.ElapsedMilliseconds * 1000000L }
-function Start-Sleep([int]$Milliseconds) { $script:watch.ElapsedMilliseconds += $Milliseconds }
+function Get-TimerMonotonicNs {
+    if ($Scenario -eq 'late-on-confirmation') { return 16001000000L }
+    return 11000000000L
+}
 function Assert-Runtime($Result, [string]$Name) {}
 function Read-ValidationAnswer { throw 'Timer result must not ask the operator.' }
+function New-Observation([long]$Start, [long]$End, [string]$State) {
+    @{seconds=5;enabled=($State -eq 'ON');input_state=$State;
+      timer_timing=@{query_started_ns=$Start;query_completed_ns=$End}}
+}
 function Invoke-LiveCommand([string]$Command, [string]$CaseName, [string[]]$ExtraArgs,
                             [int]$DeadlineMs, [long]$TimerObservationDeadlineNs) {
-    if ($TimerObservationDeadlineNs -ne 10800000000L) { throw 'Unexpected observation deadline.' }
-    $script:checks++
-    if ($Scenario -eq 'unbracketed-off') { $script:watch.ElapsedMilliseconds = 9000 }
-    if ($Scenario -in @('normal-expiry-query-delay','early-expiry-within-resolution')) {
-        # Identity plus two Timer queries precede Input state. Model the
-        # configured 150 ms delays, with no process/open latency credit.
-        $script:watch.ElapsedMilliseconds += 450
-        $queryStarted = Get-TimerMonotonicNs
-        $script:watch.ElapsedMilliseconds += 150
-        $completed = Get-TimerMonotonicNs
-        $script:report.results[0]['observed_at_ms'] = $script:watch.ElapsedMilliseconds
-        $script:report.results[0]['observed_at_ns'] = $completed
-        $expiry = if ($Scenario -eq 'early-expiry-within-resolution') { 9650000000L } else { 9810000000L }
-        $off = $queryStarted -ge $expiry
-        return @{result=@{seconds=5;enabled=(-not $off);
-            timer_timing=@{query_started_ns=$queryStarted;query_completed_ns=$completed};
-            input_state=$(if ($off) { 'OFF' } else { 'ON' })}}
+    $script:launches++
+    if ($Command -cne 'input-timer-status' -or $TimerObservationDeadlineNs -ne 16000000000L) {
+        throw 'Unexpected observation command or deadline.'
     }
-    $queryStarted = Get-TimerMonotonicNs
-    $script:watch.ElapsedMilliseconds += $(if ($Scenario -eq 'late-off') { 2001 } else { 350 })
-    $script:report.results[0]['observed_at_ms'] = $script:watch.ElapsedMilliseconds
-    $script:report.results[0]['observed_at_ns'] = Get-TimerMonotonicNs
-    $off = $Scenario -in @('late-off','early-off','unbracketed-off') -or
-        ($Scenario -eq 'off-after-late-write' -and $script:checks -eq 4) -or
-        ($Scenario -eq 'crossing-off' -and $script:checks -eq 2)
-    $timing = if ($Scenario -ne 'unconfirmed-timing') {
-        $completed = if ($Scenario -eq 'crossing-off' -and $script:checks -eq 2) {
-            $script:watch.ElapsedMilliseconds += 200
-            $script:report.results[0]['observed_at_ms'] = $script:watch.ElapsedMilliseconds
-            $script:report.results[0]['observed_at_ns'] = Get-TimerMonotonicNs
-            Get-TimerMonotonicNs
-        } else { $queryStarted + 10000000L }
-        @{query_started_ns=$queryStarted;query_completed_ns=$completed}
+    $settings = $ExtraArgs[-1] | ConvertFrom-Json
+    if ($settings.seconds -ne 5 -or $settings.on_write_started_ns -ne 10000000000L -or
+        $settings.on_confirmed_ns -ne 10500000000L) { throw 'Missing SCPI timing context.' }
+    # Both physical events in the approved resolution give identical evidence.
+    $on = New-Observation 14450000000L 14600000000L 'ON'
+    $off = New-Observation 15200000000L 15350000000L 'OFF'
+    switch ($Scenario) {
+        'late-on-observation' { $on = New-Observation 15010000000L 15160000000L 'ON' }
+        'crossing-off' { $on = New-Observation 13900000000L 14050000000L 'ON' }
+        'unbracketed-off' { $on = $null }
+        'stays-on' { $off = New-Observation 15200000000L 15350000000L 'ON' }
+        'invalid' { $on.input_state = 'UNKNOWN' }
+        'late-off' { $off = New-Observation 15900000000L 16050000000L 'OFF' }
+        'early-off' { $off = New-Observation 14700000000L 14850000000L 'OFF' }
+        'unconfirmed-timing' { $on.timer_timing = $null }
     }
-    return @{result=@{seconds=5;enabled=(-not $off);timer_timing=$timing;input_state=$(
-        if ($off) { 'OFF' } elseif ($Scenario -eq 'invalid') { 'UNKNOWN' } else { 'ON' }
-    )}}
+    $script:report.results[0]['observed_at_ns'] = $off.timer_timing.query_completed_ns
+    $script:report.results[0]['observed_at_ms'] = 5500
+    @{result=@{timer_observations=@($on,$off | Where-Object { $null -ne $_ })}}
 }
 try {
     Invoke-TimerExpiry @{name='timer-expiry';command='input-timer-status';args=@()}
@@ -728,18 +718,17 @@ try {
 }
 catch { if ($script:report.results[0].status -ne 'FAIL') { throw } }
 $entry = $script:report.results[0]
-@{checks=$script:checks;status=$entry.status;error_code=$entry.error_code;
+@{launches=$script:launches;status=$entry.status;error_code=$entry.error_code;
   bracket=$entry.timer_expiry_bracket} | ConvertTo-Json -Depth 4 -Compress
 """)
     assert result.returncode == 0, result.stdout + result.stderr
     evidence = json.loads(result.stdout.splitlines()[-1])
     bracket = evidence.pop('bracket')
-    assert evidence == {'checks': checks, 'status': status, 'error_code': code}
+    assert evidence == {'launches': launches, 'status': status, 'error_code': code}
     if status == 'PASS':
         assert 0 <= bracket['uncertainty_ns'] <= bracket['resolution_ns'] == 10**9
         assert bracket['first_off_completed_ns'] >= bracket['expected_expiry_ns']
         assert bracket['uncertainty_ns'] == bracket['first_off_completed_ns'] - bracket['last_on_started_ns']
-
 
 @pytest.mark.parametrize('scenario,code', [
     ('late-readback', 'timer_expiry_unconfirmed'),
@@ -1207,6 +1196,7 @@ def test_trigger_validation_script_plan_preflight_and_noninteractive_refusal(run
         capture_name = f'trigger-{source}-dispatch' if software else f'trigger-{source}-observed'
         assert names.index(f'trigger-{source}-on') < names.index(capture_name) < names.index(f'trigger-{source}-off')
         assert 'MEAS:CURR?' in capture['queries']
+        assert ('STAT:QUES:COND?' in capture['queries']) == (source in ('bus', 'external'))
         assert capture['planned_writes'] == (
             ['SYST:REM', 'TRIG:IMM' if source == 'hold' else '*TRG'] if software else [])
     assert cases['trigger-bus-setup']['command'] == 'set-list-cc'
@@ -1263,6 +1253,8 @@ def test_configuration_readback_script_plan_preflight_and_noninteractive_refusal
                and '--readback-trial' in case['arguments'] for case in auto_report['cases'][3:])
     assert all(case['status'] == 'NOT RUN' for case in auto_report['cases'])
     assert not auto_report['hardware_touched']
+    assert auto_report['per_command_deadline_ms'] == 30000
+    assert all(case.get('deadline_ms', 30000) == 30000 for case in auto_report['cases'])
     for options, status in [(['-PlanOnly', *baseline], 'PLAN ONLY'),
                             (['-PlanOnly'], 'PLAN ONLY'),
                             (['-ExpectedRiseSlew', '0.1'], 'BLOCKED')]:
@@ -1423,6 +1415,9 @@ def test_explicit_live_extensions_never_use_simulation(run_script, mode, connect
         assert 'SENS:AVER:COUN 8' in cases['measurement-extensions-average']['planned_writes']
     if 'list-cc-settings' in cases:
         trial = cases['list-cc-settings']
+        assert trial['deadline_ms'] == 300000
+        assert all(not any(write.startswith('FUNC <original>') for write in branch['writes'])
+                   for branch in trial['conditional_writes'])
         assert 'LIST:WID? {step}' in trial['queries']
         assert trial['planned_writes'].count(f'LIST:SAV {slot}') == 2
         assert trial['planned_writes'].count(f'LIST:RCL {slot}') == 2

@@ -548,8 +548,11 @@ then Save A and Recall from B, including ignored Save or Recall without a
 manually supplied prior slot width. In PlanOnly, check the safety queries,
 conditional cleanup writes and the isolated batch after source-connected
 and Trigger trials. Check automatic Readback settings and restoration with
-a recording fake, and one isolation/slot authorization for the batch. For Timer expiry, use
-a controlled clock for definite early OFF refusal, first OFF with a bracket exceeding one second, and indistinguishable normal and early events within the approved one-second observation bracket; confirmation follows cleanup. Use a delayed Fake VISA ON reply to verify
+a recording fake, and one isolation/slot authorization for the batch. Check
+the original Fixed CC/Transient OFF guard for standalone settings, separate
+from automatic Readback mode restoration; only scratch-slot settings retain
+the 300-second command exception. For Timer expiry, check single-session
+read-only polling with actual simulated query delays and use a controlled clock for definite early OFF refusal, first OFF with a bracket exceeding one second, and indistinguishable normal and early events within the approved one-second observation bracket; confirmation follows cleanup. Use a delayed Fake VISA ON reply to verify
 that the SCPI write-start deadline already applies while the ON subprocess is
 still running. With a process substitute that stays running after termination is
 requested, verify that the operator gets the cutoff prompt at the observation
@@ -565,7 +568,9 @@ remains a separately authorized check with an independent hardware cutoff.
 Input。LIST 核對從不同工作值 Recall B 建立基準，再 Save A 並從 B 召回 A；
 不需人工提供舊寬度，涵蓋 Save 或 Recall 未生效。
 PlanOnly 核對安全查詢及條件式清理。混選先執行需接電源的試驗及 Trigger，
-再進入一次隔離及槽位授權批次；以 Fake VISA 驗證 Readback 自動設定與還原。Timer 使用可控制的
+再進入一次隔離及槽位授權批次；以 Fake VISA 驗證 Readback 自動設定與還原，
+獨立設定保留原 Fixed CC／Transient OFF 守衛，只有 Scratch Slot 適用 300 秒例外。
+Timer 核對單一唯讀 Session 持續查詢並納入模擬查詢延遲，使用可控制的
 時鐘驗證明確過早 OFF、首次 OFF 區間超過 1 秒不得通過，以及在核准 1 秒觀察區間內不可區分的正常與提前事件依相同證據驗收，清理後才自動確認。以 Fake VISA 模擬延遲的
 ON 回覆，驗證 ON 子程序尚在執行時已受 SCPI 寫入起點的期限約束。用收到
 終止要求後仍在執行的程序替身，確認提示在觀察期限到達時發出，且清理時
@@ -574,9 +579,11 @@ ON 回覆，驗證 ON 子程序尚在執行時已受 SCPI 寫入起點的期限�
 For automatic Contributor Trigger observation, exercise the affected
 `test_trigger.py` waveform cases and `test_live_validation_script.py` plan,
 refusal, deadline and cleanup cases. Check level order, timing brackets,
-missing or sparse samples, rejection of infeasible timing before VISA, and source-specific dispatch with a final Input ON guard (no extra software trigger for TIMER or EXTERNAL). Only EXTERNAL retains physical signal
+missing or sparse samples, finite LIST RUN completion versus a stuck final
+dwell, rejection of infeasible timing before VISA, and source-specific dispatch with a final Input ON guard (no extra software trigger for TIMER or EXTERNAL). Only EXTERNAL retains physical signal
 preparation; sampled instrument evidence is not independent calibration.
 
 Contributor Trigger 自動驗收僅測試直接受影響的取樣、電平順序、時間區間、
-資料不足、不可取樣時的 PlanOnly 拒絕、觸發派送前最後 Input ON 互鎖及清理。TIMER／EXTERNAL 不額外
+資料不足、有限 LIST RUN 完結與卡在末段的區別、不可取樣時的 PlanOnly 拒絕、
+觸發派送前最後 Input ON 互鎖及清理。TIMER／EXTERNAL 不額外
 送出軟體觸發，僅 EXTERNAL 保留實體訊號準備；取樣不等於獨立波形校正。

@@ -259,6 +259,7 @@ function Save-Report {
         if ($entry.Contains('expected_readback')) { $case.expected_readback = $entry.expected_readback }
         if ($entry.Contains('readback_comparison')) { $case.readback_comparison = $entry.readback_comparison }
         if ($entry.Contains('condition')) { $case.condition = $entry.condition }
+        if ($entry.Contains('deadline_ms')) { $case.deadline_ms = $entry.deadline_ms }
         foreach ($field in @('queries','planned_writes','conditional_writes')) {
             if ($entry.Contains($field)) { $case[$field] = $entry[$field] }
         }
@@ -1083,19 +1084,24 @@ function Invoke-TimerExpiry($Step) {
         }
         $earliestExpiryNs = $on.on_write_started_ns + [long][int]$TimerSeconds * 1000000000L
         $deadlineNs = Get-TimerObservationDeadlineNs $on.on_write_started_ns
-        # ON confirmation is not a query-start lower bound. Use a real
-        # timed ON query and retain the first OFF observation interval.
+        # Start a single observation process immediately after ON confirmation;
+        # no repeated interpreter startup or VISA identity/open in the sample loop.
         $lastOnNs = 0L
         $lastOnCompletedNs = 0L
-        # Start one second before expiry so a definite early OFF can be rejected.
-        $delay = [Math]::Floor(($earliestExpiryNs - 1000000000L - $nowNs) / 1000000)
-        if ($delay -gt 0) { Start-Sleep -Milliseconds $delay }
-        while ((Get-TimerMonotonicNs) -lt $deadlineNs) {
-            $result = Invoke-LiveCommand -Command $Step.command -CaseName $Step.name `
-                -ExtraArgs $Step.args -DeadlineMs $script:perCommandDeadlineMs `
-                -TimerObservationDeadlineNs $deadlineNs
-            Assert-Runtime $result $Step.name
-            $status = $result.result
+        if ($nowNs -ge $deadlineNs) {
+            Fail-Case $Step.name 'timer_expiry_unconfirmed' 'Timer ON confirmation exhausted the observation window.'
+        }
+        $settings = @{seconds=[int]$TimerSeconds;on_write_started_ns=$on.on_write_started_ns;
+            on_confirmed_ns=$on.on_confirmed_ns} | ConvertTo-Json -Compress
+        $result = Invoke-LiveCommand -Command $Step.command -CaseName $Step.name `
+            -ExtraArgs @('--hardware-validation','input-timer','--validation-settings-json',$settings) `
+            -DeadlineMs $script:perCommandDeadlineMs -TimerObservationDeadlineNs $deadlineNs
+        Assert-Runtime $result $Step.name
+        if ($entry.observed_at_ns -gt $deadlineNs) {
+            Fail-Case $Step.name 'timer_expiry_unconfirmed' 'Timer observation returned after the deadline.'
+        }
+        foreach ($status in @($result.result.timer_observations)) {
+            if ($null -eq $status) { break }
             $now = $entry.observed_at_ms
             $query = $status.timer_timing
             $observations += [ordered]@{
@@ -1115,6 +1121,7 @@ function Invoke-TimerExpiry($Step) {
             if ($entry.observed_at_ns -gt $deadlineNs) { break }
             if ($null -eq $query.query_started_ns -or $null -eq $query.query_completed_ns -or
                 $query.query_started_ns -lt $on.on_confirmed_ns -or
+                $query.query_started_ns -lt $lastOnCompletedNs -or
                 $query.query_completed_ns -lt $query.query_started_ns -or
                 $query.query_completed_ns -gt $entry.observed_at_ns) {
                 Fail-Case $Step.name 'timer_timing_unconfirmed' 'The SCPI Input state query timing was not confirmed.'
@@ -1149,8 +1156,6 @@ function Invoke-TimerExpiry($Step) {
                 $lastOnNs = $query.query_started_ns
                 $lastOnCompletedNs = $query.query_completed_ns
             }
-            $delay = [Math]::Min(150, [Math]::Floor(($deadlineNs - (Get-TimerMonotonicNs)) / 1000000))
-            if ($delay -gt 0) { Start-Sleep -Milliseconds $delay }
         }
         Fail-Case $Step.name 'timer_expiry_unconfirmed' 'Input OFF was not confirmed within the Timer validation window.'
     } finally {
@@ -1790,7 +1795,8 @@ function Invoke-TriggerTrial($Trial) {
         if ($capture.result.validation_only -ne $true -or $capture.result.validation_scope -cne 'trigger' -or
             $capture.result.trigger_source -cne $Trial.source -or $capture.result.waveform_completion_known -ne $true -or
             $evidence.source -cne 'instrument_current_samples' -or $evidence.sample_count -lt 3 -or
-            $evidence.events_confirmed -lt $requiredEvents -or -not $script:triggerOffConfirmed) {
+            $evidence.events_confirmed -lt $requiredEvents -or
+            ($Trial.isList -and $evidence.list_run_completed -ne $true) -or -not $script:triggerOffConfirmed) {
             Fail-Case "$prefix-observed" 'trigger_observation_unconfirmed' 'Automatic Trigger waveform or OFF evidence was insufficient.'
         }
         $entry['trigger_observation'] = $evidence
@@ -2100,7 +2106,6 @@ try {
                 args=@('--trial',$readbackTrials[$name],'--readback-trial','--confirm-isolated');execution='live';isolated=$true;
                 expected=@{input_state='OFF';restored=$true};
                 condition='Automatic known-setting readback and verified restoration with physically isolated terminals and Input OFF.'}
-            if ($name -ceq 'list-status') { $step.deadline_ms = 300000 }
             $isolated += $step
         }
     }
@@ -2140,7 +2145,7 @@ try {
                 @{name="auxiliary-controls-$trial";command='contributor-settings';
                   args=@('--trial',$trial,'--confirm-isolated');execution='live';isolated=$true;
                   expected=@{input_state='OFF';restored=$true};
-                  condition='Source and DUT physically disconnected, Input OFF. Select Fixed CC if needed, verify and restore settings.'}
+                  condition='Source and DUT physically disconnected, Fixed CC with Input, Short, Transient and Timer OFF; verify and restore settings.'}
             })
         }
         if ('list-cc' -in $selectedModes) {
@@ -2148,7 +2153,7 @@ try {
                 args=@('--trial','list-cc','--slot',[string]$ListScratchSlot,'--confirm-isolated');
                 execution='live';isolated=$true;deadline_ms=300000;
                 expected=@{input_state='OFF';restored=$true;recall_confirmed=$true;exited_list=$true};
-                condition="Source and DUT isolated, Input OFF. Select and restore Fixed CC as needed. Authorize overwriting slot $ListScratchSlot once for the isolated batch. Establish and verify B as the slot baseline, then Save A, verify Recall A and restore the original working buffer."}
+                condition="Source and DUT isolated, Fixed CC with Input, Short, Transient and Timer OFF. Authorize overwriting slot $ListScratchSlot once for the isolated batch. Establish and verify B as the slot baseline, then Save A, verify Recall A and restore the original working buffer."}
         }
         # Isolated cases are appended after source-connected and Trigger trials.
         # Reuse successful readback trials for identical Auxiliary cases.
@@ -2195,8 +2200,9 @@ try {
             @{name='timer-status-off';command='input-timer-status';args=$timerScope},
             @{name='timer-on';command='input-on';args=($timerScope + @('--confirm', '--validation-settings-json', $timerExpected));
               condition='LIVE requires the 5 s Timer and an independent 10 s cutoff armed no later than the SCPI ON write'},
-            @{name='timer-expiry';command='input-timer-status';args=$timerScope;
-              condition='Require timed ON and first OFF within Timer seconds plus one second from SCPI ON write start, with at most 1 s observation uncertainty; definite early OFF fails. Authorize a cutoff that cannot intervene during observation'},
+            @{name='timer-expiry';command='input-timer-status';
+              args=($timerScope + @('--validation-settings-json', ('{"seconds":' + [int]$TimerSeconds + '}')));
+              condition='Single-session observation using live SCPI ON timestamps. Require timed ON and first OFF within Timer seconds plus one second from SCPI ON write start, with at most 1 s observation uncertainty; definite early OFF fails. Authorize a cutoff that cannot intervene during observation'},
             @{name='timer-off';command='input-off';args=@()},
             @{name='timer-disable';command='input-timer-disable';args=$timerScope},
             @{name='timer-status-disabled';command='input-timer-status';args=$timerScope},
@@ -2459,6 +2465,7 @@ try {
         if ($_.ContainsKey('reuse_from')) { $entry['reuse_from'] = $_.reuse_from }
         if ($_.ContainsKey('expected_error')) { $entry['expected_error'] = $_.expected_error }
         if ($_.ContainsKey('condition')) { $entry['condition'] = $_.condition }
+        if ($_.ContainsKey('deadline_ms')) { $entry['deadline_ms'] = $_.deadline_ms }
         if ($_.ContainsKey('expected_readback')) { $entry['expected_readback'] = $_.expected_readback }
         if ($_.ContainsKey('check_readback_settings')) { $entry['readback_comparison'] = 'NOT RUN' }
         $entry

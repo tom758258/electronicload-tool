@@ -754,9 +754,10 @@ then confirms Input ON through `--hardware-validation input-timer` with complete
 expected `current`, `range` and integer `seconds`. Before and after remote
 transition Core rechecks physical OFF, CC settings, Short/Transient OFF and Timer
 readback. Core signals the SCPI ON write start before waiting for the instrument,
-so the same six-second deadline covers the ON subprocess and subsequent polls.
-Once ON is confirmed, polling can begin as early as one second before the
-earliest possible expiry. The script requires a timed ON observation followed
+so the same six-second deadline covers the ON subprocess and observation.
+Immediately after ON confirmation, a single read-only CLI process opens and
+identifies one VISA session and collects Timer/Input snapshots until the first OFF
+or the observation deadline. It does not reopen VISA or restart Python for each sample. The script requires a timed ON observation followed
 by the first OFF within six seconds of the write start. The conservative
 bracket from the ON query start to the OFF query completion must be at most
 one second and must not end before the five-second boundary. A definite
@@ -785,7 +786,9 @@ confirmed OFF.
 停損。限時必須不超過 10 秒，且計時不得晚於 SCPI Input ON 寫入開始。
 在 Timer Input ON 提示確認上述條件，10 秒上限僅適用這組核准條件。
 Core 在等待儀器回覆前通知 Script SCPI ON 的寫入起點，因此 ON 子程序與
-後續查詢共用 6 秒期限。ON 確認後，最早從可能到期前 1 秒開始查詢。
+後續觀察共用 6 秒期限。ON 確認後立即啟動單一唯讀 CLI 程序，開啟並識別一次
+VISA Session，持續取得 Timer／Input 快照至首次 OFF 或觀察期限，
+不為每筆取樣重新啟動 Python 或開啟 VISA。
 須有具時間證據的 ON 查詢，再於第 6 秒前取得首次 OFF。從 ON 查詢起點至
 OFF 查詢完成的保守區間最多 1 秒，且不得在第 5 秒前結束。明確提前 OFF、
 缺乏 ON 證據或區間過寬均失敗，不得以後續 OFF 查詢覆蓋。此為有界功能驗收，
@@ -1426,8 +1429,9 @@ verifies Average set to 8. The Average case leaves that setting after operator
 confirmation.
 
 For `auxiliary-controls` and `list-cc`, physically disconnect the source and
-DUT with Input, Short, Transient and Input Timer OFF. The trials select Fixed CC
-from a supported starting mode and verify restoration.
+DUT. Standalone trials require Fixed CC with Input, Short, Transient and Input
+Timer OFF. They do not switch the starting function or mode; other starting
+states are refused before settings writes.
 VON and same-range Slew save the original values, verify test readback, then
 restore and verify the original values. The Short trial checks ON and OFF
 state with isolated terminals and verifies Input OFF. LIST uses different
@@ -1458,8 +1462,11 @@ slot. An enabled Transient starting state is supported when its original
 settings and HOLD source can be verified and restored; other unsafe or
 unrestorable states are refused before writing. Only the automatic Readback
 procedure authorizes that temporary Transient change, including its VON,
-Slew and Short readbacks. Standalone Auxiliary Controls and LIST CC still
-require Transient OFF and never opt into that procedure. Without LiveExtensions or
+Slew and Short readbacks. Standalone Auxiliary Controls and LIST CC retain
+the original Fixed CC and Transient OFF guards. Mixed runs must meet the
+same precondition before standalone trials; Readback evidence may be reused
+for the shared Auxiliary cases. Only the scratch-slot trial has a 300-second
+command allowance; automatic LIST Readback retains the 30-second command limit. Without LiveExtensions or
 with explicit legacy Expected parameters, Readback remains a read-only
 diagnostic, not automatic acceptance.
 
@@ -1487,8 +1494,8 @@ Timed Load 採有界功能驗收：相鄰電流及 Input 觀察區間、最後�
 將 Average 設為 8、驗證讀回並保留設定。
 
 `auxiliary-controls` 與 `list-cc` 須物理隔離來源及待測物，
-確認 Input、Short、Transient 與 Input Timer 皆為 OFF，再由受支援的起始模式
-自動選擇 Fixed CC 並驗證還原。VON 與同檔 Slew
+獨立試驗須在 Fixed CC 且 Input、Short、Transient 與 Input Timer 皆為 OFF，
+不切換起始功能或模式；其他起始狀態在設定寫入前拒絕。VON 與同檔 Slew
 保存原值、確認測試值讀回，再還原並比對原值。Short 只在端子隔離時驗證 ON／OFF
 狀態並確認 Input OFF。隔離設定批次只需確認一次實體隔離。選取 LIST 時，
 只有容許覆寫指定槽位才輸入 `OVERWRITE <槽號>`，否則不含 LIST 的批次輸入
@@ -1508,7 +1515,9 @@ Readback 加上 `-LiveExtensions` 且未提供 Expected 參數時，不需提供
 Input OFF 時自動測試已知設定並還原原始設定及功能，LIST 讀回不需儲存槽位。
 已啟用 Transient 的起始狀態須可確認並還原原設定及 HOLD 來源；不安全或不可還原的
 狀態在寫入前拒絕。僅自動 Readback 流程（含 VON／Slew／Short）授權此暫時切換；
-獨立 Auxiliary Controls 與 LIST CC 仍須 Transient OFF，不進行此切換。
+獨立 Auxiliary Controls 與 LIST CC 保留原 Fixed CC 及 Transient OFF 守衛，
+混選亦須符合此條件才執行獨立試驗；共用 Auxiliary 案例可重用 Readback 證據。
+只有 Scratch Slot 試驗適用 300 秒單命令例外，自動 LIST Readback 維持 30 秒。
 未加 LiveExtensions 或明確提供舊有 Expected 參數時為唯讀診斷，
 不代表自動驗收。
 
@@ -1779,7 +1788,12 @@ independent operator action; the run stays FAIL.
 The Contributor CLI samples instrument current in one session, dispatching the
 software Trigger only for HOLD or BUS after the baseline is observed and Input ON is rechecked. Plans with pulse or dwell too short for configured VISA query delays are rejected. It checks
 ordered current plateaus and bounded time brackets; insufficient sample
-resolution, missing pulses or wrong order fail the trial. This is sampled
+resolution, missing pulses or wrong order fail the trial. Finite BUS/EXTERNAL
+LIST additionally requires a clear-to-set-to-clear RUN condition (bit 7 of
+the existing read-only `STAT:QUES:COND?`, IT8800 Programming Guide V2.1
+printed pp.15,29), with the final dwell bracket ending at the first stopped
+condition. A stuck final level without RUN completion fails, even if it
+lasts the expected dwell. No assumption is made about terminal current. This is sampled
 functional evidence, not independent pulse-width or amplitude calibration.
 HOLD and TIMER use Transient CC Pulse (baseline B, pulse at A for the
 configured width, then back to B). BUS and EXTERNAL use a two-step LIST CC,
@@ -1818,6 +1832,10 @@ configuration and a bounded observation deadline. It does not enable Input.
 
 HOLD／BUS／TIMER 在初始安全授權後自動取得儀器電流取樣、核對電平順序及
 時間區間，不需人工觀察或回答 Yes／No；HOLD／BUS 派送前再次確認 Input ON。
+有限 BUS／EXTERNAL LIST 另以既有唯讀 `STAT:QUES:COND?` 的 RUN bit 7
+確認從未執行、執行中到首次停止（IT8800 Programming Guide V2.1 印刷頁 15、29），
+最後一段停留時間以首次停止為結束區間；卡在末段且 RUN 未結束不得通過，
+不假設終端電流必定回到零。
 若脈衝或停留時間短到既有 VISA 查詢延遲無法取樣，PlanOnly 即拒絕。
 擷取受單一命令 30 秒與既有 500 ms 返回預留限制，必須在較短的觀察窗內容納事件與最低必要查詢耗時；實際 VISA 延遲仍可能使證據不足。
 EXTERNAL 只保留設備準備及收到擷取

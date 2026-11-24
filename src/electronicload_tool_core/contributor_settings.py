@@ -486,15 +486,16 @@ def _average_readback_trial(session):
 
 
 def _prepare_trial(session, trial, slot, previous_slot_width, *, readback_trial=False):
-    selection = readback._selection(session)
     target = trial[-2:].upper() if trial.startswith("fixed-") else "CC"
-    needs_selection = selection["active_mode"] != "fixed" or selection["function"] != target
-    if needs_selection:
-        selection = _selection_guard(session, allow_transient=readback_trial)
-    elif not readback_trial:
-        _guard(session)
+    selection = None
+    needs_selection = False
+    if readback_trial:
+        selection = _selection_guard(session, allow_transient=True)
+        needs_selection = selection["active_mode"] != "fixed" or selection["function"] != target
     else:
-        _selection_guard(session)
+        # Preserve the entire original standalone guard, not just its
+        # Transient check. Standalone settings never switch function/mode.
+        _guard(session)
     if target == "CR" and c._flag(session, c.LED_QUERY) != "OFF":
         raise LoadError("unsafe_mode", "Plain CR settings require LED OFF.")
     if trial == "short":
@@ -591,16 +592,15 @@ def execute(trial, *, mode, resource, backend, model_id, confirmed, slot=None, p
         mode_change = {"condition": "Original selected function differs or original LIST is selected",
                        "writes": ["FUNC:MODE FIX", f"FUNC {c.TRANSIENT_FUNCTIONS[target]}",
                                   "FUNC <original>", "FUNC:MODE <original FIX/LIST>"]}
-        conditional.setdefault(trial, []).append(mode_change)
         if readback_trial:
+            conditional.setdefault(trial, []).append(mode_change)
             conditional[trial].append({"condition": "Original Transient enabled, HOLD and restorable settings confirmed with Input OFF",
                                        "writes": ["TRAN OFF", "TRAN ON"]})
         if trial == "transient":
             conditional[trial].append({"condition": "Original Trigger Source differs from HOLD",
                                        "writes": ["TRIG:SOUR HOLD", "TRIG:TIM <original>", "TRIG:SOUR <original>"]})
-        queries[trial] += [c.SLOW_RISE_QUERY, c.LED_QUERY]
         if readback_trial:
-            queries[trial] += ["TRIG:SOUR?", "TRIG:TIM?"]
+            queries[trial] += [c.SLOW_RISE_QUERY, c.LED_QUERY, "TRIG:SOUR?", "TRIG:TIM?"]
         return {**marker, "hardware_access": False, "planned_writes": ["SYST:REM", *writes[trial]],
                 **({"conditional_writes": conditional[trial]} if trial in conditional else {}),
                 "queries": ["*IDN?", "INP:STAT?", "FUNC:MODE?", "FUNC?", "TRAN?", "INP:TIM?",

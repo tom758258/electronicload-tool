@@ -71,8 +71,28 @@ def sampled_waveform_evidence(samples, *, source, level_a, level_b, width_a,
     tolerance = min(Decimal("0.01"), min(distances) / 4)
     if tolerance <= 0:
         return None
+    terminal = None
+    if is_list:
+        # A final current level may remain after LIST completion. Only
+        # the observed RUN transition establishes the final dwell boundary.
+        states = [item.get("list_running") for item in samples]
+        if states[0] is not False or states[-1] is not False or True not in states:
+            return None
+        first_running = states.index(True)
+        if any(state is not False for state in states[:first_running]) or not all(
+            state is True for state in states[first_running:-1]
+        ):
+            return None
+        terminal = samples[-1].get("list_status_completed_s")
+        if terminal is None or terminal < samples[-1]["completed_s"]:
+            return None
+        # The final current sample may already be the terminal level;
+        # do not count it as a verified running plateau.
+        waveform_samples = samples[:-1]
+    else:
+        waveform_samples = samples
     runs = []
-    for sample in samples:
+    for sample in waveform_samples:
         value = Decimal(str(sample["current_a"]))
         label = next((key for key, wanted in levels.items() if abs(value - wanted) <= tolerance), None)
         if label is None:
@@ -84,7 +104,7 @@ def sampled_waveform_evidence(samples, *, source, level_a, level_b, width_a,
         else:
             runs.append((label, [sample]))
 
-    def plateau(index, duration, *, allow_open=False):
+    def plateau(index, duration, *, terminal_s=None):
         values = runs[index][1]
         if len(values) < 2:
             return False
@@ -96,19 +116,23 @@ def sampled_waveform_evidence(samples, *, source, level_a, level_b, width_a,
         if lower + 2 * gap < duration:
             return False
         if index + 1 == len(runs):
-            return allow_open and lower >= duration
-        after = runs[index + 1][1][0]
-        if after["completed_s"] - last["started_s"] > 2 * gap:
+            if terminal_s is None:
+                return False
+            after_completed = terminal_s
+        else:
+            after_completed = runs[index + 1][1][0]["completed_s"]
+        if after_completed - last["started_s"] > 2 * gap:
             return False
-        upper = after["completed_s"] - before["started_s"]
+        upper = after_completed - before["started_s"]
         return lower <= duration <= upper
 
     labels = [run[0] for run in runs]
     if is_list:
         pattern = ["Z", *(["A", "B"] * repeats)]
-        if labels[:len(pattern)] != pattern:
+        if labels != pattern:
             return None
-        if not all(plateau(index, widths[(index - 1) % 2], allow_open=index == len(pattern) - 1)
+        if not all(plateau(index, widths[(index - 1) % 2],
+                           terminal_s=terminal if index == len(pattern) - 1 else None)
                    for index in range(1, len(pattern))):
             return None
         events = repeats
@@ -132,4 +156,5 @@ def sampled_waveform_evidence(samples, *, source, level_a, level_b, width_a,
         if not found:
             return None
     return {"source": "instrument_current_samples", "sample_count": len(samples),
-            "max_sample_gap_s": gap, "events_confirmed": events}
+            "max_sample_gap_s": gap, "events_confirmed": events,
+            **({"list_run_completed": True} if is_list else {})}
