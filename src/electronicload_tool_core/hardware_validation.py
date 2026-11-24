@@ -769,6 +769,7 @@ def execute_trigger_observation(*, mode, resource, backend, model_id, expected, 
             # real-time Questionable condition register (read-only, p.29).
             # Reuse the existing Protection register parser; never read
             # or clear the latched event register.
+            before = monotonic_ns()
             condition = _condition(session)
             completed = monotonic_ns()
             if completed >= deadline_ns:
@@ -776,6 +777,7 @@ def execute_trigger_observation(*, mode, resource, backend, model_id, expected, 
             if condition["raw"] & FAULT_MASK:
                 raise LoadError("trigger_observation_unconfirmed", "LIST observation encountered a protection fault.", 3)
             return {"list_running": "RUN" in condition["flags"],
+                    "list_status_started_s": (before - started) / 1e9,
                     "list_status_completed_s": (completed - started) / 1e9}
 
         def sample():

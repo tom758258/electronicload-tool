@@ -2,12 +2,11 @@
 
 import json
 from threading import Event
-from time import monotonic_ns
 
 import pytest
 
 from electronicload_tool_cli import cli
-from electronicload_tool_core import control
+from electronicload_tool_core import control, hardware_validation
 from electronicload_tool_core.errors import LoadError
 from electronicload_tool_core.trigger import sampled_waveform_evidence
 from electronicload_tool_core.simulator import ControlSimulator
@@ -198,7 +197,8 @@ def test_sampled_trigger_evidence_requires_levels_and_time_brackets(source, scen
                 sample["current_a"] = 0.1 if t < 7 else 0.2
             if scenario in {"stuck", "terminal_last"} and t >= 5:
                 sample["current_a"] = 0.2
-            sample.update(list_running=running, list_status_completed_s=t + 0.04)
+            sample.update(list_running=running, list_status_started_s=t + 0.02,
+                          list_status_completed_s=t + 0.04)
         samples.append(sample)
         if is_list and t >= 1 and not running:
             break
@@ -242,12 +242,16 @@ def test_contributor_trigger_observation_plan_and_refusal_before_visa(monkeypatc
     assert "capture deadline" in json.loads(capsys.readouterr().out)["error"]["message"]
 
 
-def test_automatic_bus_does_not_dispatch_after_input_drops(monkeypatch, capsys):
+@pytest.mark.parametrize("source,scenario", [
+    ("BUS", "input_drop"), ("BUS", "completed"), ("BUS", "stuck"),
+    ("EXTERNAL", "completed"), ("EXTERNAL", "stuck"),
+])
+def test_automatic_list_observation_requires_input_and_run_completion(monkeypatch, capsys, source, scenario):
     fake = TriggerFake()
     fake.range = 6
     fake.mode = "LIST"
     fake.input = True
-    fake.values["TRIG:SOUR"] = "BUS"
+    fake.values["TRIG:SOUR"] = "BUS" if source == "BUS" else "EXT"
     fake.values["LIST:COUN"] = "1"
     fake.values["MEAS:CURR"] = "0"
     steps = [{"current_a": 0.1, "slew_a_per_us": 0.1, "width_s": 2},
@@ -255,25 +259,61 @@ def test_automatic_bus_does_not_dispatch_after_input_drops(monkeypatch, capsys):
     fake.list_steps = {f"LIST:{stem}? {index}": str(step[key])
                        for index, step in enumerate(steps, 1)
                        for stem, key in (("LEV", "current_a"), ("SLEW", "slew_a_per_us"), ("WID", "width_s"))}
+    now = 1_000_000_000
+    triggered = None
+    current_reads = 0
     query = fake.query
+    write = fake.write
 
-    def drop_after_readback(command):
+    def observe_query(command):
+        nonlocal now, triggered, current_reads
+        if command == "MEAS:CURR?":
+            current_reads += 1
+            if source == "EXTERNAL" and current_reads == 2:
+                triggered = now
+            fake.values["MEAS:CURR"] = ("0" if triggered is None else
+                                       "0.1" if now - triggered < 2_000_000_000 else "0.2")
+        if command == "STAT:QUES:COND?":
+            fake.values["STAT:QUES:COND"] = str(128 if triggered is not None and
+                (scenario == "stuck" or now - triggered < 4_000_000_000) else 0)
         response = query(command)
-        if fake.remote and command == "LIST:WID? 2":
+        if scenario == "input_drop" and fake.remote and command == "LIST:WID? 2":
             fake.input = False
+        now += 150_000_000
         return response
 
-    monkeypatch.setattr(fake, "query", drop_after_readback)
+    def observe_write(command):
+        nonlocal triggered
+        write(command)
+        if command == "*TRG":
+            triggered = now
+
+    monkeypatch.setattr(fake, "query", observe_query)
+    monkeypatch.setattr(fake, "write", observe_write)
+    monkeypatch.setattr(hardware_validation, "monotonic_ns", lambda: now)
     session(fake, monkeypatch)
-    expected = {"function": "LIST", "trigger": {"source": "BUS"},
+    expected = {"function": "LIST", "trigger": {"source": source},
                 "configuration": {"range": "low", "repeat_count": 1, "steps": steps}}
     args = ["trigger-observe", "--hardware-validation", "trigger",
             "--validation-settings-json", json.dumps(expected), "--observation-seconds", "15",
-            "--deadline-ns", str(monotonic_ns() + 14_000_000_000), "--confirm",
+            "--deadline-ns", str(now + 14_000_000_000), "--confirm",
             "--resource", RESOURCE, "--json"]
-    assert cli.main(args) != 0
-    assert json.loads(capsys.readouterr().out)["error"]["code"] == "input_not_on"
-    assert "MEAS:CURR?" in fake.calls and "*TRG" not in fake.calls
+    code = cli.main(args)
+    result = json.loads(capsys.readouterr().out)
+    if scenario == "completed":
+        assert code == 0
+        evidence = result["result"]["observation"]
+        assert evidence["list_run_completed"] is True
+        assert evidence["events_confirmed"] == 1
+        assert evidence["list_run_bracket"]["uncertainty_s"] <= 0.5
+        assert now >= triggered + 4_000_000_000
+    else:
+        assert code != 0
+        assert result["error"]["code"] == ("input_not_on" if scenario == "input_drop"
+                                            else "trigger_observation_unconfirmed")
+    assert "MEAS:CURR?" in fake.calls
+    assert fake.calls.count("*TRG") == int(source == "BUS" and scenario != "input_drop")
+    assert not any(call in {"INP ON", "INP OFF"} for call in fake.calls)
 
 
 @pytest.mark.parametrize("function,sources", [

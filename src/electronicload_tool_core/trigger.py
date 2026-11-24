@@ -84,7 +84,13 @@ def sampled_waveform_evidence(samples, *, source, level_a, level_b, width_a,
         ):
             return None
         terminal = samples[-1].get("list_status_completed_s")
-        if terminal is None or terminal < samples[-1]["completed_s"]:
+        terminal_start = samples[-1].get("list_status_started_s")
+        last_running = samples[-2].get("list_status_started_s")
+        last_running_end = samples[-2].get("list_status_completed_s")
+        if (None in (terminal, terminal_start, last_running, last_running_end)
+                or not samples[-2]["completed_s"] <= last_running <= last_running_end
+                <= samples[-1]["started_s"] <= samples[-1]["completed_s"] <= terminal_start <= terminal
+                or terminal - last_running > gap_limit):
             return None
         # The final current sample may already be the terminal level;
         # do not count it as a verified running plateau.
@@ -157,4 +163,8 @@ def sampled_waveform_evidence(samples, *, source, level_a, level_b, width_a,
             return None
     return {"source": "instrument_current_samples", "sample_count": len(samples),
             "max_sample_gap_s": gap, "events_confirmed": events,
-            **({"list_run_completed": True} if is_list else {})}
+            **({"list_run_completed": True,
+                "list_run_bracket": {"last_running_started_s": last_running,
+                                     "first_stopped_completed_s": terminal,
+                                     "uncertainty_s": terminal - last_running}}
+               if is_list else {})}
