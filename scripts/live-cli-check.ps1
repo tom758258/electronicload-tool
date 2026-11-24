@@ -2059,7 +2059,7 @@ try {
                 args=@('--trial','list-cc','--slot',[string]$ListScratchSlot,'--confirm-isolated');
                 execution='live';isolated=$true;deadline_ms=300000;
                 expected=@{input_state='OFF';restored=$true;recall_confirmed=$true;exited_list=$true};
-                condition="Fixed CC, source and DUT isolated, Input OFF. Operator must permit overwriting slot $ListScratchSlot. Provide the known prior first-step slot width to verify this Save. Validate A, B, Recall A and restore the original working buffer."}
+                condition="Fixed CC, source and DUT isolated, Input OFF. Authorize overwriting slot $ListScratchSlot once for the isolated batch. Establish and verify B as the slot baseline, then Save A, verify Recall A and restore the original working buffer."}
         }
         $isolationCompatible = @('auxiliary-controls','list-cc','measurement-extensions','readback','system-query')
         $isolatedNeedsSeparateRun = $isolated.Count -gt 0 -and
@@ -2632,6 +2632,8 @@ try {
 
     $phase = 'cases'
     $readbackSelection = $null
+    $isolatedBatchConfirmed = $false
+    $sequenceBatchConfirmed = $false
     for ($i = 1; $i -le $planned.Count; $i++) {
         if ($protectionSelected -and $i -eq $protectionIndex) { Invoke-ProtectionValidation $readbackSelection }
         if ($i -eq $planned.Count) { break }
@@ -2671,19 +2673,15 @@ try {
             }
         }
         $liveArgs = $step.args
-        if ($step.isolated) {
-            $confirmation = if ($step.name -ceq 'list-cc-settings') { "OVERWRITE $ListScratchSlot" } else { 'ISOLATED' }
-            $answer = Read-ValidationAnswer "Confirm the source and DUT are physically disconnected and Input is OFF. Type $confirmation to allow this settings trial" $step.name -DiscardPendingKeys
+        if ($step.isolated -and -not $isolatedBatchConfirmed) {
+            $confirmation = if (@($planned | Where-Object { $_.name -ceq 'list-cc-settings' }).Count) {
+                "OVERWRITE $ListScratchSlot"
+            } else { 'ISOLATED' }
+            $answer = Read-ValidationAnswer "Confirm the source and DUT will remain physically disconnected and Input is OFF. Type $confirmation to authorize all isolated settings trials and any indicated slot overwrite in this batch" $step.name -DiscardPendingKeys
             if ($answer -cne $confirmation) {
                 Fail-Case $step.name 'operator_confirmation_required' 'Isolation or LIST slot overwrite was not confirmed.'
             }
-            if ($step.name -ceq 'list-cc-settings') {
-                $width = Read-ValidationAnswer "Enter the previously verified first-step width (seconds) for slot $ListScratchSlot, or press Enter if unknown. With no prior width, this Save will remain unconfirmed" $step.name -DiscardPendingKeys
-                if ($null -eq $width) {
-                    Fail-Case $step.name 'operator_confirmation_required' 'The LIST slot evidence prompt was interrupted.'
-                }
-                if ($width -cne '') { $liveArgs += @('--previous-slot-width', $width) }
-            }
+            $isolatedBatchConfirmed = $true
         }
         # Mark uncertainty before dispatch, including subprocess/JSON/runtime failures.
         if ($step.command -eq 'input-on') { $inputOnAttempted = $true }
@@ -2709,9 +2707,12 @@ try {
             $report.protection_input_off_unconfirmed = $true
         }
         if ($step.command -ceq 'sequence') {
-            $answer = Read-ValidationAnswer "Confirm dedicated source, reviewed VISA runtime and safe $($step.name) trial. Press Enter to allow one Input ON" $step.name -DiscardPendingKeys
-            if ($null -eq $answer -or $answer -cne '') {
-                Fail-Case $step.name 'operator_confirmation_required' 'Sequence trial was not confirmed.'
+            if (-not $sequenceBatchConfirmed) {
+                $answer = Read-ValidationAnswer 'Confirm dedicated source, reviewed VISA runtime and all four safe Fixed Sequence trials. Press Enter to authorize their four bounded Input ON operations' $step.name -DiscardPendingKeys
+                if ($null -eq $answer -or $answer -cne '') {
+                    Fail-Case $step.name 'operator_confirmation_required' 'Sequence batch was not confirmed.'
+                }
+                $sequenceBatchConfirmed = $true
             }
             $report.sequence_input_off_unconfirmed = $true
         }
@@ -2745,7 +2746,7 @@ try {
         }
         if ($step.workflow_load) { Confirm-WorkflowLoad $step.name }
         if ($step.name -ceq 'list-cc-settings' -and $result.result.save_confirmed -ne $true) {
-            Write-Host 'NOT RUN list-cc-settings: Recall and restoration verified. This Save could not be distinguished from the prior slot contents.'
+            Write-Host 'NOT RUN list-cc-settings: Save confirmation evidence was missing.'
             continue
         }
         if ($protectionSelected -and $step.name -ceq 'input-state') {
@@ -2840,7 +2841,7 @@ try {
         throw 'Protection defaults validation is incomplete because the instrument MAX exceeded the allowed bounds.'
     }
     if ($report.results.error_code -contains 'list_save_unconfirmed') {
-        throw 'LIST validation is incomplete because the previous slot contents were not independently known.'
+        throw 'LIST validation is incomplete because Save was not confirmed.'
     }
     if ($pendingLive.Count) { throw 'LIVE validation is incomplete. Review the NOT RUN cases and their required procedures.' }
     $report.status = if ($readbackSelected -and ($report.results.readback_comparison -contains 'OBSERVED ONLY')) {

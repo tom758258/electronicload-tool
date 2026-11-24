@@ -44,6 +44,7 @@ def physical(command, **arguments):
 
 @pytest.mark.parametrize("scenario", [
     "recall_works", "recall_ignored", "unrestorable", "stale_slot", "unknown_slot", "lost_after_recall",
+    "second_save_ignored", "unknown_stale_slot",
 ])
 def test_contributor_list_requires_independent_recall_then_restores_working_buffer(
     monkeypatch, capsys, scenario,
@@ -54,13 +55,17 @@ def test_contributor_list_requires_independent_recall_then_restores_working_buff
             self.list_steps = {f"LIST:{key}? {index}": value for index in (1, 2)
                                for key, value in (("LEV", ".2"), ("SLEW", ".1"), ("WID", "0.3"))}
             self.slots = {1: {**self.list_steps, "LIST:WID? 1": "1"}}
+            self.save_count = 0
 
         def write(self, command):
             super().write(command)
-            if command == "LIST:SAV 1" and scenario not in {"stale_slot", "unknown_slot"}:
-                self.slots[1] = self.list_steps.copy()
+            if command == "LIST:SAV 1":
+                self.save_count += 1
+                if (scenario not in {"stale_slot", "unknown_stale_slot"}
+                        and not (scenario == "second_save_ignored" and self.save_count == 2)):
+                    self.slots[1] = self.list_steps.copy()
             if command == "LIST:RCL 1":
-                if scenario in {"recall_works", "stale_slot", "unknown_slot"}:
+                if scenario not in {"recall_ignored", "lost_after_recall"}:
                     self.list_steps = self.slots[1].copy()
                 if scenario == "lost_after_recall":
                     self.response_errors["FUNC:MODE?"] = TimeoutError()
@@ -72,7 +77,7 @@ def test_contributor_list_requires_independent_recall_then_restores_working_buff
     start = fake.list_steps.copy()
     session(fake, monkeypatch)
     args = ["contributor-settings", "--trial", "list-cc", "--slot", "1", "--resource", RESOURCE, "--json"]
-    if scenario != "unknown_slot":
+    if scenario not in {"unknown_slot", "unknown_stale_slot"}:
         args += ["--previous-slot-width", "1"]
     assert cli.main(args) == 2 and not fake.calls
     capsys.readouterr()
@@ -91,7 +96,7 @@ def test_contributor_list_requires_independent_recall_then_restores_working_buff
     assert snapshot["fixed_cc"]["range"] == "low"
     if scenario == "lost_after_recall":
         assert status == 3 and result["error"]["details"]["manual_action_required"]
-        assert fake.mode == "LIST" and fake.list_steps["LIST:WID? 1"] == "1"
+        assert fake.mode == "LIST" and fake.list_steps["LIST:WID? 1"] == "2"
         assert fake.calls[-2:] == ["LIST:RCL 1", "FUNC:MODE?"]
         return
 
@@ -99,18 +104,18 @@ def test_contributor_list_requires_independent_recall_then_restores_working_buff
         assert status == 0
         details = result["result"]
         assert details["recall_confirmed"] and details["restored"]
-        assert details["save_confirmed"] == (scenario == "recall_works")
-        assert details.get("saved_slot") == (1 if scenario == "recall_works" else None)
+        assert details["save_confirmed"] is True and details["saved_slot"] == 1
+        assert fake.save_count == 2
+        assert fake.slots[1]["LIST:WID? 1"] == details["a_width_s"]
+        assert details["a_width_s"] != details["b_width_s"]
     else:
         assert status == 3
         assert result["error"]["code"] == "readback_mismatch" and result["error"]["details"]["restored"]
     assert fake.list_steps == start and fake.mode == "FIX" and not fake.input
-    assert fake.slots[1]["LIST:WID? 1"] == ("1" if scenario in {"stale_slot", "unknown_slot"} else "2")
-    a, b = (1, 2) if scenario == "unknown_slot" else (2, 1)
-    assert [command for command in fake.calls if "?" not in command] == [
-        "SYST:REM", f"LIST:WID 1,{a}", "FUNC:MODE LIST", "LIST:SAV 1", f"LIST:WID 1,{b}", "LIST:RCL 1",
-        "FUNC:MODE FIX", "LIST:WID 1,0.3",
-    ]
+    writes = [command for command in fake.calls if "?" not in command]
+    assert "INP ON" not in writes
+    if scenario in {"recall_works", "unknown_slot"}:
+        assert writes.count("LIST:SAV 1") == writes.count("LIST:RCL 1") == 2
 
 
 @pytest.mark.parametrize("function,sources", [

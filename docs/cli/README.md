@@ -1197,8 +1197,9 @@ and Worker LIVE are closed for Sequence.
 
 The contributor scope accepts only the four fixed documents, for 0.1 A CC,
 3 V CV, 1000 Ω CR and 0.10 W CW. Each has one ON, a 0.25 s Wait, measurement,
-and verified OFF. The script requires operator confirmation before each trial
-and enforces a 30 s command deadline and 900 s total deadline. The Core handles
+and verified OFF. The script requires one operator confirmation for the four-trial
+Sequence batch, retaining per-request CLI confirmation, a 30 s command deadline
+and a 900 s total deadline. The Core handles
 trusted cleanup on the existing session. The CLI directs the operator to
 switch off the load independently if a Remote transition during setup or Input ON
 ends without a fresh OFF readback, or if a run fails with Input observed ON
@@ -1419,15 +1420,13 @@ DUT and start in Fixed CC with Input, Short, Transient and Input Timer OFF.
 VON and same-range Slew save the original values, verify test readback, then
 restore and verify the original values. The Short trial checks ON and OFF
 state with isolated terminals and verifies Input OFF. LIST uses different
-first-step widths for A and B, saves A to `-ListScratchSlot`, and checks all
-steps after recalling A. Enter `OVERWRITE <slot>` only if that slot may
-retain A. To verify Save, supply a previously verified first-step width for
-the same instrument and slot, with no intervening change to the slot. The
-standalone CLI takes this value via `--previous-slot-width`. The trial
-chooses an A that differs from the supplied width. With no known prior
-width, Recall and Exit can be verified and Save remains unconfirmed. A
-verified Recall also provides the prior width for a future trial if the slot
-stays unchanged.
+first-step widths for A and B. Confirm isolation once for the isolated settings
+batch. Enter `OVERWRITE <slot>` if LIST is selected, only if that slot may be
+overwritten. Otherwise enter `ISOLATED`. The trial saves B to `-ListScratchSlot`,
+changes the working buffer to A, and verifies Recall restores B. It then saves A,
+changes the working buffer to B, and verifies Recall restores A. Both comparisons
+cover the complete LIST configuration. No manually supplied prior slot width is
+required. The slot retains A after a successful trial.
 
 Before writing, the trial displays a private recovery baseline, including
 the original working LIST and Fixed CC settings for LIST. Keep the terminal
@@ -1467,12 +1466,12 @@ SCPI 寫入時間及 `load_duration_confirmed: false`。操作者核對電流記
 `auxiliary-controls` 與 `list-cc` 須物理隔離來源及待測物，從 Fixed CC 開始，
 確認 Input、Short、Transient 與 Input Timer 皆為 OFF。VON 與同檔 Slew
 保存原值、確認測試值讀回，再還原並比對原值。Short 只在端子隔離時驗證 ON／OFF
-狀態並確認 Input OFF。LIST 只修改第一步寬度來區分 A 與 B，存 A 至
-`-ListScratchSlot`，召回後逐步核對 A。只有容許該槽保留 A 時，才輸入
-`OVERWRITE <槽號>`。要驗證 Save，請提供同一台儀器、同一槽位先前已驗證且至今
-未被修改的第一步寬度。單獨執行 CLI 可用 `--previous-slot-width` 傳入。試驗會
-選用與該寬度不同的 A。舊寬度未知時，可確認 Recall 與 Exit，Save 則維持未確認。
-已驗證的 Recall 可提供下次試驗的舊寬度，前提是這段期間該槽沒有變更。
+狀態並確認 Input OFF。隔離設定批次只需確認一次實體隔離。選取 LIST 時，
+只有容許覆寫指定槽位才輸入 `OVERWRITE <槽號>`，否則不含 LIST 的批次輸入
+`ISOLATED`。LIST 以不同第一步寬度區分 A 與 B。試驗將 B 存至
+`-ListScratchSlot`、將工作緩衝改為 A，再確認 Recall 還原 B。接著儲存 A、
+把工作緩衝改為 B，確認 Recall 還原 A。兩次均比對完整 LIST 設定，
+不需人工提供槽位舊寬度。試驗成功後該槽保留 A。
 
 試驗會在寫入前顯示私有復原基準，LIST 基準包含原始工作緩衝及 Fixed CC 設定。
 請私下保留終端紀錄。單獨執行 CLI 時，基準會由 stderr 輸出。腳本的可分享報告

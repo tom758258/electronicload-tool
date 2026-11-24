@@ -1355,7 +1355,8 @@ def test_explicit_live_extensions_never_use_simulation(run_script, mode, connect
     if 'list-cc-settings' in cases:
         trial = cases['list-cc-settings']
         assert 'LIST:WID? {step}' in trial['queries']
-        assert f'LIST:SAV {slot}' in trial['planned_writes'] and f'LIST:RCL {slot}' in trial['planned_writes']
+        assert trial['planned_writes'].count(f'LIST:SAV {slot}') == 2
+        assert trial['planned_writes'].count(f'LIST:RCL {slot}') == 2
         assert 'CURR:SLEW:STAT?' in trial['queries']
         assert ['LIST:WID 1,<original>'] in [branch['writes'] for branch in trial['conditional_writes']]
         restoration = trial['conditional_writes'][-1]['writes']

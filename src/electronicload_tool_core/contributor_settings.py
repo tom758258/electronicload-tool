@@ -188,19 +188,26 @@ def _list_trial(session, slot, previous_slot_width):
     def exercise(write):
         if c._check_mode_change(session) or _list_settings(session) != baseline:
             raise _mismatch("The original LIST or its mode interlocks changed before the trial.")
-        write(f"LIST:WID 1,{first:f}")
+        # Establish a known slot baseline before testing a different Save.
+        write(f"LIST:WID 1,{second:f}")
         write("FUNC:MODE LIST")
+        require_list(b, "B baseline")
+        write(f"LIST:SAV {slot}")
+        write(f"LIST:WID 1,{first:f}")
+        require_list(a, "A before baseline Recall")
+        write(f"LIST:RCL {slot}")
+        require_list(b, "Baseline Recall")
+
+        write(f"LIST:WID 1,{first:f}")
         require_list(a, "A")
         write(f"LIST:SAV {slot}")
         write(f"LIST:WID 1,{second:f}")
-        require_list(b, "B")
+        require_list(b, "B before final Recall")
         write(f"LIST:RCL {slot}")
-        require_list(a, "Recall")
-        # Recall proves this Save only if A differs from the known prior contents.
+        require_list(a, "Final Recall")
         return {"a_width_s": str(first), "b_width_s": str(second),
-                "save_confirmed": previous_slot_width is not None,
-                "recall_confirmed": True, "exited_list": True,
-                **({"saved_slot": slot} if previous_slot_width is not None else {})}
+                "save_confirmed": True, "recall_confirmed": True,
+                "exited_list": True, "saved_slot": slot}
 
     def restore():
         _guard(session, modes=_FIXED | {"LIST"})
@@ -245,8 +252,9 @@ def execute(trial, *, mode, resource, backend, model_id, confirmed, slot=None, p
             "von": ["VOLT:ON <test/original>", "VOLT:LATC <test/original>"],
             "slew": [f"{stem} <test/original>" for stem in readback.SLEW_QUERIES.values()],
             "short": ["INP:SHOR 1", "INP:SHOR 0"],
-            "list-cc": ["LIST:WID 1,<A>", "FUNC:MODE LIST", f"LIST:SAV {slot}", "LIST:WID 1,<B>",
-                        f"LIST:RCL {slot}", "FUNC:MODE FIX"],
+            "list-cc": ["LIST:WID 1,<B>", "FUNC:MODE LIST", f"LIST:SAV {slot}", "LIST:WID 1,<A>",
+                        f"LIST:RCL {slot}", "LIST:WID 1,<A>", f"LIST:SAV {slot}",
+                        "LIST:WID 1,<B>", f"LIST:RCL {slot}", "FUNC:MODE FIX"],
         }
         queries = {
             "von": [readback.VON_THRESHOLD_QUERY, readback.VON_LATCH_QUERY],

@@ -545,8 +545,9 @@ Model an early drop during Timed Load and require the operator's current-trace
 confirmation for script PASS. For isolated settings, cover refusal before
 an unrestorable baseline, display of the private recovery baseline before
 writes, and no blind writes after communication is lost. Cover Short without
-`INP ON`, LIST B before Recall A, and an ignored Save when the slot holds
-a result from a previous run. In PlanOnly, check the safety queries,
+`INP ON`, LIST baseline B established by Recall from a different working value,
+then Save A and Recall from B, including ignored Save or Recall without a
+manually supplied prior slot width. In PlanOnly, check the safety queries,
 conditional cleanup writes and separate isolated run for a source-connected
 or mode-changing selection. For Timer expiry, use
 a controlled clock for early OFF refusal and
@@ -563,7 +564,8 @@ remains a separately authorized check with an independent hardware cutoff.
 10 秒內確認 OFF、Stop 的清理及通訊失信時的獨立停損提示。Timed Load 模擬
 提前掉載，核對腳本須由操作者確認電流記錄才判為 PASS。隔離設定核對無法還原原值
 時拒絕寫入、寫入前顯示私有復原基準，以及通訊失信後停止寫入。Short 不開啟
-Input。LIST 核對召回 A 前確實為 B，並涵蓋 Save 被忽略且槽內仍為舊結果。
+Input。LIST 核對從不同工作值 Recall B 建立基準，再 Save A 並從 B 召回 A；
+不需人工提供舊寬度，涵蓋 Save 或 Recall 未生效。
 PlanOnly 核對安全查詢及條件式清理。混選含需接電源或切換模式的試驗時，隔離
 案例須分開執行。Timer 使用可控制的
 時鐘驗證過早 OFF 拒絕與清理完畢後由操作者確認。以 Fake VISA 模擬延遲的
