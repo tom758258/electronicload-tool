@@ -466,7 +466,7 @@ def test_workflow_contributor_cli_uses_one_readonly_visa_session(fake_visa, caps
     assert fake_visa.calls.count("open_resource") == fake_visa.calls.count("session_close") == 1
 
 
-@pytest.mark.parametrize("scenario", ["timed", "capacity", "stop", "lost", "late_off", "voltage"])
+@pytest.mark.parametrize("scenario", ["timed", "early_wake", "capacity", "stop", "lost", "late_off", "voltage"])
 def test_contributor_cc_owns_bounded_on_and_cleanup(clock, monkeypatch, capsys, scenario):
     class PhysicalLoad(ValidationFake):
         query_delay = 0.15
@@ -504,6 +504,13 @@ def test_contributor_cc_owns_bounded_on_and_cleanup(clock, monkeypatch, capsys, 
         yield fake, {}
 
     monkeypatch.setattr(workflows, "open_session", open_fake)
+    if scenario == "early_wake":
+        wait = clock.wait
+
+        def wake_early(timeout):
+            return wait(timeout - 0.0005 if timeout > 1 else timeout)
+
+        monkeypatch.setattr(clock, "wait", wake_early)
     clock.now = 10
     reported_start = []
     discharge = scenario in {"capacity", "voltage"}
@@ -540,7 +547,7 @@ def test_contributor_cc_owns_bounded_on_and_cleanup(clock, monkeypatch, capsys, 
     result = outcome["result"]
     assert result["input_state"] == "OFF" and result["cleanup"]["off_confirmed"]
     assert result["off_confirmed_ns"] - result["on_write_started_ns"] <= 10**10
-    if scenario == "timed":
+    if scenario in {"timed", "early_wake"}:
         assert fake.off_at - fake.dispatched == 5
     else:
         assert result["stop_reason"] == "capacity_cutoff" and result["capacity_ah"] >= 0.00010

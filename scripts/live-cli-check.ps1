@@ -1827,9 +1827,13 @@ try {
         throw 'Serial parameters require -Connection asrl.'
     }
     $workflowLoadSelected = $LiveExtensions -and $workflowSelected
-    if (($sequenceSelected -or $protectionSelected -or $workflowLoadSelected) -and
-        ($SourceVoltageLimitV -ne 5 -or $SourceCurrentLimitA -ne 0.8)) {
-        throw 'Sequence, Protection and Contributor Workflow load trials require a dedicated 5 V / 0.8 A source.'
+    if ($SourceVoltageLimitV -ne 5 -or $SourceCurrentLimitA -ne 0.8) {
+        if ($sequenceSelected -or $protectionSelected) {
+            throw 'Sequence and Protection require a dedicated 5 V / 0.8 A source.'
+        }
+        if ($workflowLoadSelected) {
+            throw 'Contributor Workflow load trials require a dedicated 5 V / 0.8 A source.'
+        }
     }
     if ($LiveExtensions -and -not @($selectedModes | Where-Object { $_ -in $extensionModes }).Count) {
         throw '-LiveExtensions requires a selection including an extension or Workflow mode.'

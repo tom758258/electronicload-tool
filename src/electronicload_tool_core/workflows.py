@@ -389,13 +389,17 @@ def _run(session, command, settings, stop, result, quantities, record_row, *, re
             start = result["on_write_started_ns"] / 1e9 if require_input_off else None
             if command == "cc-timed-load":
                 if start is not None:
+                    deadline = start + CONTRIBUTOR_TIMED_SECONDS
                     current = _sample(session, ("current",))["current_a"]
                     result["measured_current_a"] = current
-                    if monotonic() > start + CONTRIBUTOR_TIMED_SECONDS:
+                    if monotonic() > deadline:
                         raise LoadError("workflow_timeout", "Current readback arrived after the 5 s load window.", 3)
                     if abs(Decimal(str(current)) - CONTRIBUTOR_CURRENT) > Decimal("0.01"):
                         raise LoadError("readback_mismatch", "Measured load current differs from 0.1 A.", 3)
-                    _wait(stop, max(0, start + CONTRIBUTOR_TIMED_SECONDS - monotonic()))
+                    # Event waits can return slightly early on Windows.
+                    while (remaining := deadline - monotonic()) > 0:
+                        _wait(stop, remaining)
+                    _check_stop(stop)
                     return "duration_elapsed"
                 return _wait_load(stop, settings["duration_s"])
             return _measure(session, command, settings, quantities, stop, result, record_row, load_started=start)

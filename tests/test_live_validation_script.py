@@ -248,10 +248,15 @@ def test_protection_preflight_and_explicit_mode_report_without_visa(run_script):
 
 
 @pytest.mark.parametrize('extra', [['-SourceCurrentLimitA', '1'], ['-SourceVoltageLimitV', '6']])
-def test_protection_precheck_rejects_overrides(run_script, extra):
-    result = run_script(['-Modes', 'protection', '-PlanOnly', *extra])
+@pytest.mark.parametrize('mode,expected', [
+    ('protection', 'Sequence and Protection require a dedicated 5 V / 0.8 A source.'),
+    ('workflow', 'Contributor Workflow load trials require a dedicated 5 V / 0.8 A source.'),
+])
+def test_source_precheck_rejects_overrides(run_script, mode, expected, extra):
+    opt_in = ['-LiveExtensions'] if mode == 'workflow' else []
+    result = run_script(['-Modes', mode, '-PlanOnly', *opt_in, *extra])
     assert result.returncode == 2
-    assert 'Sequence and Protection require a dedicated 5 V / 0.8 A source.' in result.stdout
+    assert expected in result.stdout
 
 
 @pytest.mark.parametrize('scenario,calls,code', [
