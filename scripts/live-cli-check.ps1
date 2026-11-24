@@ -9,7 +9,7 @@ trigger and input-timer. Omitted -Modes selects all default modes.
 -Modes full (default) selects all trials. USB and ASRL use the same matrix.
 -Modes workflow runs only dry-run and simulation, without an instrument.
 -Modes measurement-extensions,auxiliary-controls,list-cc selects offline checks.
--LiveExtensions explicitly requests physical cases for those four modes.
+-LiveExtensions explicitly requests automatic Readback and physical cases for those four modes.
 -InputTimerOnly is a backward-compatible shortcut for the input-timer-only trial.
 Requires approved source/DUT limits and interactive confirmation before hardware access.
 -PlanOnly validates every planned CLI request without VISA or hardware access.
@@ -1073,7 +1073,9 @@ function Invoke-TimerExpiry($Step) {
         }
         $earliestExpiryNs = $on.on_write_started_ns + [long][int]$TimerSeconds * 1000000000L
         $deadlineNs = Get-TimerObservationDeadlineNs $on.on_write_started_ns
-        $lastOnNs = $on.on_confirmed_ns
+        # ON confirmation is a completion timestamp, not a query-start
+        # lower bound. Only a timed Input query can exclude early OFF.
+        $lastOnNs = 0L
         # Start one second before expiry so a definite early OFF can be rejected.
         $delay = [Math]::Floor(($earliestExpiryNs - 1000000000L - $nowNs) / 1000000)
         if ($delay -gt 0) { Start-Sleep -Milliseconds $delay }
@@ -2095,7 +2097,7 @@ try {
             $planned += @(
                 @{name='workflow-cc-timed-load';command='cc-timed-load';args=$ccArgs + @('--duration-s','5');
                   execution='live';workflow_load=$true;expected=@{stop_reason='duration_elapsed';input_state='OFF'};
-                  condition='5 V / 0.8 A source, Fixed CC Low, 5 s at 0.1 A checked by automatic instrument current samples; independent cutoff within 10 s of SCPI Input ON including OFF confirmation'},
+                  condition='5 V / 0.8 A source, Fixed CC Low, 5 s at 0.1 A with bounded final current/Input sampling then immediate OFF; independent cutoff within 10 s of SCPI Input ON including OFF confirmation'},
                 @{name='workflow-cc-discharge';command='cc-discharge';args=$ccArgs + @('--interval-s','0.5',
                   '--cutoff-capacity-ah','0.00010','--cutoff-voltage','4.5','--timeout-s','6');
                   execution='live';workflow_load=$true;expected=@{stop_reason='capacity_cutoff';input_state='OFF'};

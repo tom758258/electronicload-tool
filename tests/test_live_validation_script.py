@@ -1071,6 +1071,14 @@ try {
     Invoke-LiveCommand -Command 'contributor-settings' -CaseName 'auxiliary-controls-von' -ExtraArgs @(
         '--trial', 'von', '--confirm-isolated')
 } catch { Write-Host $_.Exception.Message }
+# Success responses also contain private untouched baseline values.
+$script:report.results += [ordered]@{name='list-status';command='contributor-settings';execution='live';status='PASS';
+    response=@{result=@{restored=$true;input_state='OFF';expected_width_s='1';
+        observed=@{configuration=@{steps=@(@{width_s='1'},@{width_s='17.123456789'})}}}}}
+$script:report.results += [ordered]@{name='transient-status';command='contributor-settings';execution='live';status='PASS';
+    response=@{result=@{restored=$true;input_state='OFF';expected_level_a='0.2';
+        observed=@{configuration=@{level_b_a='0.876543219'}}}}}
+Save-Report
 """)
     assert result.returncode == 0, result.stdout + result.stderr
     baseline = next(line for line in result.stdout.splitlines() if line.startswith('Settings recovery baseline'))
@@ -1078,7 +1086,11 @@ try {
     assert 'keep the terminals isolated' in result.stdout, result.stdout + result.stderr
     assert result.stdout.index(baseline) < result.stdout.index('keep the terminals isolated')
     report_text = (report_dir / 'shareable/report.json').read_text(encoding='utf-8-sig')
-    case, = json.loads(report_text)['cases']
+    case, list_case, transient_case = json.loads(report_text)['cases']
+    assert list_case['restored'] and list_case['expected_width_s'] == '1'
+    assert transient_case['restored'] and transient_case['expected_level_a'] == '0.2'
+    assert 'observed' not in list_case and 'observed' not in transient_case
+    assert '17.123456789' not in report_text and '0.876543219' not in report_text
     assert case['status'] == 'FAIL' and case['error_code'] == 'settings_restore_unconfirmed'
     assert case['manual_action_required']
     assert '0.536' not in report_text and not (report_dir / 'private').exists()
@@ -1177,6 +1189,8 @@ def test_trigger_validation_script_plan_preflight_and_noninteractive_refusal(run
     assert list_plan['repeat_count'] == 1
     assert [step['width_s'] for step in list_plan['steps']] == [2, 2]
     assert not any(name.startswith('transient-') or name.startswith('cc-') for name in cases)
+    short = run_script(['-Modes', 'trigger', '-PulseWidth', '0.001', '-PlanOnly'])
+    assert short.returncode == 2, short.stdout + short.stderr
     refused = run_script(['-Modes', 'trigger'])
     assert refused.returncode == 2 and 'requires an interactive console' in refused.stdout
     mixed = run_script(['-Modes', 'transient-cc,trigger', '-PlanOnly'])
@@ -1387,6 +1401,8 @@ def test_explicit_live_extensions_never_use_simulation(run_script, mode, connect
         assert 'error_code' not in trial
         if mode == 'full':
             assert list(cases).index('trigger-restore') < list(cases).index('list-cc-settings')
+            assert list(cases).index('workflow-cc-discharge') < list(cases).index('protection-start-state')
+            assert list(cases).index('trigger-restore') < list(cases).index('average-status')
     if 'auxiliary-controls-von' in cases:
         if mode == 'full':
             for name, prior in (('von', 'von-status'), ('short', 'short-status'), ('slew', 'fixed-slew-status')):

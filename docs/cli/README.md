@@ -1435,7 +1435,7 @@ required. The slot retains A after a successful trial.
 Before writing, the trial displays a private recovery baseline, including
 the original working LIST and Fixed CC settings for LIST. Keep the terminal
 record private. The standalone CLI sends the baseline to stderr and the
-script keeps it out of shareable reports. The LIST trial returns to Fixed CC
+script keeps it out of shareable reports, including untouched values in successful automatic settings readbacks. The LIST trial returns to Fixed CC
 and verifies the original working buffer. Configuration writes require a
 restorable baseline. If restoration cannot be verified after a write, keep
 the terminals isolated and use the recorded baseline for recovery at the
@@ -1506,7 +1506,7 @@ Input OFF 時自動測試已知設定並還原原始設定及功能，LIST 讀�
 | `-Connection` | `usb` | `usb` for USB INSTR or `asrl` for RS-232 ASRL INSTR |
 | `-Backend` | `system` | System VISA (`@ivi`) only |
 | `-Modes` | `full` | FULL, a single mode or a comma-separated selection |
-| `-LiveExtensions` | Off | Request contributor hardware cases for Workflow and extension modes |
+| `-LiveExtensions` | Off | Request automatic Readback and contributor hardware cases for Workflow and extension modes |
 | `-ListScratchSlot` | 1 | LIST test slot (1–7) with per-run overwrite confirmation |
 | `-InputTimerOnly` | Off | Backward-compatible Timer-only shortcut, incompatible with `-Modes` |
 | `-SourceVoltageLimitV` | **5 V** | Operator-declared external source voltage, override >0 to 18 V |
@@ -1682,7 +1682,7 @@ interlocks, saves and restores the original Fixed CC and protection settings,
 and stops at the first failed trial. The temporary Fixed CC setpoint is 0.20 A.
 The operator confirms each Input ON with a fresh Enter.
 
-The script reuses an available independent Readback snapshot. From Fixed CV
+The script reuses an available independent Readback snapshot only if no intervening mode-changing Workflow ran; otherwise it reads the current state. From Fixed CV
 or CW it confirms Input and Short are both OFF, prepares Fixed CC at 0.20 A Low,
 and independently verifies the settings with Input OFF before taking the first
 Protection snapshot. The prepared Fixed CC settings become the trial restore
@@ -1802,7 +1802,9 @@ The CLI-only `trigger-observe` command accepts the exact validation
 configuration and a bounded observation deadline. It does not enable Input.
 
 HOLD／BUS／TIMER 在初始安全授權後自動取得儀器電流取樣、核對電平順序及
-時間區間，不需人工觀察或回答 Yes／No；EXTERNAL 只保留設備準備及收到擷取
+時間區間，不需人工觀察或回答 Yes／No；HOLD／BUS 派送前再次確認 Input ON。
+若脈衝或停留時間短到既有 VISA 查詢延遲無法取樣，PlanOnly 即拒絕。
+EXTERNAL 只保留設備準備及收到擷取
 就緒提示後提供實體訊號。程式在確認 OFF 後才完成波形驗收。取樣不足、期限超過
 或還原失敗均不得 PASS。這是儀器自身取樣的功能證據，不是獨立波形校正。
 既有 ON／OFF 期限及 Product／Worker LIVE 權限不變。

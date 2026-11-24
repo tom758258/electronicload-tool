@@ -243,8 +243,8 @@ def _selection_guard(session, *, allow_transient=False):
             or c._flag(session, c.SLOW_RISE_QUERY) != "OFF"
             or c._check_mode_change(session)):
         raise LoadError("unsafe_mode", "Settings mode changes require Input, Short, Timer, Transient and Slow Rise OFF.")
-    if original["active_mode"] == "list" and original["function"] != "CC":
-        raise LoadError("unsafe_mode", "Only CC LIST can be restored.")
+    if original["active_mode"] == "list" and (original["function"] != "CC" or original["transient_enabled"]):
+        raise LoadError("unsafe_mode", "Only CC LIST with Transient OFF can be restored.")
     return original
 
 
@@ -266,31 +266,37 @@ def _select_fixed(session, function, write):
 
 
 def _with_selection(session, original, function, exercise, restore, baseline):
-    entered = False
+    target_changed = False
     original_transient = None
     original_trigger = None
     if original["transient_enabled"]:
         original_transient = readback._transient(session, original)["configuration"]
         original_trigger = _trigger_snapshot(session)
+        if (original["function"] != "CW" and original_transient["range"] not in {"low", "high"}):
+            raise LoadError("unsafe_mode", "The original Transient range cannot be restored.")
         if original_trigger["source"] != "HOLD":
             raise LoadError("unsafe_mode", "An enabled Transient baseline requires HOLD for safe isolated restoration.")
 
     def run(write):
-        nonlocal entered
         if original_transient is not None:
             if (readback._transient(session, original)["configuration"] != original_transient
                     or _trigger_snapshot(session) != original_trigger):
                 raise _mismatch("Original Transient or Trigger changed before testing.")
         _select_fixed(session, function, write)
-        entered = True
-        return exercise(write)
+
+        def exercise_write(command):
+            nonlocal target_changed
+            target_changed = True
+            write(command)
+
+        return exercise(exercise_write)
 
     def cleanup():
         def write(command):
             c._input_off(session)
             c._write(session, command)
 
-        if entered:
+        if target_changed:
             restore()
         _select_fixed(session, original["function"], write)
         if original["active_mode"] == "list":

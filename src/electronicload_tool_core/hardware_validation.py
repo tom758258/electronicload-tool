@@ -661,7 +661,8 @@ def execute_trigger_observation(*, mode, resource, backend, model_id, expected, 
     widths = [levels["width_a"]] + ([levels["width_b"]] if is_list else [])
     # Even consecutive queries consume two configured query delays plus
     # the existing 50 ms sampling wait. Reject impossible plans before VISA.
-    if min(0.5, float(min(widths)) / 4) <= 2 * QUERY_DELAY_S + 0.05:
+    minimum_gap = max(2 * QUERY_DELAY_S + 0.05, 3 * QUERY_DELAY_S if source in {"HOLD", "BUS"} else 0)
+    if min(0.5, float(min(widths)) / 4) <= minimum_gap:
         raise LoadError("argument_error", "Trigger dwell or pulse is too short for automatic current sampling.")
     if levels["level_a"] == levels["level_b"] or needed > seconds:
         raise LoadError("argument_error", "Trigger observation needs distinct levels and a sufficient window.")

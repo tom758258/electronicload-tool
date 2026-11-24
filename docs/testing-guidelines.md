@@ -443,8 +443,7 @@ mismatches for LIST and Transient write verification.
 Select existing help/version tests when changing CLI arguments. Exercise
 `-Modes readback -PlanOnly` and noninteractive refusal, and the directly
 affected Fixed, Transient, TRACE and Trigger script plans. Verify that the
-automatic readback plan exercises known settings and verifies restoration, and
-that explicit legacy diagnostics distinguish a missing comparison baseline. Use a fictional USB Resource and block VISA in child processes.
+automatic readback plan requires -LiveExtensions, exercises known settings and verifies restoration including a supported enabled Transient baseline; without the flag and with explicit legacy diagnostics, distinguish a missing comparison baseline. Use a fictional USB Resource and block VISA in child processes.
 Real-instrument validation requires the separate interactive approval and
 reports physical cases as `NOT RUN` in PlanOnly.
 
@@ -541,8 +540,7 @@ read-only sampling and measurements and the Input OFF guards for Workflow and
 Average with recording Fake VISA. For the CC trials, verify the write-start
 clock, capacity/voltage outcomes, confirmed OFF within the 10-second limit,
 Stop cleanup and the independent-cutoff notice when communication fails.
-Model an early drop, missing sample coverage and verified OFF during Timed
-Load; require automatic instrument-sample evidence for script PASS. For isolated settings, cover refusal before
+Model an early drop including immediately before the five-second boundary, missing sample coverage and verified OFF during Timed Load; require automatic boundary current/Input evidence for script PASS. For isolated settings, cover refusal before
 an unrestorable baseline, display of the private recovery baseline before
 writes, and no blind writes after communication is lost. Cover Short without
 `INP ON`, LIST baseline B established by Recall from a different working value,
@@ -551,8 +549,7 @@ manually supplied prior slot width. In PlanOnly, check the safety queries,
 conditional cleanup writes and the isolated batch after source-connected
 and Trigger trials. Check automatic Readback settings and restoration with
 a recording fake, and one isolation/slot authorization for the batch. For Timer expiry, use
-a controlled clock for early OFF refusal, a timely ON/OFF observation bracket
-and automatic confirmation after cleanup. Use a delayed Fake VISA ON reply to verify
+a controlled clock for early OFF refusal, first OFF crossing the expiry boundary, and an ON query starting at or after expiry followed by OFF within the existing window; confirmation follows cleanup. Use a delayed Fake VISA ON reply to verify
 that the SCPI write-start deadline already applies while the ON subprocess is
 still running. With a process substitute that stays running after termination is
 requested, verify that the operator gets the cutoff prompt at the observation
@@ -563,13 +560,13 @@ remains a separately authorized check with an independent hardware cutoff.
 離線檢查使用虛構 Resource 並阻擋實體 VISA。以 Fake VISA 驗證 Workflow
 和 Average 的 Input OFF 前置。CC 案例核對 SCPI 寫入起點、容量及電壓截止、
 10 秒內確認 OFF、Stop 的清理及通訊失信時的獨立停損提示。Timed Load 模擬
-提前掉載及取樣涵蓋不足，核對腳本須有自動電流取樣證據才判為 PASS。隔離設定核對無法還原原值
+提前掉載（含第 5 秒前最後一刻）及取樣涵蓋不足，核對腳本須有時間界線的電流及 Input 證據才判為 PASS。隔離設定核對無法還原原值
 時拒絕寫入、寫入前顯示私有復原基準，以及通訊失信後停止寫入。Short 不開啟
 Input。LIST 核對從不同工作值 Recall B 建立基準，再 Save A 並從 B 召回 A；
 不需人工提供舊寬度，涵蓋 Save 或 Recall 未生效。
 PlanOnly 核對安全查詢及條件式清理。混選先執行需接電源的試驗及 Trigger，
 再進入一次隔離及槽位授權批次；以 Fake VISA 驗證 Readback 自動設定與還原。Timer 使用可控制的
-時鐘驗證過早 OFF 拒絕、到期前後 ON／OFF 時間區間及清理後自動確認。以 Fake VISA 模擬延遲的
+時鐘驗證過早 OFF、首次 OFF 跨越期限不得通過，以及到期後開始查詢 ON 再於觀察期限內取得 OFF，清理後才自動確認。以 Fake VISA 模擬延遲的
 ON 回覆，驗證 ON 子程序尚在執行時已受 SCPI 寫入起點的期限約束。用收到
 終止要求後仍在執行的程序替身，確認提示在觀察期限到達時發出，且清理時
 未另開 VISA Session。實機到期驗證仍需另行授權及獨立的硬體停損。
@@ -577,10 +574,9 @@ ON 回覆，驗證 ON 子程序尚在執行時已受 SCPI 寫入起點的期限�
 For automatic Contributor Trigger observation, exercise the affected
 `test_trigger.py` waveform cases and `test_live_validation_script.py` plan,
 refusal, deadline and cleanup cases. Check level order, timing brackets,
-missing or sparse samples, and source-specific dispatch (no extra software
-trigger for TIMER or EXTERNAL). Only EXTERNAL retains physical signal
+missing or sparse samples, rejection of infeasible timing before VISA, and source-specific dispatch with a final Input ON guard (no extra software trigger for TIMER or EXTERNAL). Only EXTERNAL retains physical signal
 preparation; sampled instrument evidence is not independent calibration.
 
 Contributor Trigger 自動驗收僅測試直接受影響的取樣、電平順序、時間區間、
-資料不足、觸發派送、PlanOnly、安全拒絕及清理。TIMER／EXTERNAL 不額外
+資料不足、不可取樣時的 PlanOnly 拒絕、觸發派送前最後 Input ON 互鎖及清理。TIMER／EXTERNAL 不額外
 送出軟體觸發，僅 EXTERNAL 保留實體訊號準備；取樣不等於獨立波形校正。
