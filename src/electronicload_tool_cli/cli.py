@@ -26,13 +26,14 @@ from electronicload_tool_core.control import (CONTROL_COMMANDS, execute as contr
                                               validate_power, TRANSIENT_FIELDS, LIST_COMMANDS,
                                               FIXED_RANGE_COMMANDS, FIXED_RANGE_CHOICES,
                                               TRANSIENT_SETUP_COMMANDS, AUXILIARY_COMMANDS,
-                                              AVERAGE_COMMANDS, CR_COMMANDS)
+                                              AVERAGE_COMMANDS, CR_COMMANDS, MEASUREMENT_VALIDATION_SCOPE)
 from electronicload_tool_core.trace import (CONFIG_FIELDS, CSV_FIELDS, SAMPLE_FIELDS,
                                            TRACE_COMMANDS, execute as trace_execute)
 from electronicload_tool_core.trigger import TRIGGER_SOURCES
 from electronicload_tool_core.visa import SERIAL_CHOICES, SerialOptions
 from electronicload_tool_core.workflows import (ARGUMENTS as WORKFLOW_ARGUMENTS,
-                                                COMMANDS as WORKFLOW_COMMANDS, MAX_INTERVAL, MAX_SAMPLES,
+                                                COMMANDS as WORKFLOW_COMMANDS, CONTRIBUTOR_SCOPE,
+                                                MAX_INTERVAL, MAX_SAMPLES, MEASUREMENT_COMMANDS,
                                                 MIN_INTERVAL, OPERATORS,
                                                 execute as workflow_execute)
 from .json_input import decode_decimal_json
@@ -134,11 +135,23 @@ def main(argv: list[str] | None = None) -> int:
         modes.add_argument("--dry-run", action="store_true")
         modes.add_argument("--simulate", action="store_true")
         sub.add_argument("--resource", help=("Optional USB INSTR resource for connection option validation."
-                                             if name in WORKFLOW_COMMANDS else
+                                             if name in WORKFLOW_COMMANDS and name not in MEASUREMENT_COMMANDS else
                                              "Explicit USB INSTR, or ASRL INSTR for contributor validation."))
         sub.add_argument("--backend", default="system")
         sub.add_argument("--model", default=MODEL_ID)
         sub.add_argument("--json", action="store_true")
+        if name not in WORKFLOW_COMMANDS or name in MEASUREMENT_COMMANDS:
+            sub.add_argument("--validation-connection", choices=("asrl",),
+                             help="Use explicit ASRL INSTR for standalone contributor validation.")
+            sub.add_argument("--serial-baud-rate", type=int, default=argparse.SUPPRESS)
+            sub.add_argument("--serial-data-bits", type=int, default=argparse.SUPPRESS)
+            for field, choices in SERIAL_CHOICES.items():
+                sub.add_argument("--serial-" + field.replace("_", "-"), choices=tuple(choices),
+                                 default=argparse.SUPPRESS)
+        if name in NATIVE_MEASUREMENTS or name == "set-average" or name in MEASUREMENT_COMMANDS:
+            scope = CONTRIBUTOR_SCOPE if name in MEASUREMENT_COMMANDS else MEASUREMENT_VALIDATION_SCOPE
+            sub.add_argument("--hardware-validation", choices=(scope,),
+                             help="Explicit CLI-only contributor hardware validation.")
         if name in WORKFLOW_COMMANDS:
             required, optional = WORKFLOW_ARGUMENTS[name]
             choices = {"metric": tuple(BASIC_MEASUREMENTS), "operator": tuple(OPERATORS),
@@ -161,13 +174,6 @@ def main(argv: list[str] | None = None) -> int:
             continue
         sub.add_argument("--validation-allow-pending-live-support", action="store_true",
                          help=argparse.SUPPRESS)
-        sub.add_argument("--validation-connection", choices=("asrl",),
-                         help="Use explicit ASRL INSTR for standalone contributor validation.")
-        sub.add_argument("--serial-baud-rate", type=int, default=argparse.SUPPRESS)
-        sub.add_argument("--serial-data-bits", type=int, default=argparse.SUPPRESS)
-        for field, choices in SERIAL_CHOICES.items():
-            sub.add_argument("--serial-" + field.replace("_", "-"), choices=tuple(choices),
-                             default=argparse.SUPPRESS)
         if name in ASRL_READONLY_COMMANDS:
             sub.add_argument("--hardware-validation", choices=(ASRL_READONLY_SCOPE,),
                              help="Explicit CLI-only IT8812C ASRL read-only validation.")
@@ -235,6 +241,8 @@ def main(argv: list[str] | None = None) -> int:
             sub.add_argument("--csv-time-columns", default=argparse.SUPPRESS, metavar="elapsed,delta")
         elif name == "set-average":
             sub.add_argument("--count", required=True, type=int, help="Integer average count, 2 through 16.")
+            sub.add_argument("--confirm", action="store_true",
+                             help="Confirm a contributor hardware Average change.")
         elif name == "set-input-timer":
             sub.add_argument("--seconds", required=True, type=int, help="Integer seconds, 1 through 60000.")
         elif name == "trigger-configure":
@@ -362,7 +370,8 @@ def main(argv: list[str] | None = None) -> int:
             arguments = {field: getattr(args, field) for field in (*required, *optional)
                          if hasattr(args, field)}
             result = workflow_execute(args.command, mode=mode, model_id=args.model,
-                                      backend=args.backend, resource=args.resource, arguments=arguments)
+                                      backend=args.backend, resource=args.resource, arguments=arguments,
+                                      hardware_validation=scope, asrl=asrl)
             args.json = True
         elif (args.command in PROTECTION_COMMANDS
               or getattr(args, "hardware_validation", None) == "protection"):

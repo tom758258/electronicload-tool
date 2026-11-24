@@ -187,10 +187,15 @@ def test_input_timer_validation_fake_cycle_and_read_only_status(monkeypatch):
     fake.calls.clear()
     assert timer_validation('input-timer-status')['state_source'] == 'instrument_readback'
     assert all(c.endswith('?') for c in fake.calls)
-    timer_validation('input-on', confirmed=True,
-                     validation_settings={'seconds': 5, 'current': 1, 'range': 'high'})
+    started = timer_validation('input-on', confirmed=True,
+                               validation_settings={'seconds': 5, 'current': 1, 'range': 'high'})
     assert fake.input
-    assert timer_validation('input-timer-status')['input_state'] == 'ON'
+    status = timer_validation('input-timer-status')
+    assert status['input_state'] == 'ON'
+    assert (0 < started['timer_timing']['on_write_started_ns']
+            <= started['timer_timing']['on_confirmed_ns']
+            <= status['timer_timing']['query_started_ns']
+            <= status['timer_timing']['query_completed_ns'])
     assert timer_validation('input-off')['input_state'] == 'OFF'
     assert timer_validation('input-timer-status')['enabled'] is True
     assert timer_validation('input-timer-disable')['enabled'] is False

@@ -138,7 +138,11 @@ def _read_setting(session, field: str, suffix: str = ""):
         LOGGER.debug("Protection %s returned %s (accepted range 0 to %s)",
                      query, number, LIMITS[field])
     if not 0 <= number <= LIMITS[field]:
-        raise LoadError("invalid_response", "Protection readback is outside the model bounds.", 3, query=query)
+        details = {"query": query}
+        if suffix == " MAX":
+            details.update(default_rejected_before_write=True, input_state="OFF")
+        raise LoadError("invalid_response", "Protection readback is outside the model bounds.", 3,
+                        **details)
     return number
 
 

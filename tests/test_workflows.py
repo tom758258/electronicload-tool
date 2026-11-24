@@ -431,6 +431,26 @@ def test_cli_workflows_use_json_with_simulator_and_refuse_live(command, flags, c
     outcome = json.loads(capsys.readouterr().out)
     assert outcome["error"]["code"] == "unsupported_live_scope"
 
+@pytest.mark.parametrize("command,options,count,stop_reason", [
+    ("measure-log", ["--count", "2"], 2, "completed"),
+    ("measure-until", ["--metric", "voltage", "--operator", "ge", "--threshold", "12",
+                       "--timeout-s", "1"], 1, "condition_met"),
+])
+def test_workflow_contributor_cli_uses_one_readonly_visa_session(fake_visa, capsys, command, options,
+                                                                count, stop_reason):
+    args = [command, "--resource", "USB0::0xFFFF::0x0001::SYNTHETIC::INSTR",
+            "--hardware-validation", "workflow", "--interval-s", ".001", *options]
+    assert main([*args, "--simulate"]) == 2
+    assert not fake_visa.calls
+    capsys.readouterr()
+    assert main(args) == 0
+    result = json.loads(capsys.readouterr().out)["result"]
+    assert result["validation_only"] and result["sample_count"] == count
+    assert result["stop_reason"] == stop_reason and result["last_measurement"]["voltage_v"] == 12.0
+    assert fake_visa.calls.count("*IDN?") == 1
+    assert fake_visa.calls.count("MEAS:VOLT?") == count
+    assert fake_visa.calls.count("open_resource") == fake_visa.calls.count("session_close") == 1
+
 
 @pytest.mark.parametrize("flags", [[], ["--count", "1", "--duration-s", "1"]])
 def test_cli_measure_log_requires_one_stop_option(flags, capsys):

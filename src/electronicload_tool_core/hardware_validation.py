@@ -9,6 +9,7 @@ No automatic retries, rollback, Input OFF, local switch or error-queue reads.
 
 from datetime import datetime, timezone
 from decimal import Decimal, localcontext
+from time import monotonic_ns
 
 from . import control as c
 from .errors import LoadError
@@ -28,15 +29,21 @@ FUNCTIONS = {"cv": ("VOLT", "VOLTAGE"), "cr": ("RES", "RESISTANCE"),
 MODES = {"continuous": "CONT", "pulse": "PULS", "toggle": "TOGG"}
 
 
-def _input_timer_snapshot(session):
+def _input_timer_snapshot(session, *, timing=False):
     # IT8800 Programming Guide V2.1 printed pp.45–46, including IT8812C.
     # DELay's command-syntax line omits :DELay; its example and query include it.
     value = _number(session, "INP:TIM:DEL?")
     if value != value.to_integral_value() or not 1 <= value <= 60000:
         raise LoadError("invalid_response", "Invalid Input Timer seconds readback.", 3)
-    return {"seconds": int(value), "enabled": c._flag(session, "INP:TIM?") == "ON",
-            "input_state": c._flag(session, "INP:STAT?"),
-            "state_source": "instrument_readback"}
+    enabled = c._flag(session, "INP:TIM?") == "ON"
+    query_started = monotonic_ns() if timing else None
+    state = c._flag(session, "INP:STAT?")
+    result = {"seconds": int(value), "enabled": enabled, "input_state": state,
+              "state_source": "instrument_readback"}
+    if timing:
+        result["timer_timing"] = {"query_started_ns": query_started,
+                                  "query_completed_ns": monotonic_ns()}
+    return result
 
 
 def execute_input_timer(command, *, mode, resource, seconds, current, range_name,
@@ -93,7 +100,7 @@ def execute_input_timer(command, *, mode, resource, seconds, current, range_name
                                 power=None, range_name=None, confirmed=False, stop=stop,
                                 allow_cv=False, allow_cr=False, allow_cw=False)
         elif command == "input-timer-status":
-            result = _input_timer_snapshot(session)
+            result = _input_timer_snapshot(session, timing=True)
         else:
             guard(session)
             c._write(session, "SYST:REM")
@@ -101,13 +108,15 @@ def execute_input_timer(command, *, mode, resource, seconds, current, range_name
             _stopping(stop)
             if command == "input-on":
                 try:
+                    on_started = monotonic_ns()
                     c._write(session, writes[command])
                     if not c._confirm_input_state(session, "ON"):
                         raise LoadError("input_on_not_confirmed", "Input ON was not confirmed.", 3)
                 except LoadError as exc:
                     exc.details.update(input_state="UNKNOWN", input_on_attempted=True)
                     raise
-                result = {"input_state": "ON"}
+                result = {"input_state": "ON", "timer_timing": {
+                    "on_write_started_ns": on_started, "on_confirmed_ns": monotonic_ns()}}
             else:
                 c._write(session, writes[command])
                 result = _input_timer_snapshot(session)

@@ -56,7 +56,8 @@ def run_script(tmp_path):
                 "$ast = [System.Management.Automation.Language.Parser]::ParseFile("
                 "$source, [ref]$null, [ref]$null)\n"
                 "foreach ($node in $ast.EndBlock.Statements) {\n"
-                "    if ($node.Name -in @('Invoke-ProtectionValidation','Assert-InputOff',"
+                "    if ($node.Name -in @('Invoke-ProtectionValidation','Invoke-ProtectionStep',"
+                "'Get-ProtectionWriteProgress','Assert-InputOff',"
                 "'Assert-ReadbackFields','Fail-Case','Invoke-TimerExpiry','Invoke-LiveCommand',"
                 "'Assert-Runtime','Save-Report')) {\n"
                 "        Invoke-Expression $node.Extent.Text\n"
@@ -300,6 +301,58 @@ catch {
 """)
     assert result.returncode == 0, result.stdout + result.stderr
     assert json.loads(result.stdout.splitlines()[-1]) == {'calls': calls, 'error_code': code}
+
+def test_protection_defaults_refusal_leaves_restore_not_run(run_script, tmp_path):
+    fake_cli = tmp_path / 'fake_protection_cli.py'
+    fake_cli.write_text(
+        'import json, sys\n'
+        'if sys.argv[1] == "protection-status":\n'
+        '    result = {"visa": {"library": "fake", "manufacturer": "fake"}, "input_state": "OFF"}\n'
+        '    print(json.dumps({"ok": True, "result": result}))\n'
+        '    sys.exit()\n'
+        'details = {"default_rejected_before_write": True, "input_state": "OFF", "confirmed": {},\n'
+        '           "unconfirmed": [], "not_attempted": ["hardware_power_limit"]}\n'
+        'print(json.dumps({"ok": False, "error": {"code": "invalid_response", "details": details}}))\n'
+        'sys.exit(3)\n', encoding='utf-8')
+    result = run_script([], extra_env={
+        'FAKE_PROTECTION_PYTHON': sys.executable, 'FAKE_PROTECTION_CLI': str(fake_cli),
+    }, harness="""
+$script:protectionTrials = @()
+$script:protectionTrusted = $true
+$script:expectedLibrary = 'fake'
+$script:expectedManufacturer = 'fake'
+$script:watch = [Diagnostics.Stopwatch]::StartNew()
+$script:totalDeadlineMs = 900000
+$script:protectionPlans = @(foreach ($group in @('software-power','hardware-power')) {
+    @{name="protection-default-$group-original";command='protection-status';args=@()}
+    @{name="protection-default-$group-set";command='protection-set';args=@()}
+})
+$script:report = @{results=@(foreach ($name in @('start-state','prepare-cc','prepare-cc-readback')) {
+    [ordered]@{name="protection-$name";status='NOT RUN'}
+}) + @(foreach ($step in $script:protectionPlans) {
+    [ordered]@{name=$step.name;status='NOT RUN'}
+})}
+function New-CliProcessInfo([string[]]$Arguments) {
+    $start = [Diagnostics.ProcessStartInfo]::new($env:FAKE_PROTECTION_PYTHON)
+    $start.Arguments = '"{0}" {1}' -f $env:FAKE_PROTECTION_CLI, $Arguments[2]
+    $start.UseShellExecute = $false
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    return $start
+}
+function Restore-Protection { throw 'Unexpected restore after a read-only refusal.' }
+Invoke-ProtectionValidation @{active_mode='fixed';function='CC';input_state='OFF';short_state='OFF'}
+$defaults = $script:report.results | Where-Object { $_.name -like 'protection-default-*' }
+@{statuses=@($defaults | ForEach-Object { $_.status }); codes=@($defaults.error_code);
+  off_unconfirmed=$script:report.protection_input_off_unconfirmed} | ConvertTo-Json -Compress
+""")
+    assert result.returncode == 0, result.stdout + result.stderr
+    evidence = json.loads(result.stdout.splitlines()[-1])
+    assert evidence == {
+        'statuses': ['PASS', 'NOT RUN', 'PASS', 'NOT RUN'],
+        'codes': ['protection_default_out_of_bounds'] * 2,
+        'off_unconfirmed': False,
+    }
 
 
 def test_cr_led_slow_rise_offline_preflight(run_script):
@@ -589,12 +642,15 @@ def test_input_timer_is_also_selectable_with_modes(run_script):
     ('invalid', 1, 'FAIL', 'readback_mismatch'),
     ('late-off', 1, 'FAIL', 'timer_expiry_unconfirmed'),
     ('late-on-confirmation', 0, 'FAIL', 'timer_expiry_unconfirmed'),
+    ('early-off', 1, 'FAIL', 'timer_expiry_early'),
+    ('unconfirmed-timing', 1, 'FAIL', 'timer_timing_unconfirmed'),
 ])
 def test_timer_expiry_requires_off_within_original_window(run_script, scenario, checks, status, code):
     result = run_script(['-Scenario', scenario], harness="""
 $script:watch = @{ElapsedMilliseconds=$(if ($Scenario -eq 'late-on-confirmation') { 2001 } else { 500 })}
 $script:timerOnStartMs = 0
 $script:timerOnConfirmedMs = 450
+$script:timerOnTiming = @{on_write_started_ns=1200000000L;on_confirmed_ns=1450000000L}
 $script:checks = 0
 $script:perCommandDeadlineMs = 30000
 $TimerSeconds = '1'
@@ -605,8 +661,12 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName, [string[]]$Extr
     $script:checks++
     $script:watch.ElapsedMilliseconds += $(if ($Scenario -eq 'late-off') { 1001 } else { 100 })
     $script:report.results[0]['observed_at_ms'] = $script:watch.ElapsedMilliseconds
-    $off = $Scenario -eq 'late-off' -or ($Scenario -eq 'off-after-retry' -and $script:checks -eq 2)
-    return @{result=@{seconds=1;enabled=(-not $off);input_state=$(
+    $off = $Scenario -in @('late-off','early-off') -or ($Scenario -eq 'off-after-retry' -and $script:checks -eq 2)
+    $queryStarted = 1000000000L + ($script:watch.ElapsedMilliseconds - 100) * 1000000L
+    $timing = if ($Scenario -ne 'unconfirmed-timing') {
+        @{query_started_ns=$queryStarted;query_completed_ns=($queryStarted + 10000000L)}
+    }
+    return @{result=@{seconds=1;enabled=(-not $off);timer_timing=$timing;input_state=$(
         if ($off) { 'OFF' } elseif ($Scenario -eq 'invalid') { 'UNKNOWN' } else { 'ON' }
     )}}
 }
@@ -653,6 +713,7 @@ $timerEnableAttempted = $true
 $TimerSeconds = '1'
 $script:timerOnStartMs = -1000
 $script:timerOnConfirmedMs = -750
+$script:timerOnTiming = @{on_write_started_ns=1L;on_confirmed_ns=2L}
 function New-CliProcessInfo([string[]]$Arguments) {
     $command = $Arguments[2]
     $script:calls += $command
@@ -924,6 +985,33 @@ def test_workflow_only_stays_offline_with_optional_connection(run_script, plan_o
             'completed', 'condition_met', 'duration_elapsed', 'capacity_cutoff',
         ]
         assert all(case['input_state'] == 'OFF' for case in cases[2:])
+
+
+@pytest.mark.parametrize('mode,connection,resource,plan_only', [
+    ('measurement-extensions', 'usb', RESOURCE, True),
+    ('list-cc', 'usb', RESOURCE, False),
+    ('workflow,auxiliary-controls,list-cc,measurement-extensions', 'asrl', ASRL, False),
+    ('full', 'asrl', ASRL, True),
+])
+def test_explicit_live_extensions_never_use_simulation(run_script, mode, connection, resource, plan_only):
+    flags = ['-Modes', mode, '-LiveExtensions', '-Connection', connection]
+    result = run_script([*flags, *(['-PlanOnly'] if plan_only else [])], resource=resource)
+    assert result.returncode == (0 if plan_only else 2), result.stdout + result.stderr
+    path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)[-1])
+    report = json.loads(path.read_text(encoding='utf-8-sig'))
+    assert report['overall_status'] == ('PLAN ONLY' if plan_only else 'BLOCKED')
+    assert not report['hardware_touched'] and report['resource'] == '<redacted>'
+    cases = {case['name']: case for case in report['cases']}
+    assert all(case['status'] == 'NOT RUN' for case in cases.values())
+    assert all(case.get('execution') in (None, 'live') for case in cases.values())
+    if mode in ('full', 'measurement-extensions'):
+        assert 'MEAS:VOLT:MIN?' in cases['measurement-extensions-min-max']['queries']
+        assert 'SENS:AVER:COUN 8' in cases['measurement-extensions-average']['planned_writes']
+    if mode != 'measurement-extensions':
+        assert cases['list-cc-save']['error_code'] == 'live_procedure_unapproved'
+    if mode not in ('measurement-extensions', 'list-cc'):
+        assert '*IDN?' in cases['workflow-measure-log']['queries']
+        assert cases['workflow-cc-discharge']['error_code'] == 'live_procedure_unapproved'
 
 
 @pytest.mark.parametrize('mode,commands', [

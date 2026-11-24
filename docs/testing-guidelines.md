@@ -535,7 +535,11 @@ Use fictional resources with VISA blocked to verify the extension modes alone,
 duplicate selections, mixed noninteractive refusal and Full PlanOnly for USB
 and ASRL. The extension modes run focused Core and CLI tests for native
 measurements and Average, VON/Short/CC Slew, or LIST CC setup/Save/Recall/Exit.
-For Timer expiry, use a controlled clock to verify the retry window and
-Input OFF requirement, and select the affected Fake VISA cases in
+Check `-LiveExtensions` for explicit single, mixed and Full selection and
+verify that it never falls back to the offline cases. Exercise the contributor
+read-only sampling and measurements and the Input OFF guard for Average with
+recording Fake VISA.
+For Timer expiry, use a controlled clock to verify the retry window, SCPI
+timing evidence and Input OFF requirement, and select the affected Fake VISA cases in
 `tests/test_input_timer.py`. Physical expiry remains a separately authorized
 check.

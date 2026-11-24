@@ -98,8 +98,9 @@ def fixed_slew_status(session):
         query = stem + "?"
         value = c._decimal_readback(session, query)
         if not minimum <= value <= maximum:
-            raise LoadError("invalid_response", "Current slew is outside model limits.", 3,
-                            query=query, range=range_name, observed=str(value))
+            raise LoadError("invalid_response", "Current slew is outside the bounds for the reported range.",
+                            3, query=query, range=range_name, observed=str(value),
+                            minimum=str(minimum), maximum=str(maximum))
         readings[f"{field}_a_per_us"] = str(value)
     return readings
 

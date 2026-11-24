@@ -9,6 +9,7 @@ trigger and input-timer. Omitted -Modes selects all default modes.
 -Modes full (default) selects all trials. USB and ASRL use the same matrix.
 -Modes workflow runs only dry-run and simulation, without an instrument.
 -Modes measurement-extensions,auxiliary-controls,list-cc selects offline checks.
+-LiveExtensions explicitly requests physical cases for those four modes.
 -InputTimerOnly is a backward-compatible shortcut for the input-timer-only trial.
 Requires approved source/DUT limits and interactive confirmation before hardware access.
 -PlanOnly validates every planned CLI request without VISA or hardware access.
@@ -21,6 +22,7 @@ param(
     [ValidateSet('system')][string]$Backend = 'system',
     [string]$Current = '0.1',
     [string[]]$Modes = @(),
+    [switch]$LiveExtensions,
     [double]$SourceCurrentLimitA = 0.8,
     [double]$SourceVoltageLimitV = 5,
     [string]$Voltage = '3',
@@ -91,7 +93,8 @@ $readbackSelected = 'readback' -in $selectedModes
 $sequenceSelected = 'sequence' -in $selectedModes
 $asrlSelected = $Connection -eq 'asrl'
 $workflowSelected = 'workflow' -in $selectedModes
-$offlineOnly = @($selectedModes | Where-Object { $_ -notin ($offlineModes + 'workflow') }).Count -eq 0
+$extensionModes = $offlineModes + 'workflow'
+$offlineOnly = -not $LiveExtensions -and @($selectedModes | Where-Object { $_ -notin $extensionModes }).Count -eq 0
 $systemQuerySelected = 'system-query' -in $selectedModes
 $serialFlags = [ordered]@{
     SerialBaudRate = '--serial-baud-rate'; SerialDataBits = '--serial-data-bits'
@@ -139,6 +142,7 @@ $activeTransientScope = $null
 $timerEnableAttempted = $false
 $timerOnStartMs = 0
 $timerOnConfirmedMs = 0
+$timerOnTiming = $null
 $slowRiseEnableAttempted = $false
 $slowRiseCommunicationTrusted = $false
 $slowRiseCleanup = @()
@@ -248,6 +252,9 @@ function Save-Report {
         if ($entry.Contains('expected_readback')) { $case.expected_readback = $entry.expected_readback }
         if ($entry.Contains('readback_comparison')) { $case.readback_comparison = $entry.readback_comparison }
         if ($entry.Contains('condition')) { $case.condition = $entry.condition }
+        foreach ($field in @('queries','planned_writes')) {
+            if ($entry.Contains($field)) { $case[$field] = $entry[$field] }
+        }
         if ($entry.Contains('origin_function')) { $case.origin_function = $entry.origin_function }
         foreach ($field in @('trace_source','trace_points','trace_interval_s','trace_sample_count',
                              'trace_csv_complete','operator_observed','trigger_source','trigger_interval_s',
@@ -304,6 +311,14 @@ function Save-Report {
                     voltage_v = $entry.response.result.voltage_v
                     current_a = $entry.response.result.current_a
                     power_w = $entry.response.result.power_w
+                }
+            }
+            if ($entry.execution -ceq 'live') {
+                foreach ($field in @('voltage_min_v','voltage_max_v','current_min_a','current_max_a',
+                                     'capacity_ah','discharge_time_s','average_count','last_measurement')) {
+                    if ($null -ne $entry.response.result.$field) {
+                        $case[$field] = $entry.response.result.$field
+                    }
                 }
             }
         }
@@ -395,7 +410,10 @@ function Save-Report {
             $lines += "Protection ${trial}: $($public.protection_trials[$trial])"
         }
     }
-    foreach ($case in $cases) { $lines += "$($case.name): $($case.status)" }
+    foreach ($case in $cases) {
+        $reason = if ($case.status -ceq 'NOT RUN' -and $case.error_code) { " ($($case.error_code))" } else { '' }
+        $lines += "$($case.name): $($case.status)$reason"
+    }
     $lines += "Cases: $($counts.passed) PASS, $($counts.failed) FAIL, $($counts.skipped) SKIP, $($counts.not_run) NOT RUN"
     $lines += 'Resource: <redacted>'
     [IO.File]::WriteAllText((Join-Path $shareable 'summary.md'),
@@ -562,6 +580,7 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
                             [int]$TerminationMs = 5000,
                             [string]$ExpectedError,
                             [switch]$AllowCrHandoff,
+                            [switch]$AllowProtectionDefaultRefusal,
                             [switch]$Cleanup) {
     $remaining = if ($Cleanup) { [Math]::Min($DeadlineMs, $script:perCommandDeadlineMs) } else {
         [Math]::Min($DeadlineMs,
@@ -639,6 +658,17 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
             if ($Command -ceq 'protection-set' -and $result.ok -eq $false) {
                 $progress = Get-ProtectionWriteProgress $details
                 if ($null -ne $progress) { $entry['protection_write_progress'] = $progress }
+            }
+            if ($AllowProtectionDefaultRefusal -and $process.ExitCode -eq 3 -and $result.ok -eq $false -and
+                $code -ceq 'invalid_response' -and $null -eq $details.cleanup_errors -and
+                $details.default_rejected_before_write -is [bool] -and $details.default_rejected_before_write -and
+                $details.input_state -ceq 'OFF' -and @($details.confirmed.PSObject.Properties).Count -eq 0 -and
+                @($details.unconfirmed).Count -eq 0 -and @($details.not_attempted).Count -gt 0) {
+                $entry.status = 'NOT RUN'
+                $entry.error_code = 'protection_default_out_of_bounds'
+                $entry['protection_state'] = 'OFF'
+                $entry['protection_exchange_confirmed'] = $true
+                return $result
             }
             if ($CaseName.StartsWith('protection-') -and $result.ok -eq $false -and
                 $null -eq $details.cleanup_errors) {
@@ -793,8 +823,8 @@ function Assert-InputOff([object]$Result, [string]$CaseName) {
 }
 
 function Invoke-TimerExpiry($Step) {
-    # Actual Input ON can occur any time between dispatch and confirmation.
-    # Use dispatch for the existing worst-case deadline, and spend its last second observing state.
+    # Keep the existing process window for cleanup. Only the Core timestamps
+    # can establish the earliest possible expiry after the SCPI write.
     $firstCheck = $script:timerOnStartMs + [int]$TimerSeconds * 1000
     $deadline = $firstCheck + 1000
     $delay = $firstCheck - $script:watch.ElapsedMilliseconds
@@ -802,6 +832,12 @@ function Invoke-TimerExpiry($Step) {
     $entry = $script:report.results | Where-Object { $_.name -ceq $Step.name }
     $observations = @()
     try {
+        $on = $script:timerOnTiming
+        if ($null -eq $on.on_write_started_ns -or $null -eq $on.on_confirmed_ns -or
+            $on.on_write_started_ns -le 0 -or $on.on_confirmed_ns -lt $on.on_write_started_ns) {
+            Fail-Case $Step.name 'timer_timing_unconfirmed' 'The SCPI Input ON timing was not confirmed.'
+        }
+        $earliestExpiryNs = $on.on_write_started_ns + [long][int]$TimerSeconds * 1000000000L
         while ($script:watch.ElapsedMilliseconds -lt $deadline) {
             # An out-of-window observation fails the trial. The normal command deadline
             # still determines whether the exchange can be trusted for cleanup.
@@ -810,9 +846,12 @@ function Invoke-TimerExpiry($Step) {
             Assert-Runtime $result $Step.name
             $status = $result.result
             $now = $entry.observed_at_ms
+            $query = $status.timer_timing
             $observations += [ordered]@{
                 elapsed_ms = $now - $script:timerOnStartMs
                 since_on_confirmed_ms = $now - $script:timerOnConfirmedMs
+                query_started_ns = $query.query_started_ns
+                query_completed_ns = $query.query_completed_ns
                 seconds = $status.seconds
                 enabled = $status.enabled
                 input_state = $status.input_state
@@ -823,10 +862,20 @@ function Invoke-TimerExpiry($Step) {
                 Fail-Case $Step.name 'readback_mismatch' 'Timer expiry status did not match the configured trial.'
             }
             if ($now -gt $deadline) { break }
+            if ($null -eq $query.query_started_ns -or $null -eq $query.query_completed_ns -or
+                $query.query_started_ns -lt $on.on_confirmed_ns -or
+                $query.query_completed_ns -lt $query.query_started_ns) {
+                Fail-Case $Step.name 'timer_timing_unconfirmed' 'The SCPI Input state query timing was not confirmed.'
+            }
             # Post-expiry Timer enable retention is reported as observed.
             if ($status.input_state -ceq 'OFF') {
-                $entry.status = 'PASS'
-                return
+                if ($query.query_completed_ns -lt $earliestExpiryNs) {
+                    Fail-Case $Step.name 'timer_expiry_early' 'Input was observed OFF before the earliest possible Timer expiry.'
+                }
+                if ($query.query_started_ns -ge $earliestExpiryNs) {
+                    $entry.status = 'PASS'
+                    return
+                }
             }
             $delay = [Math]::Min(150, $deadline - $script:watch.ElapsedMilliseconds)
             if ($delay -gt 0) { Start-Sleep -Milliseconds $delay }
@@ -836,6 +885,8 @@ function Invoke-TimerExpiry($Step) {
         if ($DebugArtifacts) {
             $file = Join-Path $script:reportDirectory 'private/timer-expiry-timing.json'
             $timing = @{elapsed_ms=$script:watch.ElapsedMilliseconds - $script:timerOnStartMs;
+                        cli_dispatched_ms=$script:timerOnStartMs; cli_confirmed_ms=$script:timerOnConfirmedMs;
+                        scpi_on=$script:timerOnTiming;
                         observations=$observations}
             [IO.File]::WriteAllText($file, (ConvertTo-Json -InputObject $timing),
                 [Text.UTF8Encoding]::new($false))
@@ -1128,7 +1179,8 @@ function New-ProtectionPlan {
     }
 }
 
-function Invoke-ProtectionStep([string]$Name, [string[]]$ArgsOverride, [switch]$Cleanup) {
+function Invoke-ProtectionStep([string]$Name, [string[]]$ArgsOverride, [switch]$Cleanup,
+                               [switch]$AllowDefaultRefusal) {
     $step = $script:protectionPlans | Where-Object { $_.name -ceq $Name }
     $entry = $script:report.results | Where-Object { $_.name -ceq $Name }
     $extra = $step.args
@@ -1140,7 +1192,11 @@ function Invoke-ProtectionStep([string]$Name, [string[]]$ArgsOverride, [switch]$
     $entry['protection_state'] = 'UNKNOWN'
     $script:report.protection_input_off_unconfirmed = $true
     try {
-        $response = Invoke-LiveCommand -Command $step.command -CaseName $Name -ExtraArgs $extra -Cleanup:$Cleanup
+        $response = Invoke-LiveCommand -Command $step.command -CaseName $Name -ExtraArgs $extra `
+            -Cleanup:$Cleanup -AllowProtectionDefaultRefusal:$AllowDefaultRefusal
+        if ($AllowDefaultRefusal -and $entry.error_code -ceq 'protection_default_out_of_bounds') {
+            return $response
+        }
         Assert-Runtime $response $Name
         $confirmed = $true
         $fields = @{input_state='protection_state';condition='protection_condition';events='protection_events';
@@ -1309,10 +1365,15 @@ function Invoke-ProtectionValidation($Selection) {
         $original = Invoke-ProtectionStep "$prefix-original"
         $fields = @('hardware_power_limit')
         if ($group -eq 'software-power') { $fields = @('software_power_limit','software_power_delay') }
+        $refused = $false
         try {
-            $null = Invoke-ProtectionStep "$prefix-set"
+            $result = Invoke-ProtectionStep "$prefix-set" -AllowDefaultRefusal
+            $refused = $result.ok -eq $false
+            if ($refused) {
+                Write-Host "Protection $group defaults blocked before any write. See private diagnostics for the MAX query."
+            }
         } finally {
-            Restore-Protection $prefix $original.result $fields $false
+            if (-not $refused) { Restore-Protection $prefix $original.result $fields $false }
         }
     }
 }
@@ -1601,6 +1662,9 @@ try {
         ($SourceVoltageLimitV -ne 5 -or $SourceCurrentLimitA -ne 0.8)) {
         throw 'Sequence and Protection require a dedicated 5 V / 0.8 A source.'
     }
+    if ($LiveExtensions -and -not @($selectedModes | Where-Object { $_ -in $extensionModes }).Count) {
+        throw '-LiveExtensions requires a selection including an extension or Workflow mode.'
+    }
     if (-not $Target -or (-not $Resource -and -not $offlineOnly)) {
         Write-Host 'BLOCKED: explicit -Target and, for hardware cases, -Resource are required.'
         exit 2
@@ -1715,6 +1779,56 @@ try {
                     Where-Object { $_ }) -join '; '
             }
             $planned += $step
+        }
+    }
+    $pendingLive = @()
+    if ($LiveExtensions) {
+        if ($workflowSelected) {
+            $scope = @('--hardware-validation','workflow')
+            $planned += @(
+                @{name='workflow-measure-log';command='measure-log';args=$scope + @('--interval-s','0.1','--count','2');
+                  expected=@{stop_reason='completed';sample_count=2};execution='live'},
+                @{name='workflow-measure-until';command='measure-until';args=$scope + @('--interval-s','0.1',
+                  '--metric','voltage','--operator','ge','--threshold','1','--timeout-s','2');
+                  expected=@{stop_reason='condition_met'};execution='live';
+                  condition='Observed voltage at least 1 V with Input OFF'}
+            )
+            $pendingLive += @(
+                @{name='workflow-cc-timed-load';command='cc-timed-load';condition='Requires an approved current, maximum loading time and OFF procedure'},
+                @{name='workflow-cc-discharge';command='cc-discharge';condition='Requires approved source, cutoff, maximum loading time and OFF procedure'}
+            )
+        }
+        if ('measurement-extensions' -in $selectedModes) {
+            $scope = @('--hardware-validation','measurement-extensions')
+            $planned += @(
+                @{name='measurement-extensions-min-max';command='measure-min-max';args=$scope;execution='live'},
+                @{name='measurement-extensions-discharge';command='measure-discharge';args=$scope;execution='live'},
+                @{name='measurement-extensions-average';command='set-average';args=$scope + @('--count','8','--confirm');
+                  expected=@{average_count=8};execution='live';condition='Input OFF and operator approves leaving Average at 8'}
+            )
+        }
+        if ('auxiliary-controls' -in $selectedModes) {
+            $planned += @(
+                @{name='auxiliary-controls-von-status';command='von-status';args=$readbackScope;execution='live';check_readback_settings=$true},
+                @{name='auxiliary-controls-short-status';command='short-status';args=$readbackScope;execution='live';check_readback_settings=$true}
+            )
+            $pendingLive += @(
+                @{name='auxiliary-controls-von';command='set-von';condition='Requires an approved VON write and restoration procedure'},
+                @{name='auxiliary-controls-short-on';command='short-on';condition='Requires approved source isolation, interlocks and Short ON/OFF sequence'},
+                @{name='auxiliary-controls-short-off';command='short-off';condition='Requires approved Short and Input OFF sequence'},
+                @{name='auxiliary-controls-slew';command='set-cc';condition='Requires an approved physical slew write and verified range behavior'}
+            )
+        }
+        if ('list-cc' -in $selectedModes) {
+            $planned += @{name='list-cc-status';command='list-status';args=$readbackScope;execution='live';
+                readback_expected=@{selected=$true;input_state='OFF'};check_readback_settings=$true;
+                condition='Read an existing configured LIST with Input OFF'}
+            $pendingLive += @(
+                @{name='list-cc-setup';command='set-list-cc';condition='Requires approved working-buffer replacement and release procedure'},
+                @{name='list-cc-save';command='list-save';condition='Requires an operator-approved scratch slot and verified overwrite behavior'},
+                @{name='list-cc-recall';command='list-recall';condition='Requires approved recall and independent configuration comparisons'},
+                @{name='list-cc-exit';command='list-exit';condition='Requires an approved exit and original configuration restoration procedure'}
+            )
         }
     }
     # Read existing configuration before any setup, then prepare and finish Protection
@@ -1941,7 +2055,7 @@ try {
         $step.condition = "$($step.cr_handoff_after) refused a resistance origin before remote"
     }
     $workflowPlans = @()
-    if ($workflowSelected) {
+    if ($workflowSelected -and -not $LiveExtensions) {
         $workflowPlans = @(
             @{name='workflow-measure-log';command='measure-log';args=@('--interval-s','0.01','--count','1');
               stop_reason='completed';sample_count=1},
@@ -1955,7 +2069,7 @@ try {
         )
     }
     $extensionPlans = @()
-    if ('measurement-extensions' -in $selectedModes) {
+    if ('measurement-extensions' -in $selectedModes -and -not $LiveExtensions) {
         $extensionPlans += @(
             @{name='measurement-extensions-min-max';command='measure-min-max';args=@();execution='dry-run'},
             @{name='measurement-extensions-discharge';command='measure-discharge';args=@();execution='dry-run'},
@@ -1969,7 +2083,7 @@ try {
                 'tests/test_control_cli.py::test_average_cli_invalid_count')}
         )
     }
-    if ('auxiliary-controls' -in $selectedModes) {
+    if ('auxiliary-controls' -in $selectedModes -and -not $LiveExtensions) {
         $extensionPlans += @(
             @{name='auxiliary-controls-von';command='set-von';args=@('--voltage','10','--latch','on');execution='dry-run'},
             @{name='auxiliary-controls-short-on';command='short-on';args=@();execution='dry-run'},
@@ -1983,7 +2097,7 @@ try {
                 'tests/test_control_cli.py::test_fixed_slew_von_short_cli_refusal')}
         )
     }
-    if ('list-cc' -in $selectedModes) {
+    if ('list-cc' -in $selectedModes -and -not $LiveExtensions) {
         $listDocument = '{"range":"auto","repeat_count":1,"steps":[{"current_a":1,"slew_a_per_us":0.1,"width_s":0.001},{"current_a":2,"slew_a_per_us":0.2,"width_s":0.002}]}'
         $extensionPlans += @(
             @{name='list-cc-setup';command='set-list-cc';args=@('--arguments-json',$listDocument);execution='dry-run'},
@@ -2003,11 +2117,16 @@ try {
         @($triggerPlans | Select-Object -First 1) +
         @($planned | Select-Object -Skip 3 -First ([Math]::Max(0, $protectionIndex - 3))) +
         $protectionPlans + @($planned | Select-Object -Skip $protectionIndex) + $slowRiseCleanup +
-        @($triggerPlans | Select-Object -Skip 1)
+        @($triggerPlans | Select-Object -Skip 1) + $pendingLive
     $report.results = @($allSteps | ForEach-Object {
         $entry = [ordered]@{name=$_.name;command=$_.command;arguments=$_.args;status='NOT RUN'}
         if ($_.name -like 'workflow-*') { $entry['execution'] = 'simulate' }
         if ($_.ContainsKey('execution')) { $entry['execution'] = $_.execution }
+        if ($_ -in $pendingLive) {
+            $entry.arguments = @()
+            $entry['execution'] = 'live'
+            $entry['error_code'] = 'live_procedure_unapproved'
+        }
         if ($_.ContainsKey('expected_error')) { $entry['expected_error'] = $_.expected_error }
         if ($_.ContainsKey('condition')) { $entry['condition'] = $_.condition }
         if ($_.ContainsKey('expected_readback')) { $entry['expected_readback'] = $_.expected_readback }
@@ -2017,14 +2136,21 @@ try {
     $plannedRanges = @{}
     $offlinePlans = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
     foreach ($step in $allSteps) {
-        if ($step.command -in @('operator-observation','pytest')) { continue }
+        if ($step.command -in @('operator-observation','pytest') -or $step -in $pendingLive) { continue }
         $extras = @($step.args)
-        $noConnection = $step.ContainsKey('execution') -or $step.name -like 'workflow-*'
+        $noConnection = $step.execution -in @('dry-run','simulate') -or
+            ($step.name -like 'workflow-*' -and $step.execution -cne 'live')
         $key = ConvertTo-Json -InputObject (@($noConnection, $step.command) + $extras) -Compress
         if (-not $offlinePlans.ContainsKey($key)) {
             $offlinePlans[$key] = Invoke-OfflineCommand $step.command $extras -NoConnection:$noConnection
         }
         $plan = $offlinePlans[$key]
+        if ($step.execution -ceq 'live') {
+            $entry = $report.results | Where-Object { $_.name -ceq $step.name }
+            foreach ($field in @('queries','planned_writes')) {
+                if ($null -ne $plan.result.$field) { $entry[$field] = @($plan.result.$field) }
+            }
+        }
         if ($step.command -in @('set-cc', 'set-cv', 'set-cr', 'set-cr-led',
                                 'set-transient-cc', 'set-transient-cv', 'set-transient-cr') -and 'auto' -in $step.args) {
             # The Core plan owns selection; the script only compares later physical readback.
@@ -2055,7 +2181,10 @@ try {
     Write-Host "Mode: $(if ($PlanOnly) { 'PLAN ONLY' } elseif ($offlineOnly) { 'SIMULATE' } else { 'LIVE' })"
     Write-Host "Selected modes: $($selectedModes -join ', ')."
     if (-not $offlineOnly) { Write-Host 'Plan: Identify, confirm Input OFF and measure before physical trials.' }
-    if ($workflowSelected) { Write-Host 'Workflow: four simulated cases with no VISA or source access.' }
+    if ($workflowPlans.Count) { Write-Host 'Workflow: four simulated cases with no VISA or source access.' }
+    if ($pendingLive.Count) {
+        Write-Host 'Some selected LIVE cases require an approved procedure and will remain NOT RUN.'
+    }
     if ($systemQuerySelected) { Write-Host 'System Query: read version, display mode and one Error Queue entry.' }
     if ($readbackSelected) {
         Write-Host 'Readback queries existing settings with Input OFF before any setup. Inapplicable modes are skipped.'
@@ -2195,6 +2324,9 @@ try {
     if ($protectionSelected) {
         Write-Host '- Confirm Timer, Short, Slow Rise and Transient OFF for Protection. The script can prepare Fixed CC from Fixed CV or CW while Input is OFF.'
     }
+    if ($LiveExtensions -and 'measurement-extensions' -in $selectedModes) {
+        Write-Host '- Confirm the Average count may be set to 8 and left at that setting.'
+    }
     if ($triggerSelected) {
         Write-Host '- Confirm external On/Off and analog programming are disabled and external trigger wiring was reviewed while de-energized.'
     }
@@ -2312,6 +2444,14 @@ try {
             continue
         }
         Assert-Runtime $result $step.name
+        if ($step.execution -ceq 'live') {
+            $scopeIndex = [Array]::IndexOf($step.args, '--hardware-validation')
+            Assert-ReadbackFields $result.result @{validation_only=$true;
+                validation_scope=$step.args[$scopeIndex + 1]} $step.name
+            if ($step.ContainsKey('expected')) {
+                Assert-ReadbackFields $result.result $step.expected $step.name
+            }
+        }
         if ($protectionSelected -and $step.name -ceq 'input-state') {
             $report.protection_input_off_unconfirmed = $result.result.input_state -cne 'OFF'
         }
@@ -2350,7 +2490,10 @@ try {
         if ($step.command -eq 'input-on' -and $result.result.input_state -cne 'ON') {
             Fail-Case $step.name 'input_on_not_confirmed' 'Input ON was not confirmed.'
         }
-        if ($step.name -eq 'timer-on') { $timerOnConfirmedMs = $watch.ElapsedMilliseconds }
+        if ($step.name -eq 'timer-on') {
+            $timerOnConfirmedMs = $watch.ElapsedMilliseconds
+            $timerOnTiming = $result.result.timer_timing
+        }
         $observedRange = $(if ($null -ne $result.result.range) { $result.result.range } else {
             $result.result.configuration.range
         })
@@ -2395,6 +2538,10 @@ try {
         $entry.status = 'SKIP'
     }
     if ($triggerSelected) { Invoke-TriggerValidation }
+    if ($report.results.error_code -contains 'protection_default_out_of_bounds') {
+        throw 'Protection defaults validation is incomplete because the instrument MAX exceeded the allowed bounds.'
+    }
+    if ($pendingLive.Count) { throw 'LIVE validation is incomplete. Review the NOT RUN cases and their required procedures.' }
     $report.status = if ($readbackSelected -and ($report.results.readback_comparison -contains 'OBSERVED ONLY')) {
         'OBSERVED ONLY'
     } else { 'PASS' }

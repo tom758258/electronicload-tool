@@ -192,6 +192,10 @@ electronicload-tool scpi-version --resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" 
 support `--simulate` and `--dry-run`. All four refuse Product and Worker LIVE
 before opening VISA. The standalone CLI `average-status` also supports the
 contributor scope described in [Configuration readback](#configuration-readback).
+The standalone CLI also accepts `--hardware-validation measurement-extensions`
+for the two native measurement commands and `set-average`. Use a separately
+authorized USB or ASRL INSTR resource with System VISA. Average setup additionally
+requires `--confirm` and verified Input OFF and leaves the requested setting in place.
 
 ```powershell
 .\.venv\Scripts\electronicload-tool.exe measure-min-max --simulate --json
@@ -544,7 +548,11 @@ Input Timer, Trigger, and Protection use their existing scopes. These requests
 require the exact IT8812C identity and an explicit USB or ASRL INSTR Resource with
 System VISA. The new contributor readbacks identify their source as
 `instrument_readback`. Query failures and invalid replies return errors.
-`fixed-slew-status` checks both rates against the current CC Range.
+`fixed-slew-status` checks both rates against the current CC Range. An out-of-range
+rate reports the query, observed rate, range and bounds. A rate observed under
+one range does not establish how the instrument retains settings across ranges.
+Slew 超界時會回報查詢、觀測值、Range 與上下限。單一 Range 的讀值
+無法判定切換 Range 後是否保留原設定。
 For CV, CR and LIST, a valid numeric Range selector without a known label is
 returned as its raw readback with `range: null`. The IT8812C has a single 250 W
 CW range, so CW reports `range: null` and reads the power setpoint without a
@@ -729,9 +737,13 @@ sets low-range Fixed CC, configures/enables Timer, reads status while OFF,
 then confirms Input ON through `--hardware-validation input-timer` with complete
 expected `current`, `range` and integer `seconds`. Before and after remote
 transition Core rechecks physical OFF, CC settings, Short/Transient OFF and Timer
-readback. Between the configured duration and one second later, measured
-from dispatch of the Input ON command, the script checks Timer/Input state
-and requires a valid Input OFF observation within that window. A status query
+readback. The script begins status checks at the configured duration after CLI
+dispatch and retains the one-second observation window. To accept OFF, the
+Input state query must start at least the configured duration after the
+actual SCPI write began. An OFF reply that completes before this earliest
+possible expiry fails the trial. The CLI records when the write began, when
+ON was confirmed and when each state query began and completed. These times
+bound the observations around the physical transition. A status query
 already in progress keeps the regular CLI command deadline. A late, valid
 response fails the trial and allows the usual cleanup. A communication failure
 in a run that includes Trigger requires independent operator action. The console
@@ -740,6 +752,11 @@ saves those observations in the private report directory. The script then explic
 sends/verifies Input OFF, separately disables Timer and reads final Timer/Input state.
 Failure stops further trials. A possible ON attempt gets one bounded OFF cleanup attempt.
 Timer-disable cleanup is a separate operation after confirmed OFF.
+
+Timer 保留從 CLI 派送開始計算的原觀察時限。CLI 另記錄 SCPI 寫入開始、
+ON 確認和 Input 狀態查詢的起訖時間。要通過驗收，OFF 查詢必須在
+SCPI 寫入開始後至少經過設定秒數才啟動。若在最早可能到期前就讀到
+OFF，驗證失敗。試驗後仍依既有程序確認 OFF，再獨立停用 Timer。
 
 The validation-only Core/CLI scope uses `INP:TIM:DEL <seconds>`, `INP:TIM 0|1`,
 `INP:TIM:DEL?` and `INP:TIM?` from the
@@ -1165,7 +1182,11 @@ is unconfirmed. Cleanup stays within the original session.
 Each command runs independently in the CLI or as one Worker job. Use
 `--simulate` to run or `--dry-run` to preview validated arguments without
 waiting, reading the simulator, or creating files. CLI runs return one JSON
-object. Press Ctrl+C to interrupt a CLI run. These commands are offline only.
+object. Press Ctrl+C to interrupt a CLI run. For a separately authorized run,
+the standalone CLI can execute `measure-log` and `measure-until` with
+`--hardware-validation workflow` and an explicit System VISA resource.
+Both use one verified session for read-only measurements. See the
+[contributor extension selection](#contributor-extension-selection).
 The simulator uses a fixed 12 V source, so a discharge simulation with a
 3 V cutoff ends at the timeout, capacity cutoff, or sample limit.
 
@@ -1288,15 +1309,14 @@ legacy Transient write and restores them after its trials when safe.
 | `system-query` | SCPI version, display mode and one Error Queue entry |
 | `readback` | Existing Fixed CC/CV/CR/CW, CC Slew, Transient, LIST, VON, Short and Average |
 | `sequence` | Four bounded Fixed CC/CV/CR/CW trials |
-| `workflow` | Four CLI Workflows in dry-run and simulation |
+| `workflow` | Four CLI Workflows in dry-run and simulation, with contributor hardware queries for the two measurement commands |
 | `measurement-extensions` | Native Min/Max, Discharge and Average setting |
 | `auxiliary-controls` | VON setting, Short ON/OFF interlocks and Fixed CC Slew |
 | `list-cc` | LIST CC setup, Save, Recall and Exit |
 
 The System Query case reads one Error Queue entry and records the numeric
-code, including zero for an empty queue. Workflow
-cases use no connection arguments and record simulated results separately
-in the report. A Workflow-only run needs only `-Target` and `-Modes workflow`.
+code, including zero for an empty queue. The default Workflow cases run in
+simulation. An offline Workflow-only run needs only `-Target` and `-Modes workflow`.
 
 The three extension modes use CLI dry-runs and focused Simulator or Fake VISA
 tests from the contributor environment. Run any of them alone or together
@@ -1325,6 +1345,38 @@ For comparisons with known panel settings, use `-ExpectedRiseSlew` and
 `NOT RUN` with observed values and the overall result `OBSERVED ONLY`.
 Fixed, Transient, Trigger and TRACE also keep their own post-setup comparisons.
 
+### Contributor extension selection
+
+Select `-LiveExtensions` with one or more extension modes or `-Modes full`
+to request the contributor hardware cases. Provide an explicit `-Resource`
+and matching `-Connection`. Use `-PlanOnly` to review CLI operations without
+opening VISA. Execution requires the interactive physical validation procedure.
+The hardware case results carry `execution: live`.
+
+With Input OFF, `workflow` verifies two scheduled measurement samples and
+completion of a voltage condition at 1 V or above. `measurement-extensions`
+queries native Min/Max and Discharge values and verifies Average set to 8.
+The Average case leaves the count set to 8 after operator confirmation.
+`auxiliary-controls` can query VON and Short state, and `list-cc` can read
+an already configured, selected LIST with Input OFF. Powered
+workflows, VON/Short/Slew changes and the LIST CC configuration and slot
+cycle require their own approved operating procedures. If a selected case
+has no executable procedure, it stays `NOT RUN` with a reason and the
+requested hardware validation remains incomplete.
+
+使用 `-LiveExtensions` 搭配單選、多選或 `-Modes full`，明確選擇
+Contributor 實機項目。指定與 `-Connection` 相符的 `-Resource`，
+可用 `-PlanOnly` 先檢視 CLI 操作，預覽不會開啟 VISA。
+執行時需遵循互動式實機驗證流程，硬體項目會標記 `execution: live`。
+
+Input OFF 時，`workflow` 驗證定時取樣兩次及電壓達到 1 V 的條件。
+`measurement-extensions` 查詢原生 Min/Max 與放電讀值，經操作者
+確認後將 Average 設為 8、驗證讀回並保留設定。`auxiliary-controls`
+可觀察 VON 和 Short 狀態，`list-cc` 可在 Input OFF 時讀回已設定並
+選取的 LIST。CC 帶載流程、VON／Short／Slew 設定變更和 LIST CC
+設定與記憶槽操作均需各自核准的操作流程。沒有可執行
+流程的案例會保留為 `NOT RUN` 並列出原因，該次實機驗證維持未完成。
+
 ### Script parameters
 
 | Parameter | Required / default | Purpose |
@@ -1334,6 +1386,7 @@ Fixed, Transient, Trigger and TRACE also keep their own post-setup comparisons.
 | `-Connection` | `usb` | `usb` for USB INSTR or `asrl` for RS-232 ASRL INSTR |
 | `-Backend` | `system` | System VISA (`@ivi`) only |
 | `-Modes` | `full` | FULL, a single mode or a comma-separated selection |
+| `-LiveExtensions` | Off | Request contributor hardware cases for Workflow and extension modes |
 | `-InputTimerOnly` | Off | Backward-compatible Timer-only shortcut, incompatible with `-Modes` |
 | `-SourceVoltageLimitV` | **5 V** | Operator-declared external source voltage, override >0 to 18 V |
 | `-SourceCurrentLimitA` | **0.8 A** | Operator-declared external source current limit, override >0 to 2 A |
@@ -1544,7 +1597,13 @@ When the CLI returns partial write progress, the report's
 writes, and settings that were never attempted.
 With `-DebugArtifacts`, Protection MAX replies that parse as numbers and
 their bounds are recorded in the private command stderr. Invalid replies
-still stop the trial before a defaults write.
+stop the trial before a defaults write. A numeric MAX outside the allowed
+bounds leaves the defaults case `NOT RUN` with a refusal reason, preserves
+the trip results and performs no restore write for the unmodified group.
+Protection 硬體功率上限為 250 W。超界的數值 MAX 會在設定寫入前
+拒絕，Defaults 記為 `NOT RUN` 並附原因。同一輪的 Trip 結果會保留，
+未寫入的 Defaults 群組不執行還原寫入。`-DebugArtifacts` 會把原始
+MAX 讀值與接受界線存入私有診斷紀錄。
 
 The contributor scope does not open Product or Worker LIVE.
 
