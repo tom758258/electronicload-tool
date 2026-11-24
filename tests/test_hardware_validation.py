@@ -81,14 +81,25 @@ def run(command, scope='transient-cc', **kwargs):
     return control.execute(command, resource=RESOURCE, hardware_validation=scope, **kwargs)
 
 
-@pytest.mark.parametrize('trial', ['von', 'slew', 'short', 'slew_unrestorable', 'short_untrusted', 'short_unexpected'])
+@pytest.mark.parametrize('trial', ['von', 'slew', 'short', 'slew_unrestorable', 'short_untrusted', 'short_unexpected',
+                                  'von_transient', 'slew_transient', 'short_transient', 'short_readback',
+                                  'von_cv', 'slew_cr', 'short_cw', 'short_list'])
 def test_isolated_auxiliary_trial_restores_or_stops_without_input_on(monkeypatch, capsys, trial):
     fake = ValidationFake()
     fake.range = 6
     fake.values.update({'INP:TIM': '0', 'VOLT:ON': '.5', 'VOLT:LATC': '1'})
     session(fake, monkeypatch)
     command = trial.split('_')[0]
+    if trial.endswith(('_cv', '_cr', '_cw')):
+        fake.function = {'cv': 'VOLT', 'cr': 'RES', 'cw': 'POW'}[trial.rsplit('_', 1)[-1]]
+    if trial.endswith('_list'):
+        fake.mode = 'LIST'
+    if trial.endswith(('_transient', '_readback')):
+        fake.transient = True
+        fake.values['TRIG:TIM'] = '5'
     args = ['contributor-settings', '--trial', command, '--resource', RESOURCE, '--json']
+    if trial.endswith('_readback'):
+        args.append('--readback-trial')
     assert cli.main(args) == 2 and not fake.calls
     capsys.readouterr()
 
@@ -117,7 +128,21 @@ def test_isolated_auxiliary_trial_restores_or_stops_without_input_on(monkeypatch
             assert Decimal(baseline['rise_slew_a_per_us']) == Decimal(original['CURR:SLEW:POS'])
             assert Decimal(baseline['fall_slew_a_per_us']) == Decimal(original['CURR:SLEW:NEG'])
     assert 'INP ON' not in fake.calls
-    if trial == 'slew_unrestorable':
+    if trial.endswith(('_transient', '_cv', '_cr', '_cw', '_list')):
+        assert exit_code != 0 and result['error']['details']['no_settings_written']
+        assert all(call.endswith('?') for call in fake.calls)
+        if trial.endswith('_transient'):
+            assert fake.transient
+        elif trial.endswith('_list'):
+            assert fake.mode == 'LIST'
+        else:
+            assert fake.function == {'cv': 'VOLT', 'cr': 'RES', 'cw': 'POW'}[trial.rsplit('_', 1)[-1]]
+    elif trial == 'short_readback':
+        assert exit_code == 0 and result['result']['restored']
+        assert fake.transient and not fake.input and not fake.short
+        assert [call for call in fake.calls if '?' not in call] == [
+            'SYST:REM', 'TRAN OFF', 'INP:SHOR 1', 'INP:SHOR 0', 'TRAN ON']
+    elif trial == 'slew_unrestorable':
         assert exit_code == 3 and result['error']['details']['no_settings_written']
         assert all(call.endswith('?') for call in fake.calls)
     elif trial == 'short_untrusted':
@@ -134,6 +159,81 @@ def test_isolated_auxiliary_trial_restores_or_stops_without_input_on(monkeypatch
         for field in ('VOLT:ON', 'VOLT:LATC', 'CURR:SLEW:POS', 'CURR:SLEW:NEG'):
             assert Decimal(original[field]) == Decimal(fake.values[field])
         assert not any(call.startswith('CURR:RANG ') for call in fake.calls)
+
+
+
+@pytest.mark.parametrize("trial,function,enabled", [
+    ("fixed-cc", "VOLT", False), ("fixed-cv", "CURR", False), ("fixed-cr", "CURR", False),
+    ("fixed-cw", "CURR", False), ("transient", "VOLT", False), ("average", "CURR", False),
+    ("fixed-cc", "CURR", True), ("transient", "CURR", True),
+])
+def test_automatic_readback_trials_restore_original_mode_and_settings(monkeypatch, capsys, trial, function, enabled):
+    fake = ValidationFake()
+    fake.function = function
+    fake.transient = enabled
+    fake.range = 6
+    fake.values.update({"INP:TIM": "0", "TRIG:TIM": "5", "SENS:AVER:COUN": "14"})
+    initial = dict(fake.values)
+    current = fake.current
+    session(fake, monkeypatch)
+    args = ["contributor-settings", "--trial", trial, "--resource", RESOURCE, "--json"]
+    assert cli.main(args) == 2 and not fake.calls
+    capsys.readouterr()
+    assert cli.main([*args, "--confirm-isolated"]) == 0
+    output = capsys.readouterr()
+    result = json.loads(output.out)["result"]
+    assert result["restored"] and result["input_state"] == "OFF"
+    assert fake.function == function and fake.mode == "FIX"
+    assert not fake.input and fake.transient == enabled
+    assert fake.current == current
+    assert "INP ON" not in fake.calls
+    for key, value in initial.items():
+        try:
+            assert Decimal(fake.values[key]) == Decimal(value)
+        except ArithmeticError:
+            assert fake.values[key] == value
+
+
+@pytest.mark.parametrize("origin", ["CURR", "VOLT", "RES", "POW", "LIST", "transient", "short", "timer", "slow", "led", "wrong-origin", "input"])
+def test_isolated_mixed_handoff_then_standalone_guard(monkeypatch, capsys, origin):
+    fake = ValidationFake()
+    fake.range = 6
+    fake.values.update({"INP:TIM": "0", "VOLT:ON": ".5", "VOLT:LATC": "1"})
+    fake.function = origin if origin in {"CURR", "VOLT", "RES", "POW"} else "CURR"
+    if origin == "LIST":
+        fake.mode = "LIST"
+    if origin == "input":
+        fake.input = True
+    if origin == "wrong-origin":
+        fake.function = "VOLT"
+    if origin == "transient":
+        fake.transient = True
+    if origin == "short":
+        fake.short = True
+    if origin == "timer":
+        fake.values["INP:TIM"] = "1"
+    if origin == "slow":
+        fake.values["CURR:SLEW:STAT"] = "1"
+    if origin == "led":
+        fake.function = "RES"
+        fake.values["RES:LED:STAT"] = "1"
+    session(fake, monkeypatch)
+    expected = {"CURR": "CC", "VOLT": "CV", "RES": "CR", "POW": "CW", "led": "CR"}.get(origin, "CC")
+    args = ["contributor-settings", "--trial", "fixed-cc-handoff", "--origin-function", expected,
+            "--resource", RESOURCE, "--json"]
+    assert cli.main(args) == 2 and not fake.calls
+    capsys.readouterr()
+    code = cli.main([*args, "--confirm-isolated"])
+    capsys.readouterr()
+    writes = [command for command in fake.calls if "?" not in command]
+    if origin in {"CURR", "VOLT", "RES", "POW"}:
+        assert code == 0 and fake.function == "CURR" and not fake.input
+        assert writes == ([] if origin == "CURR" else ["SYST:REM", "FUNC CURR"])
+        assert cli.main(["contributor-settings", "--trial", "von", "--resource", RESOURCE,
+                         "--json", "--confirm-isolated"]) == 0
+        assert not fake.input
+    else:
+        assert code != 0 and writes == []
 
 
 def test_validation_cr_led_native_settings_and_confirmed_exit(monkeypatch):

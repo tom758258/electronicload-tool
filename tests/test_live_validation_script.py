@@ -652,65 +652,83 @@ def test_input_timer_is_also_selectable_with_modes(run_script):
     assert 'cutoff applies only to the 5 s Timer trial' in refused.stdout
 
 
-@pytest.mark.parametrize('scenario,checks,status,code', [
-    ('off-after-late-write', 3, 'PASS', None),
-    ('external-off', 3, 'FAIL', 'timer_automatic_off_unconfirmed'),
-    ('stays-on', 4, 'FAIL', 'timer_expiry_unconfirmed'),
+@pytest.mark.parametrize('scenario,launches,status,code', [
+    ('normal-expiry-query-delay', 1, 'PASS', None),
+    ('early-expiry-within-resolution', 1, 'PASS', None),
+    ('late-on-observation', 1, 'PASS', None),
+    ('crossing-off', 1, 'FAIL', 'timer_automatic_off_unconfirmed'),
+    ('unbracketed-off', 1, 'FAIL', 'timer_automatic_off_unconfirmed'),
+    ('stays-on', 1, 'FAIL', 'timer_expiry_unconfirmed'),
     ('invalid', 1, 'FAIL', 'readback_mismatch'),
     ('late-off', 1, 'FAIL', 'timer_expiry_unconfirmed'),
     ('late-on-confirmation', 0, 'FAIL', 'timer_expiry_unconfirmed'),
     ('early-off', 1, 'FAIL', 'timer_expiry_early'),
     ('unconfirmed-timing', 1, 'FAIL', 'timer_timing_unconfirmed'),
 ])
-def test_timer_expiry_requires_automatic_off_within_scpi_window(run_script, scenario, checks, status, code):
+def test_timer_expiry_requires_automatic_off_within_scpi_window(run_script, scenario, launches, status, code):
     result = run_script(['-Scenario', scenario], harness="""
-$script:watch = @{ElapsedMilliseconds=$(if ($Scenario -eq 'late-on-confirmation') { 9801 } else { 4000 })}
+$script:watch = @{ElapsedMilliseconds=1000}
 $script:timerOnStartMs = 0
-$script:timerOnConfirmedMs = $script:watch.ElapsedMilliseconds
-$script:timerOnTiming = @{on_write_started_ns=4800000000L;on_confirmed_ns=$(
-    if ($Scenario -eq 'late-on-confirmation') { 10801000000L } else { 5000000000L }
-)}
-$script:checks = 0
+$script:timerOnConfirmedMs = 500
+$script:timerOnTiming = @{on_write_started_ns=10000000000L;on_confirmed_ns=10500000000L}
+$script:launches = 0
 $script:perCommandDeadlineMs = 30000
 $TimerSeconds = '5'
 $script:report = @{results=@([ordered]@{name='timer-expiry';status='NOT RUN'})}
-function Get-TimerMonotonicNs { 1000000000L + $script:watch.ElapsedMilliseconds * 1000000L }
-function Start-Sleep([int]$Milliseconds) { $script:watch.ElapsedMilliseconds += $Milliseconds }
+function Get-TimerMonotonicNs {
+    if ($Scenario -eq 'late-on-confirmation') { return 16001000000L }
+    return 11000000000L
+}
 function Assert-Runtime($Result, [string]$Name) {}
-function Read-ValidationAnswer {
-    if ($Scenario -eq 'external-off') { 'EXTERNAL' } else { 'AUTO' }
+function Read-ValidationAnswer { throw 'Timer result must not ask the operator.' }
+function New-Observation([long]$Start, [long]$End, [string]$State) {
+    @{seconds=5;enabled=($State -eq 'ON');input_state=$State;
+      timer_timing=@{query_started_ns=$Start;query_completed_ns=$End}}
 }
 function Invoke-LiveCommand([string]$Command, [string]$CaseName, [string[]]$ExtraArgs,
                             [int]$DeadlineMs, [long]$TimerObservationDeadlineNs) {
-    if ($TimerObservationDeadlineNs -ne 10800000000L) { throw 'Unexpected observation deadline.' }
-    $script:checks++
-    $queryStarted = Get-TimerMonotonicNs
-    $script:watch.ElapsedMilliseconds += $(if ($Scenario -eq 'late-off') { 2001 } else { 350 })
-    $script:report.results[0]['observed_at_ms'] = $script:watch.ElapsedMilliseconds
-    $script:report.results[0]['observed_at_ns'] = Get-TimerMonotonicNs
-    $off = $Scenario -in @('late-off','early-off') -or
-        ($Scenario -in @('off-after-late-write','external-off') -and $script:checks -eq 3)
-    $timing = if ($Scenario -ne 'unconfirmed-timing') {
-        @{query_started_ns=$queryStarted;query_completed_ns=($queryStarted + 10000000L)}
+    $script:launches++
+    if ($Command -cne 'input-timer-status' -or $TimerObservationDeadlineNs -ne 16000000000L) {
+        throw 'Unexpected observation command or deadline.'
     }
-    return @{result=@{seconds=5;enabled=(-not $off);timer_timing=$timing;input_state=$(
-        if ($off) { 'OFF' } elseif ($Scenario -eq 'invalid') { 'UNKNOWN' } else { 'ON' }
-    )}}
+    $settings = $ExtraArgs[-1] | ConvertFrom-Json
+    if ($settings.seconds -ne 5 -or $settings.on_write_started_ns -ne 10000000000L -or
+        $settings.on_confirmed_ns -ne 10500000000L) { throw 'Missing SCPI timing context.' }
+    # Both physical events in the approved resolution give identical evidence.
+    $on = New-Observation 14450000000L 14600000000L 'ON'
+    $off = New-Observation 15200000000L 15350000000L 'OFF'
+    switch ($Scenario) {
+        'late-on-observation' { $on = New-Observation 15010000000L 15160000000L 'ON' }
+        'crossing-off' { $on = New-Observation 13900000000L 14050000000L 'ON' }
+        'unbracketed-off' { $on = $null }
+        'stays-on' { $off = New-Observation 15200000000L 15350000000L 'ON' }
+        'invalid' { $on.input_state = 'UNKNOWN' }
+        'late-off' { $off = New-Observation 15900000000L 16050000000L 'OFF' }
+        'early-off' { $off = New-Observation 14700000000L 14850000000L 'OFF' }
+        'unconfirmed-timing' { $on.timer_timing = $null }
+    }
+    $script:report.results[0]['observed_at_ns'] = $off.timer_timing.query_completed_ns
+    $script:report.results[0]['observed_at_ms'] = 5500
+    @{result=@{timer_observations=@($on,$off | Where-Object { $null -ne $_ })}}
 }
 try {
     Invoke-TimerExpiry @{name='timer-expiry';command='input-timer-status';args=@()}
-    if ($script:report.results[0].status -ne 'NOT RUN') { throw 'Expiry was marked before operator confirmation.' }
+    if ($script:report.results[0].status -ne 'NOT RUN') { throw 'Expiry was marked before cleanup.' }
     Confirm-TimerExpiry
 }
 catch { if ($script:report.results[0].status -ne 'FAIL') { throw } }
 $entry = $script:report.results[0]
-@{checks=$script:checks;status=$entry.status;error_code=$entry.error_code} | ConvertTo-Json -Compress
+@{launches=$script:launches;status=$entry.status;error_code=$entry.error_code;
+  bracket=$entry.timer_expiry_bracket} | ConvertTo-Json -Depth 4 -Compress
 """)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert json.loads(result.stdout.splitlines()[-1]) == {
-        'checks': checks, 'status': status, 'error_code': code,
-    }
-
+    evidence = json.loads(result.stdout.splitlines()[-1])
+    bracket = evidence.pop('bracket')
+    assert evidence == {'launches': launches, 'status': status, 'error_code': code}
+    if status == 'PASS':
+        assert 0 <= bracket['uncertainty_ns'] <= bracket['resolution_ns'] == 10**9
+        assert bracket['first_off_completed_ns'] >= bracket['expected_expiry_ns']
+        assert bracket['uncertainty_ns'] == bracket['first_off_completed_ns'] - bracket['last_on_started_ns']
 
 @pytest.mark.parametrize('scenario,code', [
     ('late-readback', 'timer_expiry_unconfirmed'),
@@ -961,7 +979,76 @@ catch {
     assert evidence['statuses'] == ['FAIL'] + (['NOT RUN'] * 3 if scenario == 'Timer' else [])
 
 
-def test_contributor_workflow_script_accepts_confirmed_off_within_write_start_deadline(run_script, tmp_path):
+def test_timer_expiry_script_observes_with_one_real_cli_process(run_script, tmp_path):
+    # Exercise the actual process/CLI/session boundary that caused the
+    # former polling interval to exceed the approved one-second bracket.
+    with (tmp_path / 'sitecustomize.py').open('a', encoding='utf-8') as preload:
+        preload.write("""
+import os
+import sys
+from contextlib import contextmanager
+from time import monotonic_ns, sleep
+
+sys.path.insert(0, str(Path.cwd() / 'tests'))
+from test_hardware_validation import ValidationFake
+from electronicload_tool_core import control
+
+@contextmanager
+def fake_session(_resource):
+    class TimerObserver(ValidationFake):
+        def query(self, command):
+            if command == 'INP:STAT?':
+                self.input = monotonic_ns() < int(os.environ['FAKE_TIMER_ON_NS']) + 5_010_000_000
+            response = super().query(command)
+            sleep(0.15)
+            return response
+
+        def write(self, command):
+            raise AssertionError('Timer observation must be read-only')
+
+    with Path(os.environ['FAKE_TIMER_SESSIONS']).open('a') as log:
+        log.write('session\\n')
+    fake = TimerObserver()
+    fake.query_delay = 0.15
+    fake.values.update({'INP:TIM:DEL': '5', 'INP:TIM': '1'})
+    yield fake, {'library': 'fake', 'manufacturer': 'fake'}
+
+control.open_session = fake_session
+""")
+    sessions = tmp_path / 'sessions.txt'
+    result = run_script([], extra_env={'FAKE_TIMER_PYTHON': sys.executable,
+                                      'FAKE_TIMER_RESOURCE': RESOURCE,
+                                      'FAKE_TIMER_SESSIONS': str(sessions)}, harness="""
+$python = $env:FAKE_TIMER_PYTHON
+$repo = (Get-Location).Path
+$script:connectionArgs = @('--resource', $env:FAKE_TIMER_RESOURCE)
+$script:report = @{status='NOT RUN';results=@([ordered]@{name='timer-expiry';status='NOT RUN'})}
+$script:perCommandDeadlineMs = 30000
+$script:totalDeadlineMs = 900000
+$script:expectedLibrary = 'fake'
+$script:expectedManufacturer = 'fake'
+$watch = [Diagnostics.Stopwatch]::StartNew()
+$script:timerPowered = $true
+$TimerSeconds = '5'
+$now = Get-TimerMonotonicNs
+$script:timerOnTiming = @{on_write_started_ns=($now - 1000000000L);on_confirmed_ns=$now}
+$script:timerOnStartMs = -1000
+$script:timerOnConfirmedMs = 0
+$env:FAKE_TIMER_ON_NS = [string]$script:timerOnTiming.on_write_started_ns
+function Read-ValidationAnswer { throw 'Timer result must not ask the operator.' }
+Invoke-TimerExpiry @{name='timer-expiry';command='input-timer-status';args=@()}
+$entry = $script:report.results[0]
+@{status=$entry.status;bracket=$entry.timer_expiry_bracket} | ConvertTo-Json -Depth 4 -Compress
+""")
+    assert result.returncode == 0, result.stdout + result.stderr
+    evidence = json.loads(result.stdout.splitlines()[-1])
+    assert evidence['status'] == 'NOT RUN'  # Real cleanup remains a separate requirement.
+    assert 0 <= evidence['bracket']['uncertainty_ns'] <= 10**9
+    assert evidence['bracket']['first_off_completed_ns'] >= evidence['bracket']['expected_expiry_ns']
+    assert sessions.read_text().splitlines() == ['session']
+
+
+def test_contributor_workflow_script_accepts_bounded_duration_evidence_after_confirmed_off(run_script, tmp_path):
     with (tmp_path / 'sitecustomize.py').open('a', encoding='utf-8') as preload:
         preload.write("""
 import sys
@@ -970,10 +1057,18 @@ from contextlib import contextmanager
 sys.path.insert(0, str(Path.cwd() / 'tests'))
 from test_hardware_validation import ValidationFake
 from electronicload_tool_core import workflows
+from time import sleep
 
 @contextmanager
 def fake_session(_resource):
-    fake = ValidationFake()
+    class DelayedLoad(ValidationFake):
+        def query(self, command):
+            response = super().query(command)
+            if self.input:
+                sleep(self.query_delay)
+            return response
+
+    fake = DelayedLoad()
     fake.range = 6
     fake.query_delay = 0.15
     fake.values.update({'INP:TIM': '0', 'MEAS:CURR': '0.1'})
@@ -990,33 +1085,30 @@ $script:report = @{status='NOT RUN';results=@([ordered]@{name='workflow-cc-timed
 $script:perCommandDeadlineMs = 30000
 $script:totalDeadlineMs = 900000
 $watch = [Diagnostics.Stopwatch]::StartNew()
-$response = Invoke-LiveCommand -Command 'cc-timed-load' -CaseName 'workflow-cc-timed-load' -ExtraArgs @(
-    '--hardware-validation', 'workflow', '--current', '0.1', '--range', 'low', '--duration-s', '5', '--confirm')
 $entry = $script:report.results[0]
-$statusBeforeObservation = $entry.status
-$script:observation = ''
-function Read-ValidationAnswer($Prompt, $CaseName, [switch]$DiscardPendingKeys) {
-    $script:prompt = $Prompt
-    return $script:observation
+function Read-ValidationAnswer { throw 'Workflow result must not ask the operator.' }
+try {
+    $null = Invoke-LiveCommand -Command 'cc-timed-load' -CaseName 'workflow-cc-timed-load' -ExtraArgs @(
+        '--hardware-validation', 'workflow', '--current', '0.1', '--range', 'low', '--duration-s', '5', '--confirm')
+    Confirm-WorkflowLoad 'workflow-cc-timed-load'
+} catch {
+    if ($entry.error_code -cne 'workflow_load_unconfirmed') { throw }
 }
-try { Confirm-WorkflowLoad 'workflow-cc-timed-load' } catch { }
-$unconfirmed = $entry.error_code
-$script:observation = 'TRACE CONFIRMED'
-Confirm-WorkflowLoad 'workflow-cc-timed-load'
-@{result=$response.result;status=$statusBeforeObservation;unconfirmed=$unconfirmed;
-  prompt=$script:prompt;operator_confirmed=$entry.load_duration_confirmed} | ConvertTo-Json -Depth 6 -Compress
+@{result=$entry.response.result;final_status=$entry.status;error_code=$entry.error_code;
+  load_confirmed=$entry.load_duration_confirmed} | ConvertTo-Json -Depth 6 -Compress
 """)
     assert result.returncode == 0, result.stdout + result.stderr
     evidence = json.loads(result.stdout.splitlines()[-1])
-    assert evidence['status'] == 'NOT RUN'  # The live script still requires the operator's observation.
+    assert evidence['final_status'] == 'PASS'
+    assert evidence['error_code'] is None
     workflow = evidence['result']
     assert workflow['stop_reason'] == 'duration_elapsed' and workflow['input_state'] == 'OFF'
-    assert workflow['cleanup']['off_confirmed'] and workflow['load_duration_confirmed'] is False
+    assert workflow['cleanup']['off_confirmed'] and workflow['load_duration_confirmed'] is True
     assert 5 <= (workflow['off_write_started_ns'] - workflow['on_write_started_ns']) / 1e9 <= 10
     assert (workflow['off_confirmed_ns'] - workflow['on_write_started_ns']) / 1e9 <= 10
-    assert evidence['unconfirmed'] == 'workflow_load_unconfirmed'
-    assert 'without an early drop' in evidence['prompt']
-    assert evidence['operator_confirmed'] is True
+    assert evidence['load_confirmed'] is True
+    assert 0 <= workflow['load_evidence_tail_ns'] <= workflow['load_evidence_resolution_ns'] == 10**9
+    assert workflow['load_evidence_source'] == 'instrument_current_samples'
 
 
 def test_contributor_settings_displays_private_baseline_before_write_and_keeps_it_out_of_report(run_script, tmp_path):
@@ -1071,6 +1163,14 @@ try {
     Invoke-LiveCommand -Command 'contributor-settings' -CaseName 'auxiliary-controls-von' -ExtraArgs @(
         '--trial', 'von', '--confirm-isolated')
 } catch { Write-Host $_.Exception.Message }
+# Success responses also contain private untouched baseline values.
+$script:report.results += [ordered]@{name='list-status';command='contributor-settings';execution='live';status='PASS';
+    response=@{result=@{restored=$true;input_state='OFF';expected_width_s='1';
+        observed=@{configuration=@{steps=@(@{width_s='1'},@{width_s='17.123456789'})}}}}}
+$script:report.results += [ordered]@{name='transient-status';command='contributor-settings';execution='live';status='PASS';
+    response=@{result=@{restored=$true;input_state='OFF';expected_level_a='0.2';
+        observed=@{configuration=@{level_b_a='0.876543219'}}}}}
+Save-Report
 """)
     assert result.returncode == 0, result.stdout + result.stderr
     baseline = next(line for line in result.stdout.splitlines() if line.startswith('Settings recovery baseline'))
@@ -1078,7 +1178,11 @@ try {
     assert 'keep the terminals isolated' in result.stdout, result.stdout + result.stderr
     assert result.stdout.index(baseline) < result.stdout.index('keep the terminals isolated')
     report_text = (report_dir / 'shareable/report.json').read_text(encoding='utf-8-sig')
-    case, = json.loads(report_text)['cases']
+    case, list_case, transient_case = json.loads(report_text)['cases']
+    assert list_case['restored'] and list_case['expected_width_s'] == '1'
+    assert transient_case['restored'] and transient_case['expected_level_a'] == '0.2'
+    assert 'observed' not in list_case and 'observed' not in transient_case
+    assert '17.123456789' not in report_text and '0.876543219' not in report_text
     assert case['status'] == 'FAIL' and case['error_code'] == 'settings_restore_unconfirmed'
     assert case['manual_action_required']
     assert '0.536' not in report_text and not (report_dir / 'private').exists()
@@ -1152,8 +1256,18 @@ def test_trigger_validation_script_plan_preflight_and_noninteractive_refusal(run
         assert cases[f'trigger-{source}-source-status']['command'] == 'trigger-status'
         assert '--confirm' in cases[f'trigger-{source}-on']['arguments']
         assert cases[f'trigger-{source}-off']['command'] == 'input-off'
-        assert cases[f'trigger-{source}-observed']['command'] == 'operator-observation'
-        assert (f'trigger-{source}-dispatch' in cases) == (source in ('hold', 'bus'))
+        software = source in ('hold', 'bus')
+        assert cases[f'trigger-{source}-observed']['command'] == ('automatic-observation' if software else 'trigger-observe')
+        assert (f'trigger-{source}-dispatch' in cases) == software
+        capture = cases[f'trigger-{source}-dispatch' if software else f'trigger-{source}-observed']
+        assert capture['command'] == 'trigger-observe'
+        names = list(cases)
+        capture_name = f'trigger-{source}-dispatch' if software else f'trigger-{source}-observed'
+        assert names.index(f'trigger-{source}-on') < names.index(capture_name) < names.index(f'trigger-{source}-off')
+        assert 'MEAS:CURR?' in capture['queries']
+        assert ('STAT:QUES:COND?' in capture['queries']) == (source in ('bus', 'external'))
+        assert capture['planned_writes'] == (
+            ['SYST:REM', 'TRIG:IMM' if source == 'hold' else '*TRG'] if software else [])
     assert cases['trigger-bus-setup']['command'] == 'set-list-cc'
     for source in ('bus', 'external'):
         assert cases[f'trigger-{source}-readback']['command'] == 'list-status'
@@ -1168,6 +1282,10 @@ def test_trigger_validation_script_plan_preflight_and_noninteractive_refusal(run
     assert list_plan['repeat_count'] == 1
     assert [step['width_s'] for step in list_plan['steps']] == [2, 2]
     assert not any(name.startswith('transient-') or name.startswith('cc-') for name in cases)
+    for flags in (['-PulseWidth', '0.001'],
+                  ['-TriggerObservationSeconds', '40', '-TriggerListWidthA', '20', '-TriggerListWidthB', '20']):
+        refused_plan = run_script(['-Modes', 'trigger', '-PlanOnly', *flags])
+        assert refused_plan.returncode == 2, refused_plan.stdout + refused_plan.stderr
     refused = run_script(['-Modes', 'trigger'])
     assert refused.returncode == 2 and 'requires an interactive console' in refused.stdout
     mixed = run_script(['-Modes', 'transient-cc,trigger', '-PlanOnly'])
@@ -1195,7 +1313,19 @@ def test_configuration_readback_script_plan_preflight_and_noninteractive_refusal
     settings = {'fixed-slew-status': {'rise_slew_a_per_us': 0.1, 'fall_slew_a_per_us': 0.2},
                 'von-status': {'threshold_v': 0, 'latch': 'off'}, 'short-status': {'short_state': 'ON'},
                 'average-status': {'average_count': 8}}
+    auto = run_script(['-Modes', 'readback', '-LiveExtensions', '-PlanOnly'])
+    assert auto.returncode == 0, auto.stdout + auto.stderr
+    auto_path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', auto.stdout)[-1])
+    auto_report = json.loads(auto_path.read_text(encoding='utf-8-sig'))
+    assert [case['name'] for case in auto_report['cases']] == expected
+    assert all(case['command'] == 'contributor-settings' and '--confirm-isolated' in case['arguments']
+               and '--readback-trial' in case['arguments'] for case in auto_report['cases'][3:])
+    assert all(case['status'] == 'NOT RUN' for case in auto_report['cases'])
+    assert not auto_report['hardware_touched']
+    assert auto_report['per_command_deadline_ms'] == 30000
+    assert all(case.get('deadline_ms', 30000) == 30000 for case in auto_report['cases'])
     for options, status in [(['-PlanOnly', *baseline], 'PLAN ONLY'),
+                            (['-PlanOnly'], 'PLAN ONLY'),
                             (['-ExpectedRiseSlew', '0.1'], 'BLOCKED')]:
         result = run_script(['-Modes', 'readback', *options])
         assert result.returncode == (0 if status == 'PLAN ONLY' else 2), result.stdout + result.stderr
@@ -1210,7 +1340,7 @@ def test_configuration_readback_script_plan_preflight_and_noninteractive_refusal
         assert all(case['status'] == 'NOT RUN' for case in report['cases'])
         for case in report['cases'][-4:]:
             assert case['readback_comparison'] == 'NOT RUN'
-            if status == 'PLAN ONLY':
+            if options == ['-PlanOnly', *baseline]:
                 assert case['expected_readback'] == settings[case['name']]
             else:
                 assert 'expected_readback' not in case and case['condition']
@@ -1328,6 +1458,10 @@ def test_workflow_only_stays_offline_with_optional_connection(run_script, plan_o
     ('list-cc', 'usb', RESOURCE, True),
     ('list-cc,protection', 'usb', RESOURCE, True),
     ('list-cc,input-timer', 'usb', RESOURCE, True),
+    ('sequence,auxiliary-controls,list-cc', 'usb', RESOURCE, True),
+    ('cv,list-cc', 'asrl', ASRL, True),
+    ('cr,auxiliary-controls', 'usb', RESOURCE, True),
+    ('transient-cw,readback,list-cc', 'usb', RESOURCE, True),
     ('list-cc,auxiliary-controls', 'asrl', ASRL, True),
     ('workflow,auxiliary-controls,list-cc,measurement-extensions', 'asrl', ASRL, False),
     ('full', 'usb', RESOURCE, True),
@@ -1354,25 +1488,55 @@ def test_explicit_live_extensions_never_use_simulation(run_script, mode, connect
         assert 'SENS:AVER:COUN 8' in cases['measurement-extensions-average']['planned_writes']
     if 'list-cc-settings' in cases:
         trial = cases['list-cc-settings']
+        assert trial['deadline_ms'] == 300000
+        assert all(not any(write.startswith('FUNC <original>') for write in branch['writes'])
+                   for branch in trial['conditional_writes'])
         assert 'LIST:WID? {step}' in trial['queries']
-        assert f'LIST:SAV {slot}' in trial['planned_writes'] and f'LIST:RCL {slot}' in trial['planned_writes']
+        assert trial['planned_writes'].count(f'LIST:SAV {slot}') == 2
+        assert trial['planned_writes'].count(f'LIST:RCL {slot}') == 2
         assert 'CURR:SLEW:STAT?' in trial['queries']
         assert ['LIST:WID 1,<original>'] in [branch['writes'] for branch in trial['conditional_writes']]
-        restoration = trial['conditional_writes'][-1]['writes']
+        restoration = next(branch['writes'] for branch in trial['conditional_writes']
+                           if branch['writes'][0].startswith('LIST:RANG '))
         assert {write.split()[0] for write in restoration} == {
             'LIST:RANG', 'LIST:COUN', 'LIST:STEP', 'LIST:LEV', 'LIST:SLEW', 'LIST:WID',
         }
         assert not {'INP ON', '*TRG'}.intersection(trial['planned_writes'], restoration)
-        if mode not in ('list-cc', 'list-cc,auxiliary-controls'):
-            assert trial['error_code'] == 'settings_require_isolated_run'
-        else:
-            assert 'error_code' not in trial
+        assert 'error_code' not in trial
+        if mode == 'full':
+            assert list(cases).index('trigger-restore') < list(cases).index('list-cc-settings')
+            assert list(cases).index('workflow-cc-discharge') < list(cases).index('protection-start-state')
+            assert list(cases).index('trigger-restore') < list(cases).index('average-status')
     if 'auxiliary-controls-von' in cases:
-        assert {'VOLT:ON?', 'VOLT:LATC?'} <= set(cases['auxiliary-controls-von']['queries'])
-        short = cases['auxiliary-controls-short']
-        assert short['planned_writes'] == ['SYST:REM', 'INP:SHOR 1', 'INP:SHOR 0']
-        assert short['conditional_writes'][0]['writes'] == ['SYST:REM', 'INP OFF']
-        assert not any(write.startswith('CURR:RANG ') for write in cases['auxiliary-controls-slew']['planned_writes'])
+        if mode == 'full':
+            for name, prior in (('von', 'von-status'), ('short', 'short-status'), ('slew', 'fixed-slew-status')):
+                alias = cases[f'auxiliary-controls-{name}']
+                assert alias['reuse_from'] == prior
+                assert alias['planned_writes'] == alias['queries'] == alias['conditional_writes'] == []
+        else:
+            assert {'VOLT:ON?', 'VOLT:LATC?'} <= set(cases['auxiliary-controls-von']['queries'])
+            short = cases['auxiliary-controls-short']
+            assert short['planned_writes'] == ['SYST:REM', 'INP:SHOR 1', 'INP:SHOR 0']
+            assert short['conditional_writes'][0]['writes'] == ['SYST:REM', 'INP OFF']
+            assert not any(write.startswith('CURR:RANG ') for write in cases['auxiliary-controls-slew']['planned_writes'])
+    needs_handoff = mode in ('sequence,auxiliary-controls,list-cc', 'cv,list-cc',
+                             'cr,auxiliary-controls', 'transient-cw,readback,list-cc')
+    assert ('isolated-fixed-cc-handoff' in cases) == needs_handoff
+    if needs_handoff:
+        handoff = cases['isolated-fixed-cc-handoff']
+        names = list(cases)
+        assert handoff['command'] == 'contributor-settings'
+        expected_origin = ('CW' if 'sequence' in mode or 'transient-cw' in mode else
+                           'CV' if mode.startswith('cv,') else 'CR')
+        assert handoff['arguments'][handoff['arguments'].index('--origin-function') + 1] == expected_origin
+        assert handoff['conditional_writes'][0]['writes'] == ['SYST:REM', 'FUNC CURR']
+        assert handoff['planned_writes'] == []
+        first = 'auxiliary-controls-von' if 'auxiliary-controls' in mode else 'list-cc-settings'
+        assert names.index('isolated-fixed-cc-handoff') + 1 == names.index(first)
+        if 'sequence' in mode:
+            assert names.index('sequence-cw') < names.index('isolated-fixed-cc-handoff')
+        if 'readback' in mode:
+            assert names.index('average-status') < names.index('isolated-fixed-cc-handoff')
     if 'workflow-measure-log' in cases:
         assert cases['workflow-measure-log']['queries'][:2] == ['*IDN?', 'INP:STAT?']
         assert cases['workflow-measure-until']['queries'] == ['*IDN?', 'INP:STAT?', 'MEAS:VOLT?']
@@ -1443,8 +1607,8 @@ def test_new_modes_deduplicate_and_leave_physical_cases_not_run(run_script):
     assert report['overall_status'] == 'BLOCKED' and report['hardware_touched'] is False
     assert report['modes'] == ['readback', 'measurement-extensions', 'list-cc']
     assert len({case['name'] for case in report['cases']}) == len(report['cases'])
-    assert {case['status'] for case in report['cases'] if 'execution' in case} == {'PASS'}
-    assert {case['status'] for case in report['cases'] if 'execution' not in case} == {'NOT RUN'}
+    assert {case['status'] for case in report['cases'] if case.get('execution') in ('simulate', 'dry-run')} == {'PASS'}
+    assert {case['status'] for case in report['cases'] if case.get('execution') in (None, 'live')} == {'NOT RUN'}
 
 
 @pytest.mark.parametrize('extra,resource', [

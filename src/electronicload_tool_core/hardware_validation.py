@@ -9,17 +9,18 @@ No automatic retries, rollback, Input OFF, local switch or error-queue reads.
 
 from datetime import datetime, timezone
 from decimal import Decimal, localcontext
-from time import monotonic_ns
+from time import monotonic_ns, sleep
 
 from . import control as c
 from .errors import LoadError
-from .identity import parse_identity
+from .identity import MODEL_ID, parse_identity
+from .protection import FAULT_MASK, _condition
 from .readback import TRANSIENT_LEVEL_QUERIES, fixed_slew_status, transient_mode, transient_values
 from .simulator import ControlSimulator
-from .visa import open_request_session
+from .visa import QUERY_DELAY_S, open_request_session, require_trusted_session, validate_request_connection
 from .trigger import (SOURCE_TOKENS, TRIGGER_COMMANDS, TRIGGER_INTERVAL_QUERY,
-                      TRIGGER_SOURCE_QUERY, read_source, software_trigger, validate_interval,
-                      validate_setup)
+                      TRIGGER_SOURCE_QUERY, read_source, sampled_waveform_evidence,
+                      software_trigger, validate_interval, validate_setup)
 
 
 FUNCTIONS = {"cv": ("VOLT", "VOLTAGE"), "cr": ("RES", "RESISTANCE"),
@@ -46,6 +47,29 @@ def _input_timer_snapshot(session, *, timing=False):
     return result
 
 
+def _observe_input_timer(session, expected, stop):
+    """Collect the first OFF in one identified, read-only VISA session."""
+    deadline_ns = expected["on_write_started_ns"] + (expected["seconds"] + 1) * 10**9
+    observations = []
+    # Do not start an entire snapshot when even its configured delays cannot
+    # fit. The existing runner deadline also bounds a blocked VISA exchange.
+    minimum_ns = int(3 * getattr(session, "query_delay", QUERY_DELAY_S) * 10**9)
+    while deadline_ns - monotonic_ns() > minimum_ns:
+        _stopping(stop)
+        status = _input_timer_snapshot(session, timing=True)
+        observations.append(status)
+        if (status["input_state"] == "OFF" or not status["enabled"]
+                or status["seconds"] != expected["seconds"]):
+            break
+        remaining_ns = deadline_ns - monotonic_ns()
+        if remaining_ns <= minimum_ns:
+            break
+        sleep(min(0.05, (remaining_ns - minimum_ns) / 1e9))
+    if not observations:
+        raise LoadError("timer_expiry_unconfirmed", "No time remains for the Timer observation.", 3)
+    return {**observations[-1], "timer_observations": observations}
+
+
 def execute_input_timer(command, *, mode, resource, seconds, current, range_name,
                         expected, confirmed, stop, asrl=None, on_write_started=None):
     """CLI-only bounded CC validation. Normal Product/Worker Timer LIVE stays closed."""
@@ -64,8 +88,19 @@ def execute_input_timer(command, *, mode, resource, seconds, current, range_name
         selected = c.resolve_fixed_range("set-cc", expected["current"], expected["range"])
         expected = {"current": c.validate_current(expected["current"], selected),
                     "range": selected, "seconds": c.validate_input_timer(expected["seconds"])}
+    elif command == "input-timer-status" and expected is not None:
+        fields = {"seconds"} if mode == "dry-run" else {"seconds", "on_write_started_ns", "on_confirmed_ns"}
+        if confirmed or not isinstance(expected, dict) or set(expected) != fields:
+            raise LoadError("argument_error", "Supply the bounded Timer observation settings.")
+        c.validate_input_timer(expected["seconds"])
+        if mode == "live":
+            start, confirmed_at = expected["on_write_started_ns"], expected["on_confirmed_ns"]
+            now = monotonic_ns()
+            if (expected["seconds"] != 5 or type(start) is not int or type(confirmed_at) is not int
+                    or not 0 < start <= confirmed_at <= now or now >= start + 6 * 10**9):
+                raise LoadError("argument_error", "A current five-second Timer observation window is required.")
     elif expected is not None or confirmed:
-        raise LoadError("argument_error", "Expected settings/confirmation apply only to Input ON.")
+        raise LoadError("argument_error", "Expected settings/confirmation apply only to Input ON or bounded Timer status.")
     writes = {"set-input-timer": f"INP:TIM:DEL {seconds}",
               "input-timer-enable": "INP:TIM 1", "input-timer-disable": "INP:TIM 0",
               "input-on": "INP ON", "input-off": "INP OFF"}
@@ -73,7 +108,9 @@ def execute_input_timer(command, *, mode, resource, seconds, current, range_name
     if mode == "dry-run":
         return {**marker, "command": command, "hardware_access": False,
                 "planned_writes": ["SYST:REM", writes[command]] if command in writes else [],
-                "expected_configuration": _serial(expected) if expected else None}
+                "expected_configuration": _serial(expected) if expected else None,
+                **({"queries": ["*IDN?", "INP:TIM:DEL?", "INP:TIM?", "INP:STAT?"]}
+                   if command == "input-timer-status" and expected is not None else {})}
 
     def guard(session):
         _stopping(stop)
@@ -100,7 +137,8 @@ def execute_input_timer(command, *, mode, resource, seconds, current, range_name
                                 power=None, range_name=None, confirmed=False, stop=stop,
                                 allow_cv=False, allow_cr=False, allow_cw=False)
         elif command == "input-timer-status":
-            result = _input_timer_snapshot(session, timing=True)
+            result = (_observe_input_timer(session, expected, stop) if expected is not None
+                      else _input_timer_snapshot(session, timing=True))
         else:
             guard(session)
             c._write(session, "SYST:REM")
@@ -615,6 +653,197 @@ def execute_trigger(command, *, mode, resource, source, interval, transient, lis
             else:
                 result = _validation_list(session, command, configuration, trigger, writes, stop)
         return {**result, **marker, "visa": runtime}
+
+
+
+TRIGGER_OBSERVATION_COMMAND = "trigger-observe"
+
+
+def execute_trigger_observation(*, mode, resource, backend, model_id, expected, seconds,
+                                confirmed, deadline_ns=None, asrl=None, on_external_ready=None):
+    """Contributor-only sampling of an already authorized, powered Trigger trial."""
+    if (model_id != MODEL_ID or mode not in {"live", "dry-run"} or type(seconds) is not int
+            or not 1 <= seconds <= 900 or not isinstance(expected, dict)
+            or set(expected) != {"function", "configuration", "trigger"}
+            or not isinstance(expected["trigger"], dict)
+            or set(expected["trigger"]) not in ({"source"}, {"source", "interval_s"})):
+        raise LoadError("argument_error", "Supply the bounded Contributor Trigger observation settings.")
+    trigger = validate_setup(**expected["trigger"])
+    source = trigger["source"]
+    is_list = source in {"BUS", "EXTERNAL"}
+    if source == "MANUAL" or expected["function"] != ("LIST" if is_list else "CC"):
+        raise LoadError("unsupported_live_scope", "Observation is limited to the four Contributor Trigger trials.")
+    config = _finite_list(expected["configuration"]) if is_list else _configuration(
+        "transient-cc", expected["configuration"])
+    if is_list:
+        if len(config["steps"]) != 2:
+            raise LoadError("unsupported_live_scope", "Observation requires the two-step finite LIST trial.")
+        a, b = config["steps"]
+        levels = {"level_a": a["current_a"], "level_b": b["current_a"],
+                  "width_a": a["width_s"], "width_b": b["width_s"], "repeats": config["repeat_count"]}
+        needed = (a["width_s"] + b["width_s"]) * config["repeat_count"]
+        if min(a["current_a"], b["current_a"]) <= 0:
+            raise LoadError("argument_error", "LIST observation requires levels distinguishable from the zero baseline.")
+    else:
+        if config["transient_mode"] != "pulse":
+            raise LoadError("unsupported_live_scope", "Observation requires the Transient CC pulse trial.")
+        levels = {"level_a": config["level_a"], "level_b": config["level_b"], "width_a": config["pulse_width"]}
+        needed = config["pulse_width"]
+        if source == "TIMER":
+            levels["interval"] = trigger["interval_s"]
+            needed += 2 * trigger["interval_s"]
+    if config["range"] != "low" or not all(
+        Decimal(0) <= levels[key] <= Decimal(2) for key in ("level_a", "level_b")
+    ):
+        raise LoadError("unsupported_live_scope", "Observation requires Low range and levels within 2 A.")
+    widths = [levels["width_a"]] + ([levels["width_b"]] if is_list else [])
+    # Even consecutive queries consume two configured query delays plus
+    # the existing 50 ms sampling wait. Reject impossible plans before VISA.
+    minimum_gap = (3 * QUERY_DELAY_S if is_list else
+                   max(2 * QUERY_DELAY_S + 0.05, 3 * QUERY_DELAY_S if source == "HOLD" else 0))
+    if min(0.5, float(min(widths)) / 4) <= minimum_gap:
+        raise LoadError("argument_error", "Trigger dwell or pulse is too short for automatic current sampling.")
+    if levels["level_a"] == levels["level_b"] or needed > seconds:
+        raise LoadError("argument_error", "Trigger observation needs distinct levels and a sufficient window.")
+    # The runner gives capture at most one 30 s command, minus its
+    # existing 500 ms process-return reserve. Account for unavoidable
+    # queries before the event and at completion (not a latency guarantee).
+    software = source in {"HOLD", "BUS"}
+    guard_queries = 18 if is_list else 17
+    fixed_queries = 4 + guard_queries * (2 if software else 1) + int(software) + (2 if is_list else 0)
+    event_seconds = needed - trigger["interval_s"] if source == "TIMER" else needed
+    minimum_seconds = float(event_seconds) + fixed_queries * QUERY_DELAY_S + 0.3
+    if minimum_seconds >= min(seconds, 30) - 0.5:
+        raise LoadError("argument_error", "Trigger event and required queries cannot fit the capture deadline.")
+    if not confirmed:
+        raise LoadError("confirmation_required", "Authorize the bounded Trigger observation.")
+    validate_request_connection(resource, backend, mode=mode, asrl=asrl, allowed=True)
+    marker = {"validation_only": True, "validation_scope": "trigger"}
+    if mode == "dry-run":
+        return {**marker, "hardware_access": False,
+                "planned_writes": ["SYST:REM", software_trigger(source)] if software else [],
+                "queries": ["*IDN?", "FUNC:MODE?", "FUNC?", "INP:STAT?", "TRAN?",
+                            "INP:TIM?", "INP:SHOR:STAT?", TRIGGER_SOURCE_QUERY,
+                            TRIGGER_INTERVAL_QUERY, "MEAS:CURR?",
+                            *(["LIST:RANG?", "LIST:COUN?", "LIST:STEP?", "LIST:LEV? {step}",
+                               "LIST:SLEW? {step}", "LIST:WID? {step}", "CURR?", "STAT:QUES:COND?"] if is_list else
+                              ["CURR:RANG?", "CURR:TRAN:MODE?", "CURR:TRAN:ALEV?", "CURR:TRAN:BLEV?",
+                               "CURR:SLEW:POS?", "CURR:SLEW:NEG?", "CURR:TRAN:AWID?"])],
+                "observation_seconds": seconds}
+    now = monotonic_ns()
+    if (type(deadline_ns) is not int or deadline_ns <= now
+            or deadline_ns - now > min(seconds, 30) * 10**9):
+        raise LoadError("argument_error", "A current, bounded observation deadline is required.")
+    # The script owns the existing powered trial and OFF reserve. This command
+    # never switches Input ON/OFF or starts a second VISA session.
+    with open_request_session(resource, asrl, c.open_session) as (session, runtime):
+        require_trusted_session(session)
+        parse_identity(c._query(session, "*IDN?"))
+
+        def guard():
+            if monotonic_ns() >= deadline_ns:
+                raise LoadError("trigger_observation_unconfirmed", "Observation deadline reached.", 3)
+            _check_trigger(session, trigger)
+            if c._flag(session, "INP:TIM?") != "OFF" or c._flag(session, "INP:SHOR:STAT?") != "OFF":
+                raise LoadError("unsafe_mode", "Trigger observation requires Timer and Short OFF.")
+            _require_trigger_input_on(session, None, "Trigger observation")
+            if is_list:
+                if c._flag(session, "TRAN?") != "OFF":
+                    raise LoadError("unsafe_mode", "LIST observation requires Transient OFF.")
+                _list_snapshot(session, config)
+            else:
+                observed = _snapshot(session, "transient-cc", require_hold=False)
+                _match(observed, config)
+                if not observed["enabled"] or observed["input_state"] != "ON":
+                    raise LoadError("unsafe_mode", "Transient pulse must be enabled with Input ON.")
+
+        guard()
+        if software:
+            c._write(session, "SYST:REM")
+            guard()
+        started = monotonic_ns()
+        samples = []
+
+        def list_condition():
+            # IT8800 Programming Guide V2.1 p.15, RUN bit 7 of the
+            # real-time Questionable condition register (read-only, p.29).
+            # Reuse the existing Protection register parser; never read
+            # or clear the latched event register.
+            before = monotonic_ns()
+            condition = _condition(session)
+            completed = monotonic_ns()
+            if completed >= deadline_ns:
+                raise LoadError("trigger_observation_unconfirmed", "LIST status arrived after the deadline.", 3)
+            if condition["raw"] & FAULT_MASK:
+                raise LoadError("trigger_observation_unconfirmed", "LIST observation encountered a protection fault.", 3)
+            return {"list_running": "RUN" in condition["flags"],
+                    "list_status_started_s": (before - started) / 1e9,
+                    "list_status_completed_s": (completed - started) / 1e9}
+
+        def sample():
+            before = monotonic_ns()
+            current = _number(session, "MEAS:CURR?")
+            after = monotonic_ns()
+            if abs(current) > Decimal(str(c.RANGE_LIMITS["high"])):
+                raise LoadError("invalid_response", "Trigger current sample exceeds model bounds.", 3)
+            if after >= deadline_ns:
+                raise LoadError("trigger_observation_unconfirmed", "Current sample arrived after the deadline.", 3)
+            samples.append({"started_s": (before - started) / 1e9, "completed_s": (after - started) / 1e9,
+                            "current_a": float(current)})
+            return current
+
+        if is_list:
+            initial_list = list_condition()
+            if initial_list["list_running"]:
+                raise LoadError("trigger_observation_unconfirmed", "LIST was already running before the trial.", 3)
+        baseline = sample()
+        if is_list:
+            samples[-1].update(initial_list)
+        if source != "TIMER":
+            wanted = Decimal(0) if is_list else levels["level_b"]
+            tolerance = min(Decimal("0.01"), abs(levels["level_a"] - levels["level_b"]) / 4)
+            if is_list:
+                tolerance = min(tolerance, levels["level_a"] / 4, levels["level_b"] / 4)
+            if abs(baseline - wanted) > tolerance:
+                raise LoadError("trigger_observation_unconfirmed", "Pre-trigger current baseline was not observed.", 3)
+        if software:
+            _require_trigger_input_on(session, None, "Trigger observation")
+            # Actual process startup and readback latency can consume more
+            # than the preview's minimum. Do not dispatch an event that can
+            # no longer finish within the already authorized capture window.
+            event_reserve_ns = int((float(event_seconds) + (3 if is_list else 2) * QUERY_DELAY_S + 0.3) * 1e9)
+            if deadline_ns - monotonic_ns() <= event_reserve_ns:
+                raise LoadError("trigger_observation_unconfirmed", "No time remains for the complete software Trigger observation.", 3)
+            c._write(session, software_trigger(source))
+        elif source == "EXTERNAL" and on_external_ready is not None:
+            on_external_ready()
+        # Leave time for the final state query and process return. An overrun or
+        # lost exchange is still handled by the existing script deadline.
+        reserve_ns = 300_000_000 + (int(QUERY_DELAY_S * 10**9) if is_list else 0)
+        saw_list_running = False
+        while monotonic_ns() + reserve_ns < deadline_ns and len(samples) < 10000:
+            sample()
+            list_ended = False
+            if is_list:
+                state = list_condition()
+                samples[-1].update(state)
+                list_ended = saw_list_running and not state["list_running"]
+                saw_list_running |= state["list_running"]
+            evidence = sampled_waveform_evidence(samples, source=source, **levels)
+            if evidence is not None:
+                _require_trigger_input_on(session, None, "Trigger observation")
+                if monotonic_ns() >= deadline_ns:
+                    break
+                return {**marker, "visa": runtime, "input_state": "ON", "trigger_source": source,
+                        "waveform_completion_known": True, "observation": evidence, "samples": samples}
+            if list_ended:
+                # The first observed completion is final evidence. Do not
+                # wait for another cycle to replace a failed waveform.
+                break
+            if not is_list:
+                sleep(min(0.05, max(0, (deadline_ns - monotonic_ns()) / 1e9)))
+        raise LoadError("trigger_observation_unconfirmed", "Current samples did not establish the expected waveform.",
+                        3, sample_count=len(samples), trigger_source=source)
 
 
 def _execute_led_or_slow_rise(command, *, scope, mode, resource, current, resistance,

@@ -6,8 +6,9 @@ from threading import Event
 import pytest
 
 from electronicload_tool_cli import cli
-from electronicload_tool_core import control
+from electronicload_tool_core import contributor_settings, control, hardware_validation
 from electronicload_tool_core.errors import LoadError
+from electronicload_tool_core.trigger import sampled_waveform_evidence
 from electronicload_tool_core.simulator import ControlSimulator
 from test_control_core import RESOURCE, session
 from test_hardware_validation import ValidationFake, transient
@@ -18,7 +19,7 @@ class TriggerFake(ValidationFake):
     def __init__(self):
         super().__init__()
         self.values.update({"TRIG:SOUR": "EXT", "TRIG:TIM": "0.375", "INP:TIM": "0",
-                            "LIST:RANG": "6", "LIST:COUN": "1", "LIST:STEP": "2"})
+                            "LIST:RANG": "6", "LIST:COUN": "1", "LIST:STEP": "2", "STAT:QUES:COND": "0"})
         self.list_steps = {}
 
     def write(self, command):
@@ -44,6 +45,7 @@ def physical(command, **arguments):
 
 @pytest.mark.parametrize("scenario", [
     "recall_works", "recall_ignored", "unrestorable", "stale_slot", "unknown_slot", "lost_after_recall",
+    "second_save_ignored", "unknown_stale_slot", "transient_enabled", "fixed_cv", "selected_list", "long_buffer", "medium_buffer",
 ])
 def test_contributor_list_requires_independent_recall_then_restores_working_buffer(
     monkeypatch, capsys, scenario,
@@ -54,31 +56,69 @@ def test_contributor_list_requires_independent_recall_then_restores_working_buff
             self.list_steps = {f"LIST:{key}? {index}": value for index in (1, 2)
                                for key, value in (("LEV", ".2"), ("SLEW", ".1"), ("WID", "0.3"))}
             self.slots = {1: {**self.list_steps, "LIST:WID? 1": "1"}}
+            self.save_count = 0
 
         def write(self, command):
             super().write(command)
-            if command == "LIST:SAV 1" and scenario not in {"stale_slot", "unknown_slot"}:
-                self.slots[1] = self.list_steps.copy()
+            if command == "LIST:SAV 1":
+                self.save_count += 1
+                if (scenario not in {"stale_slot", "unknown_stale_slot"}
+                        and not (scenario == "second_save_ignored" and self.save_count == 2)):
+                    self.slots[1] = self.list_steps.copy()
             if command == "LIST:RCL 1":
-                if scenario in {"recall_works", "stale_slot", "unknown_slot"}:
+                if scenario not in {"recall_ignored", "lost_after_recall"}:
                     self.list_steps = self.slots[1].copy()
                 if scenario == "lost_after_recall":
                     self.response_errors["FUNC:MODE?"] = TimeoutError()
 
     fake = SettingsList()
+    if scenario in {"long_buffer", "medium_buffer"}:
+        count = 84 if scenario == "long_buffer" else 25
+        fake.values["LIST:STEP"] = str(count)
+        fake.list_steps = {f"LIST:{key}? {index}": value for index in range(1, count + 1)
+                           for key, value in (("LEV", ".2"), ("SLEW", ".1"), ("WID", "0.3"))}
     fake.range = 6
+    fake.transient = scenario == "transient_enabled"
+    if scenario == "fixed_cv":
+        fake.function = "VOLT"
+    if scenario == "selected_list":
+        fake.mode = "LIST"
     if scenario == "unrestorable":
         fake.values["LIST:RANG"] = "0.1"  # Readable number without a restorable LIST range mapping.
     start = fake.list_steps.copy()
+    now = 1_000_000_000
+    query = fake.query
+
+    def timed_query(command):
+        nonlocal now
+        now += 150_000_000
+        return query(command)
+
+    monkeypatch.setattr(fake, "query", timed_query)
+    monkeypatch.setattr(contributor_settings, "monotonic_ns", lambda: now)
     session(fake, monkeypatch)
     args = ["contributor-settings", "--trial", "list-cc", "--slot", "1", "--resource", RESOURCE, "--json"]
-    if scenario != "unknown_slot":
+    if scenario not in {"unknown_slot", "unknown_stale_slot"}:
         args += ["--previous-slot-width", "1"]
     assert cli.main(args) == 2 and not fake.calls
     capsys.readouterr()
     status = cli.main([*args, "--confirm-isolated"])
     output = capsys.readouterr()
     result = json.loads(output.out)
+    if scenario in {"transient_enabled", "fixed_cv", "selected_list"}:
+        assert status != 0 and result["error"]["details"]["no_settings_written"]
+        assert fake.save_count == 0
+        assert fake.transient == (scenario == "transient_enabled")
+        assert fake.mode == ("LIST" if scenario == "selected_list" else "FIX")
+        if scenario == "fixed_cv":
+            assert fake.function == "VOLT"
+        assert all("?" in command for command in fake.calls)
+        return
+    if scenario == "long_buffer":
+        assert status == 3 and result["error"]["code"] == "settings_budget_insufficient"
+        assert result["error"]["details"]["no_settings_written"]
+        assert fake.list_steps == start and fake.save_count == 0 and all("?" in command for command in fake.calls)
+        return
     if scenario == "unrestorable":
         assert status == 3 and result["error"]["code"] == "list_baseline_unrestorable"
         assert result["error"]["details"]["no_settings_written"]
@@ -91,26 +131,253 @@ def test_contributor_list_requires_independent_recall_then_restores_working_buff
     assert snapshot["fixed_cc"]["range"] == "low"
     if scenario == "lost_after_recall":
         assert status == 3 and result["error"]["details"]["manual_action_required"]
-        assert fake.mode == "LIST" and fake.list_steps["LIST:WID? 1"] == "1"
+        assert fake.mode == "LIST" and fake.list_steps["LIST:WID? 1"] == "2"
         assert fake.calls[-2:] == ["LIST:RCL 1", "FUNC:MODE?"]
         return
 
-    if scenario in {"recall_works", "unknown_slot"}:
+    if scenario in {"recall_works", "unknown_slot", "medium_buffer"}:
         assert status == 0
         details = result["result"]
         assert details["recall_confirmed"] and details["restored"]
-        assert details["save_confirmed"] == (scenario == "recall_works")
-        assert details.get("saved_slot") == (1 if scenario == "recall_works" else None)
+        assert details["save_confirmed"] is True and details["saved_slot"] == 1
+        assert fake.save_count == 2
+        assert fake.slots[1]["LIST:WID? 1"] == details["a_width_s"]
+        assert details["a_width_s"] != details["b_width_s"]
     else:
         assert status == 3
         assert result["error"]["code"] == "readback_mismatch" and result["error"]["details"]["restored"]
     assert fake.list_steps == start and fake.mode == "FIX" and not fake.input
-    assert fake.slots[1]["LIST:WID? 1"] == ("1" if scenario in {"stale_slot", "unknown_slot"} else "2")
-    a, b = (1, 2) if scenario == "unknown_slot" else (2, 1)
-    assert [command for command in fake.calls if "?" not in command] == [
-        "SYST:REM", f"LIST:WID 1,{a}", "FUNC:MODE LIST", "LIST:SAV 1", f"LIST:WID 1,{b}", "LIST:RCL 1",
-        "FUNC:MODE FIX", "LIST:WID 1,0.3",
-    ]
+    assert now < 301_000_000_000
+    writes = [command for command in fake.calls if "?" not in command]
+    assert "INP ON" not in writes
+    if scenario in {"recall_works", "unknown_slot", "medium_buffer"}:
+        assert writes.count("LIST:SAV 1") == writes.count("LIST:RCL 1") == 2
+
+
+
+@pytest.mark.parametrize("ignored_width,count,origin,remaining_s,delay_case", [
+    (False, 2, "CURR", 30, None), (True, 2, "CURR", 30, None),
+    (False, 2, "VOLT", 30, None), (False, 2, "RES", 30, None), (False, 2, "POW", 30, None),
+    (False, 25, "CURR", 30, None), (False, 84, "CURR", 30, None), (False, 2, "CURR", 6, None),
+    (False, 2, "CURR", 30, "slow_baseline"), (False, 2, "CURR", 30, "after_write"),
+])
+def test_readback_list_buffer_without_slot_or_trigger(
+    monkeypatch, capsys, ignored_width, count, origin, remaining_s, delay_case,
+):
+    fake = TriggerFake()
+    fake.range = 6
+    fake.function = origin
+    fake.values["LIST:STEP"] = str(count)
+    fake.list_steps = {f"LIST:{key}? {index}": value for index in range(1, count + 1)
+                       for key, value in (("LEV", ".2"), ("SLEW", "0.1234567890123456789"),
+                                          ("WID", "0.3000000000000000001"))}
+    original = fake.list_steps.copy()
+    now = 1_000_000_000
+    query = fake.query
+
+    def timed_query(command):
+        nonlocal now
+        response = query(command)
+        now += 500_000_000 if delay_case == "slow_baseline" and command.startswith("LIST:") else 150_000_000
+        return response
+
+    write = fake.write
+
+    def timed_write(command):
+        nonlocal now
+        write(command)
+        if delay_case == "after_write" and command == "LIST:WID 1,1":
+            now = 26_000_000_000
+
+    monkeypatch.setattr(fake, "query", timed_query)
+    monkeypatch.setattr(fake, "write", timed_write)
+    monkeypatch.setattr(contributor_settings, "monotonic_ns", lambda: now)
+    if ignored_width:
+        fake.ignore = "LIST:WID 1,1"
+    session(fake, monkeypatch)
+    args = ["contributor-settings", "--trial", "list", "--resource", RESOURCE, "--json", "--confirm-isolated",
+            "--deadline-ns", str(now + remaining_s * 10**9)]
+    status = cli.main(args)
+    outcome = json.loads(capsys.readouterr().out)
+    if count > 2 or remaining_s < 30 or delay_case == "slow_baseline":
+        assert status == 3 and outcome["error"]["code"] == "settings_budget_insufficient"
+        assert outcome["error"]["details"]["no_settings_written"]
+        assert all("?" in command for command in fake.calls)
+        assert fake.list_steps == original and fake.mode == "FIX" and fake.function == origin and not fake.input
+        return
+    assert now < 31_000_000_000
+    if delay_case == "after_write":
+        assert status == 3 and outcome["error"]["code"] == "settings_budget_insufficient"
+        assert outcome["error"]["details"]["restored"]
+        assert fake.list_steps == original and fake.mode == "FIX" and not fake.input
+        assert "FUNC:MODE LIST" not in fake.calls
+        return
+    if ignored_width:
+        assert status == 3 and outcome["error"]["code"] == "readback_mismatch"
+        assert outcome["error"]["details"]["restored"]
+    else:
+        assert status == 0
+        result = outcome["result"]
+        assert result["observed"]["selected"] and result["restored"]
+        steps = result["observed"]["configuration"]["steps"]
+        assert steps[0]["width_s"] == "1"
+        assert steps[1]["width_s"] == original["LIST:WID? 2"]
+        assert steps[0]["slew_a_per_us"] == original["LIST:SLEW? 1"]
+    assert fake.list_steps == original and fake.mode == "FIX" and fake.function == origin and not fake.input
+    assert not any(call.startswith(("LIST:SAV", "LIST:RCL", "INP ON", "TRIG")) and "?" not in call
+                   for call in fake.calls)
+
+
+
+@pytest.mark.parametrize("source,scenario", [
+    ("HOLD", "expected"), ("HOLD", "missing"), ("HOLD", "short"),
+    ("TIMER", "expected"), ("TIMER", "wrong_interval"),
+    ("BUS", "expected"), ("BUS", "wrong_order"), ("EXTERNAL", "expected"),
+    ("BUS", "stuck"), ("EXTERNAL", "stuck"), ("BUS", "extra_cycle"), ("BUS", "early_end"),
+    ("BUS", "terminal_last"),
+    ("HOLD", "sparse"),
+])
+def test_sampled_trigger_evidence_requires_levels_and_time_brackets(source, scenario):
+    is_list = source in {"BUS", "EXTERNAL"}
+    step = 1.0 if scenario == "sparse" else 0.2
+    samples = []
+    for index in range(int(14 / step) + 1):
+        t = index * step
+        current = 0.0 if is_list else 0.2
+        if is_list:
+            if 1 <= t < 3:
+                current = 0.2 if scenario == "wrong_order" else 0.1
+            elif 3 <= t < 5:
+                current = 0.1 if scenario == "wrong_order" else 0.2
+        elif scenario != "missing":
+            starts = [1] if source == "HOLD" else [1, 8 if scenario == "wrong_interval" else 6]
+            if any(start <= t < start + (0.4 if scenario == "short" else 2) for start in starts):
+                current = 0.1
+        sample = {"started_s": t, "completed_s": t + 0.02, "current_a": current}
+        if is_list:
+            end = 4 if scenario == "early_end" else 9 if scenario == "extra_cycle" else 5
+            running = t >= 1 and (t < end or scenario == "stuck")
+            if scenario == "extra_cycle" and 5 <= t < 9:
+                sample["current_a"] = 0.1 if t < 7 else 0.2
+            if scenario in {"stuck", "terminal_last"} and t >= 5:
+                sample["current_a"] = 0.2
+            sample.update(list_running=running, list_status_started_s=t + 0.02,
+                          list_status_completed_s=t + 0.04)
+        samples.append(sample)
+        if is_list and t >= 1 and not running:
+            break
+    evidence = sampled_waveform_evidence(
+        samples, source=source, level_a=control._decimal("0.1"), level_b=control._decimal("0.2"),
+        width_a=2, width_b=2 if is_list else None, interval=5 if source == "TIMER" else None,
+    )
+    assert (evidence is not None) == (scenario in {"expected", "terminal_last"})
+    if evidence:
+        assert evidence["events_confirmed"] == (2 if source == "TIMER" else 1)
+        if is_list:
+            assert evidence["list_run_completed"] is True
+
+
+def test_contributor_trigger_observation_plan_and_refusal_before_visa(monkeypatch, capsys):
+    fake = TriggerFake()
+    session(fake, monkeypatch)
+    expected = {"function": "CC", "trigger": {"source": "HOLD"},
+                "configuration": {**transient("pulse", "low"), "pulse_width": "2"}}
+    args = ["trigger-observe", "--hardware-validation", "trigger",
+            "--validation-settings-json", json.dumps(expected), "--observation-seconds", "15",
+            "--resource", RESOURCE, "--json"]
+    assert cli.main(args) == 2 and not fake.calls
+    capsys.readouterr()
+    assert cli.main([*args, "--confirm", "--dry-run"]) == 0
+    plan = json.loads(capsys.readouterr().out)["result"]
+    assert not plan["hardware_access"] and plan["planned_writes"] == ["SYST:REM", "TRIG:IMM"]
+    assert "MEAS:CURR?" in plan["queries"] and not fake.calls
+    assert cli.main([*args, "--confirm"]) == 2 and not fake.calls
+    expected["configuration"]["pulse_width"] = "0.001"
+    args[args.index("--validation-settings-json") + 1] = json.dumps(expected)
+    assert cli.main([*args, "--confirm", "--dry-run"]) == 2 and not fake.calls
+    capsys.readouterr()
+    args[args.index("--observation-seconds") + 1] = "40"
+    expected = {"function": "LIST", "trigger": {"source": "BUS"}, "configuration": {
+        "range": "low", "repeat_count": 1, "steps": [
+            {"current_a": 0.1, "slew_a_per_us": 0.1, "width_s": 20},
+            {"current_a": 0.2, "slew_a_per_us": 0.1, "width_s": 20}]}}
+    args[args.index("--validation-settings-json") + 1] = json.dumps(expected)
+    assert cli.main([*args, "--confirm", "--dry-run"]) == 2 and not fake.calls
+    assert "capture deadline" in json.loads(capsys.readouterr().out)["error"]["message"]
+
+
+@pytest.mark.parametrize("source,scenario", [
+    ("BUS", "input_drop"), ("BUS", "completed"), ("BUS", "stuck"),
+    ("EXTERNAL", "completed"), ("EXTERNAL", "stuck"),
+])
+def test_automatic_list_observation_requires_input_and_run_completion(monkeypatch, capsys, source, scenario):
+    fake = TriggerFake()
+    fake.range = 6
+    fake.mode = "LIST"
+    fake.input = True
+    fake.values["TRIG:SOUR"] = "BUS" if source == "BUS" else "EXT"
+    fake.values["LIST:COUN"] = "1"
+    fake.values["MEAS:CURR"] = "0"
+    steps = [{"current_a": 0.1, "slew_a_per_us": 0.1, "width_s": 2},
+             {"current_a": 0.2, "slew_a_per_us": 0.1, "width_s": 2}]
+    fake.list_steps = {f"LIST:{stem}? {index}": str(step[key])
+                       for index, step in enumerate(steps, 1)
+                       for stem, key in (("LEV", "current_a"), ("SLEW", "slew_a_per_us"), ("WID", "width_s"))}
+    now = 1_000_000_000
+    triggered = None
+    current_reads = 0
+    query = fake.query
+    write = fake.write
+
+    def observe_query(command):
+        nonlocal now, triggered, current_reads
+        if command == "MEAS:CURR?":
+            current_reads += 1
+            if source == "EXTERNAL" and current_reads == 2:
+                triggered = now
+            fake.values["MEAS:CURR"] = ("0" if triggered is None else
+                                       "0.1" if now - triggered < 2_000_000_000 else "0.2")
+        if command == "STAT:QUES:COND?":
+            fake.values["STAT:QUES:COND"] = str(128 if triggered is not None and
+                (scenario == "stuck" or now - triggered < 4_000_000_000) else 0)
+        response = query(command)
+        if scenario == "input_drop" and fake.remote and command == "LIST:WID? 2":
+            fake.input = False
+        now += 150_000_000
+        return response
+
+    def observe_write(command):
+        nonlocal triggered
+        write(command)
+        if command == "*TRG":
+            triggered = now
+
+    monkeypatch.setattr(fake, "query", observe_query)
+    monkeypatch.setattr(fake, "write", observe_write)
+    monkeypatch.setattr(hardware_validation, "monotonic_ns", lambda: now)
+    session(fake, monkeypatch)
+    expected = {"function": "LIST", "trigger": {"source": source},
+                "configuration": {"range": "low", "repeat_count": 1, "steps": steps}}
+    args = ["trigger-observe", "--hardware-validation", "trigger",
+            "--validation-settings-json", json.dumps(expected), "--observation-seconds", "15",
+            "--deadline-ns", str(now + 14_000_000_000), "--confirm",
+            "--resource", RESOURCE, "--json"]
+    code = cli.main(args)
+    result = json.loads(capsys.readouterr().out)
+    if scenario == "completed":
+        assert code == 0
+        evidence = result["result"]["observation"]
+        assert evidence["list_run_completed"] is True
+        assert evidence["events_confirmed"] == 1
+        assert evidence["list_run_bracket"]["uncertainty_s"] <= 0.5
+        assert now >= triggered + 4_000_000_000
+    else:
+        assert code != 0
+        assert result["error"]["code"] == ("input_not_on" if scenario == "input_drop"
+                                            else "trigger_observation_unconfirmed")
+    assert "MEAS:CURR?" in fake.calls
+    assert fake.calls.count("*TRG") == int(source == "BUS" and scenario != "input_drop")
+    assert not any(call in {"INP ON", "INP OFF"} for call in fake.calls)
 
 
 @pytest.mark.parametrize("function,sources", [

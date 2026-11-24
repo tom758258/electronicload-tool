@@ -5,11 +5,11 @@ Default: the established validation modes, with common read-only safety precheck
 trigger and input-timer. Omitted -Modes selects all default modes.
 -Modes protection selects the separate Protection validation procedure.
 -Modes sequence selects four bounded Fixed Software Sequence trials.
--Modes readback checks existing settings with Input OFF and without changing the instrument.
+-Modes readback -LiveExtensions exercises settings with Input OFF and isolated terminals.
 -Modes full (default) selects all trials. USB and ASRL use the same matrix.
 -Modes workflow runs only dry-run and simulation, without an instrument.
 -Modes measurement-extensions,auxiliary-controls,list-cc selects offline checks.
--LiveExtensions explicitly requests physical cases for those four modes.
+-LiveExtensions explicitly requests automatic Readback and physical cases for those four modes.
 -InputTimerOnly is a backward-compatible shortcut for the input-timer-only trial.
 Requires approved source/DUT limits and interactive confirmation before hardware access.
 -PlanOnly validates every planned CLI request without VISA or hardware access.
@@ -259,13 +259,14 @@ function Save-Report {
         if ($entry.Contains('expected_readback')) { $case.expected_readback = $entry.expected_readback }
         if ($entry.Contains('readback_comparison')) { $case.readback_comparison = $entry.readback_comparison }
         if ($entry.Contains('condition')) { $case.condition = $entry.condition }
+        if ($entry.Contains('deadline_ms')) { $case.deadline_ms = $entry.deadline_ms }
         foreach ($field in @('queries','planned_writes','conditional_writes')) {
             if ($entry.Contains($field)) { $case[$field] = $entry[$field] }
         }
         if ($entry.Contains('origin_function')) { $case.origin_function = $entry.origin_function }
         foreach ($field in @('trace_source','trace_points','trace_interval_s','trace_sample_count',
-                             'trace_csv_complete','operator_observed','load_duration_confirmed','trigger_source','trigger_interval_s',
-                             'trigger_source_restore','trigger_interval_restore','list_selected')) {
+                             'trace_csv_complete','operator_observed','load_duration_confirmed','trigger_observation','trigger_source','trigger_interval_s',
+                             'trigger_source_restore','trigger_interval_restore','list_selected','automatic_off_observed','timer_expiry_bracket','reuse_from')) {
             if ($entry.Contains($field)) { $case[$field] = $entry[$field] }
         }
         if ($entry.Contains('confirmed_input_state')) { $case.input_state = $entry.confirmed_input_state }
@@ -312,7 +313,9 @@ function Save-Report {
             if ($entry.execution -ceq 'live' -and $entry.command -cin @('cc-timed-load','cc-discharge','contributor-settings')) {
                 foreach ($field in @('input_state','cleanup','on_write_started_ns','off_write_started_ns','off_confirmed_ns','duration_s',
                                      'current_a','measured_current_a','capacity_ah','trial','restored','short_state',
-                                     'short_on_confirmed','saved_slot','a_width_s','b_width_s','save_confirmed','recall_confirmed','exited_list')) {
+                                     'short_on_confirmed','saved_slot','a_width_s','b_width_s','save_confirmed','recall_confirmed','exited_list',
+                                     'load_evidence_source','load_evidence_tail_ns','load_evidence_resolution_ns','current_samples','expected_setpoint',
+                                     'expected_level_a','expected_width_s','expected_average_count')) {
                     if ($null -ne $entry.response.result.$field) { $case[$field] = $entry.response.result.$field }
                 }
             }
@@ -615,6 +618,8 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
     $timerOn = $CaseName -ceq 'timer-on'
     $workflowLoad = $Command -cin @('cc-timed-load', 'cc-discharge')
     $isolatedSettings = $Command -ceq 'contributor-settings'
+    $externalCapture = $Command -ceq 'trigger-observe' -and $CaseName -ceq 'trigger-external-observed'
+    $captureReady = $false
     if ($workflowLoad -and $remaining -lt 10000) { throw 'Insufficient time remains for a bounded Workflow load trial.' }
     $observeOn = $timerOn -or $workflowLoad
     $notification = if ($timerOn) { 'Timer' } else { 'Workflow' }
@@ -640,6 +645,13 @@ raise SystemExit(main(contributor_stop=stop, settings_on_baseline=handoff))
 '@
     } elseif ($DebugArtifacts -and $Command -in @('protection-set','protection-status')) {
         $launcher = 'import logging; logging.basicConfig(); logging.getLogger("electronicload_tool_core.protection").setLevel(logging.DEBUG); ' + $launcher
+    }
+    # Use one absolute deadline for LIST admission and the process wait,
+    # including startup and private baseline handoff.
+    $listSettingsDeadlineNs = 0L
+    if ($isolatedSettings -and $CaseName -cin @('list-status','list-cc-settings')) {
+        $listSettingsDeadlineNs = (Get-TimerMonotonicNs) + [long]$remaining * 1000000L
+        $ExtraArgs += @('--deadline-ns', [string]$listSettingsDeadlineNs)
     }
     $arguments = @('-c', $launcher,
         $Command, '--json') + $script:connectionArgs + $ExtraArgs
@@ -671,10 +683,11 @@ raise SystemExit(main(contributor_stop=stop, settings_on_baseline=handoff))
         $entry.status = 'FAIL'
         $stdout = $process.StandardOutput.ReadToEndAsync()
         $stderr = $null
-        if ($observeOn -or $isolatedSettings) {
+        if ($observeOn -or $isolatedSettings -or $externalCapture) {
             # Read live notifications before waiting for the child to exit.
             $notificationStartNs = if ($observeOn) { $dispatchNs } else { Get-TimerMonotonicNs }
-            $commandDeadlineNs = $notificationStartNs + [long]$remaining * 1000000L
+            $commandDeadlineNs = if ($listSettingsDeadlineNs) { $listSettingsDeadlineNs }
+                else { $notificationStartNs + [long]$remaining * 1000000L }
             while ($true) {
                 $read = $process.StandardError.ReadLineAsync()
                 $remaining = Get-TimerRemainingMs $commandDeadlineNs
@@ -689,6 +702,12 @@ raise SystemExit(main(contributor_stop=stop, settings_on_baseline=handoff))
                     if ((Get-TimerMonotonicNs) -ge $commandDeadlineNs) { break }
                     $process.StandardInput.BaseStream.WriteByte(65)
                     $process.StandardInput.BaseStream.Flush()
+                    $stderr = $process.StandardError.ReadToEndAsync()
+                    break
+                }
+                if ($externalCapture -and $line -ceq 'Trigger capture ready: apply external pulse now.') {
+                    Write-Host $line
+                    $captureReady = $true
                     $stderr = $process.StandardError.ReadToEndAsync()
                     break
                 }
@@ -847,7 +866,8 @@ raise SystemExit(main(contributor_stop=stop, settings_on_baseline=handoff))
             }
             if ($CaseName.StartsWith('trigger-') -and $result.ok -eq $false -and
                 $null -eq $details.cleanup_errors -and $code -in @('readback_mismatch','unsafe_mode',
-                    'input_not_off','input_not_on','input_timer_enabled','unsafe_trigger_source')) {
+                    'input_not_off','input_not_on','input_timer_enabled','unsafe_trigger_source',
+                    'trigger_observation_unconfirmed')) {
                 $entry['trigger_exchange_confirmed'] = $true
                 if ($code -eq 'input_not_off') {
                     $script:triggerOffConfirmed = $false
@@ -914,6 +934,17 @@ raise SystemExit(main(contributor_stop=stop, settings_on_baseline=handoff))
                     Fail-Case $CaseName 'workflow_load_unconfirmed' 'The SCPI Input OFF time does not confirm the 5 s load schedule.'
                 }
                 $entry['load_duration_confirmed'] = $false
+                $entry['response'] = $result
+                if ($result.result.load_duration_confirmed -ne $true -or
+                    $result.result.load_evidence_source -cne 'instrument_current_samples' -or
+                    $null -eq $result.result.load_evidence_tail_ns -or
+                    $result.result.load_evidence_tail_ns -lt 0 -or
+                    $result.result.load_evidence_tail_ns -gt 1000000000L -or
+                    $result.result.load_evidence_resolution_ns -ne 1000000000L -or
+                    @($result.result.current_samples).Count -lt 2) {
+                    Fail-Case $CaseName 'workflow_load_unconfirmed' 'Automatic sampled current evidence is insufficient.'
+                }
+                $entry['load_duration_confirmed'] = $true
             }
         }
         if ($script:traceSelected -and $Command -eq 'trace-start') {
@@ -927,7 +958,11 @@ raise SystemExit(main(contributor_stop=stop, settings_on_baseline=handoff))
             $result.result | Add-Member -MemberType NoteProperty -Name read_timestamp_utc_plus_8 `
                 -Value $stampMatch.Groups[1].Value -Force
         }
-        $entry.status = if ($workflowLoad -or $entry.Contains('readback_comparison') -or $CaseName -ceq 'timer-expiry') {
+        if ($externalCapture -and -not $captureReady) {
+            Fail-Case $CaseName 'trigger_observation_unconfirmed' 'External capture readiness was not confirmed.'
+        }
+        $entry.status = if ($workflowLoad -or $entry.Contains('readback_comparison') -or $CaseName -ceq 'timer-expiry' -or
+            ($Command -ceq 'trigger-observe' -and $CaseName.EndsWith('-observed'))) {
             'NOT RUN'
         } else { 'PASS' }
         if ($CaseName -ceq 'list-cc-settings' -and $result.result.save_confirmed -ne $true) {
@@ -953,6 +988,7 @@ raise SystemExit(main(contributor_stop=stop, settings_on_baseline=handoff))
             # Allow the CLI that owns VISA to perform its own bounded OFF cleanup.
             try { $process.StandardInput.Close() } catch { }
             $stopWait = if ($TimerObservationDeadlineNs) { Get-TimerRemainingMs $TimerObservationDeadlineNs }
+                elseif ($listSettingsDeadlineNs) { Get-TimerRemainingMs $listSettingsDeadlineNs }
                 elseif ($isolatedSettings) { $DeadlineMs } else { 10000 }
             [void]$process.WaitForExit($stopWait)
         }
@@ -980,19 +1016,22 @@ raise SystemExit(main(contributor_stop=stop, settings_on_baseline=handoff))
 }
 
 function Confirm-WorkflowLoad([string]$CaseName) {
-    $timedLoad = $CaseName -ceq 'workflow-cc-timed-load'
-    $prompt = if ($timedLoad) {
-        'Verify Input is OFF and review the current record for this run. It must show 0.09 to 0.11 A throughout loading until the scheduled OFF at 5 s, without an early drop, manual action or independent cutoff. Type TRACE CONFIRMED only if verified'
-    } else { 'Verify Input is OFF and the source remained on throughout the trial without manual or independent cutoff. Press Enter to confirm' }
-    $expected = if ($timedLoad) { 'TRACE CONFIRMED' } else { '' }
-    $answer = Read-ValidationAnswer $prompt $CaseName -DiscardPendingKeys
-    if ($null -eq $answer -or $answer -cne $expected) {
-        Fail-Case $CaseName 'workflow_load_unconfirmed' 'The operator did not confirm uninterrupted loading.'
-    }
     $entry = $script:report.results | Where-Object { $_.name -ceq $CaseName }
+    $result = $entry.response.result
+    if ($result.input_state -cne 'OFF' -or $result.cleanup.off_confirmed -ne $true -or
+        ($CaseName -ceq 'workflow-cc-timed-load' -and
+            ($result.load_duration_confirmed -ne $true -or
+             $result.load_evidence_source -cne 'instrument_current_samples' -or
+             $null -eq $result.load_evidence_tail_ns -or
+             $result.load_evidence_tail_ns -lt 0 -or
+             $result.load_evidence_tail_ns -gt 1000000000L -or
+             $result.load_evidence_resolution_ns -ne 1000000000L -or
+             @($result.current_samples).Count -lt 2)) -or
+        ($CaseName -ceq 'workflow-cc-discharge' -and
+            ($result.stop_reason -cne 'capacity_cutoff' -or $result.capacity_ah -lt 0.00010))) {
+        Fail-Case $CaseName 'workflow_load_unconfirmed' 'Automatic Workflow evidence is insufficient.'
+    }
     $entry.status = 'PASS'
-    $entry['operator_observed'] = $true
-    if ($timedLoad) { $entry['load_duration_confirmed'] = $true }
 }
 
 function Fail-Case([string]$Name, [string]$Code, [string]$Message) {
@@ -1054,20 +1093,31 @@ function Invoke-TimerExpiry($Step) {
         }
         $earliestExpiryNs = $on.on_write_started_ns + [long][int]$TimerSeconds * 1000000000L
         $deadlineNs = Get-TimerObservationDeadlineNs $on.on_write_started_ns
-        # Start one second before expiry so a definite early OFF can be rejected.
-        $delay = [Math]::Floor(($earliestExpiryNs - 1000000000L - $nowNs) / 1000000)
-        if ($delay -gt 0) { Start-Sleep -Milliseconds $delay }
-        while ((Get-TimerMonotonicNs) -lt $deadlineNs) {
-            $result = Invoke-LiveCommand -Command $Step.command -CaseName $Step.name `
-                -ExtraArgs $Step.args -DeadlineMs $script:perCommandDeadlineMs `
-                -TimerObservationDeadlineNs $deadlineNs
-            Assert-Runtime $result $Step.name
-            $status = $result.result
-            $now = $entry.observed_at_ms
+        # Start a single observation process immediately after ON confirmation;
+        # no repeated interpreter startup or VISA identity/open in the sample loop.
+        $lastOnNs = 0L
+        $lastOnCompletedNs = 0L
+        if ($nowNs -ge $deadlineNs) {
+            Fail-Case $Step.name 'timer_expiry_unconfirmed' 'Timer ON confirmation exhausted the observation window.'
+        }
+        $settings = @{seconds=[int]$TimerSeconds;on_write_started_ns=$on.on_write_started_ns;
+            on_confirmed_ns=$on.on_confirmed_ns} | ConvertTo-Json -Compress
+        $result = Invoke-LiveCommand -Command $Step.command -CaseName $Step.name `
+            -ExtraArgs @('--hardware-validation','input-timer','--validation-settings-json',$settings) `
+            -DeadlineMs $script:perCommandDeadlineMs -TimerObservationDeadlineNs $deadlineNs
+        Assert-Runtime $result $Step.name
+        if ($entry.observed_at_ns -gt $deadlineNs) {
+            Fail-Case $Step.name 'timer_expiry_unconfirmed' 'Timer observation returned after the deadline.'
+        }
+        foreach ($status in @($result.result.timer_observations)) {
+            if ($null -eq $status) { break }
             $query = $status.timer_timing
+            $observedMs = if ($null -ne $query.query_completed_ns) {
+                $entry.observed_at_ms - [Math]::Floor(($entry.observed_at_ns - $query.query_completed_ns) / 1000000)
+            } else { $null }
             $observations += [ordered]@{
-                elapsed_ms = $now - $script:timerOnStartMs
-                since_on_confirmed_ms = $now - $script:timerOnConfirmedMs
+                elapsed_ms = if ($null -ne $observedMs) { $observedMs - $script:timerOnStartMs }
+                since_on_confirmed_ms = if ($null -ne $observedMs) { $observedMs - $script:timerOnConfirmedMs }
                 query_started_ns = $query.query_started_ns
                 query_completed_ns = $query.query_completed_ns
                 seconds = $status.seconds
@@ -1082,6 +1132,7 @@ function Invoke-TimerExpiry($Step) {
             if ($entry.observed_at_ns -gt $deadlineNs) { break }
             if ($null -eq $query.query_started_ns -or $null -eq $query.query_completed_ns -or
                 $query.query_started_ns -lt $on.on_confirmed_ns -or
+                $query.query_started_ns -lt $lastOnCompletedNs -or
                 $query.query_completed_ns -lt $query.query_started_ns -or
                 $query.query_completed_ns -gt $entry.observed_at_ns) {
                 Fail-Case $Step.name 'timer_timing_unconfirmed' 'The SCPI Input state query timing was not confirmed.'
@@ -1091,12 +1142,31 @@ function Invoke-TimerExpiry($Step) {
                 if ($query.query_completed_ns -lt $earliestExpiryNs) {
                     Fail-Case $Step.name 'timer_expiry_early' 'Input was observed OFF before the earliest possible Timer expiry.'
                 }
-                if ($query.query_started_ns -ge $earliestExpiryNs) {
-                    return
+                # Functional evidence may straddle expiry, but it may not
+                # exceed the approved one-second observation uncertainty.
+                $widthNs = $query.query_completed_ns - $lastOnNs
+                $entry['timer_expiry_bracket'] = [ordered]@{
+                    last_on_started_ns = $lastOnNs
+                    last_on_completed_ns = $lastOnCompletedNs
+                    first_off_started_ns = $query.query_started_ns
+                    first_off_completed_ns = $query.query_completed_ns
+                    expected_expiry_ns = $earliestExpiryNs
+                    uncertainty_ns = $widthNs
+                    resolution_ns = 1000000000L
                 }
+                if ($lastOnNs -le 0 -or $lastOnCompletedNs -gt $query.query_started_ns -or
+                    $widthNs -lt 0 -or $widthNs -gt 1000000000L) {
+                    Fail-Case $Step.name 'timer_automatic_off_unconfirmed' 'The first OFF bracket exceeds the approved observation uncertainty or lacks ON evidence.'
+                }
+                $entry['automatic_off_observed'] = $true
+                return
+            } else {
+                if (-not $status.enabled) {
+                    Fail-Case $Step.name 'readback_mismatch' 'Timer was disabled while Input was ON.'
+                }
+                $lastOnNs = $query.query_started_ns
+                $lastOnCompletedNs = $query.query_completed_ns
             }
-            $delay = [Math]::Min(150, [Math]::Floor(($deadlineNs - (Get-TimerMonotonicNs)) / 1000000))
-            if ($delay -gt 0) { Start-Sleep -Milliseconds $delay }
         }
         Fail-Case $Step.name 'timer_expiry_unconfirmed' 'Input OFF was not confirmed within the Timer validation window.'
     } finally {
@@ -1111,11 +1181,10 @@ function Invoke-TimerExpiry($Step) {
 }
 
 function Confirm-TimerExpiry {
-    $answer = Read-ValidationAnswer 'After explicit OFF, type AUTO and press Enter only if Timer switched Input OFF without manual or external intervention during the observation. Otherwise press Enter to fail the trial' 'timer-expiry' -DiscardPendingKeys
-    if ($answer -cne 'AUTO') {
-        Fail-Case 'timer-expiry' 'timer_automatic_off_unconfirmed' 'Automatic OFF without intervention was not confirmed.'
-    }
     $entry = $script:report.results | Where-Object { $_.name -ceq 'timer-expiry' }
+    if ($entry.automatic_off_observed -ne $true) {
+        Fail-Case 'timer-expiry' 'timer_automatic_off_unconfirmed' 'Automatic OFF timing evidence was not confirmed.'
+    }
     $entry.status = 'PASS'
     Write-Host 'PASS timer-expiry'
 }
@@ -1214,12 +1283,23 @@ function New-TriggerPlan {
             $script:triggerPlans += @{name="$prefix-enable";command='transient-enable';args=($triggerScope + $expected)}
         }
         $script:triggerPlans += @{name="$prefix-on";command='input-on';args=($triggerScope + $expected + @('--confirm'))}
+        $captureArgs = $triggerScope + $expected + @('--observation-seconds',[string]$TriggerObservationSeconds,'--confirm')
         if ($source -in @('HOLD','BUS')) {
-            $cmd = if ($isList) { 'list-trigger' } else { 'transient-trigger' }
-            $script:triggerPlans += @{name="$prefix-dispatch";command=$cmd;args=($triggerScope + $expected)}
+            $script:triggerPlans += @{name="$prefix-dispatch";command='trigger-observe';args=$captureArgs;execution='live';
+                condition='Single-session software Trigger and sampled current waveform; live deadline supplied by the bounded trial.'}
+            $observation = @{name="$prefix-observed";command='automatic-observation';args=@();
+                condition='Use sampled waveform evidence and confirmed OFF from this trial.'}
+        } else {
+            $observation = @{name="$prefix-observed";command='trigger-observe';args=$captureArgs;execution='live';
+                condition='Sample current within the observation window; EXTERNAL requires only the physical pulse at capture readiness.'}
         }
-        $script:triggerPlans += @{name="$prefix-off";command='input-off';args=$triggerScope}
-        $script:triggerPlans += @{name="$prefix-observed";command='operator-observation';args=@()}
+        if ($source -in @('HOLD','BUS')) {
+            $script:triggerPlans += @{name="$prefix-off";command='input-off';args=$triggerScope}
+            $script:triggerPlans += $observation
+        } else {
+            $script:triggerPlans += $observation
+            $script:triggerPlans += @{name="$prefix-off";command='input-off';args=$triggerScope}
+        }
         $release = if ($isList) { 'list-exit' } else { 'transient-disable' }
         $script:triggerPlans += @{name="$prefix-release";command=$release;args=$triggerScope}
     }
@@ -1228,12 +1308,17 @@ function New-TriggerPlan {
         condition='Plan uses example settings. LIVE requires original Source and Timer readback, trusted communication and confirmed Input OFF.'}
 }
 
-function Invoke-TriggerStep([string]$Name, [int]$DeadlineMs = 30000, [int]$TerminationMs = 5000, [switch]$Cleanup) {
+function Invoke-TriggerStep([string]$Name, [int]$DeadlineMs = 30000, [int]$TerminationMs = 5000,
+                            [long]$ObservationDeadlineNs = 0, [switch]$Cleanup) {
     $step = $script:triggerPlans | Where-Object { $_.name -ceq $Name }
     $entry = $script:report.results | Where-Object { $_.name -ceq $Name }
     $exchangeConfirmed = $false
     try {
-        $request = @{Command=$step.command; CaseName=$Name; ExtraArgs=$step.args;
+        $extra = $step.args
+        if ($step.command -ceq 'trigger-observe') {
+            $extra += @('--deadline-ns',[string]$ObservationDeadlineNs)
+        }
+        $request = @{Command=$step.command; CaseName=$Name; ExtraArgs=$extra;
                      DeadlineMs=[Math]::Min($DeadlineMs, $script:perCommandDeadlineMs)
                      TerminationMs=$TerminationMs; Cleanup=$Cleanup}
         $response = Invoke-LiveCommand @request
@@ -1640,7 +1725,7 @@ function Invoke-TriggerTrial($Trial) {
             $armed = $true
             Assert-TriggerOff (Invoke-TriggerStep "$prefix-enable") "$prefix-enable"
         }
-        Write-Host "Trigger $($Trial.source), CLI readback confirmed. Observe the IT8812C panel current, or an approved capture instrument if needed."
+        Write-Host "Trigger $($Trial.source), CLI readback confirmed. The script will sample the instrument current automatically."
         if ($Trial.isList) {
             Write-Host "Expect LIST CC levels $LevelA A then $LevelB A for $TriggerListWidthA s / $TriggerListWidthB s, repeated $TriggerListRepeat time(s)."
         } else {
@@ -1648,17 +1733,18 @@ function Invoke-TriggerTrial($Trial) {
         }
         switch ($Trial.source) {
             'EXTERNAL' {
-                Write-Host 'Keep the source inactive until the observation starts. Apply one TTL low pulse (>10 us) to rear TRIG and its shared negative terminal.'
+                Write-Host 'Keep the trigger signal inactive until the capture-ready message. Then apply one TTL low pulse (>10 us) to rear TRIG and its shared negative terminal.'
                 Write-Host "Confirm the reviewed equipment and wiring: $TriggerExternalSetup"
             }
-            'TIMER' { Write-Host "Watch for at least two Timer pulses at $($Trial.interval) s intervals. No operator pulse is required." }
+            'TIMER' { Write-Host "The script will check at least two Timer pulses at $($Trial.interval) s intervals." }
             default { Write-Host 'The script will send one software trigger after Input ON is confirmed.' }
         }
         $awaitingObservation = $true
-        $entry['operator_observed'] = 'Unconfirmed'
-        $ack = Read-ValidationAnswer 'With Input OFF and capture ready, press Enter to start the bounded observation (Ctrl+C to cancel)' "$prefix-observed"
-        if ($null -eq $ack -or $ack -cne '') {
-            Fail-Case "$prefix-observed" 'operator_cancelled' 'Operator did not confirm readiness.'
+        if ($Trial.source -ceq 'EXTERNAL') {
+            $ack = Read-ValidationAnswer 'With Input OFF, confirm the reviewed external trigger equipment is ready. Press Enter to begin' "$prefix-observed"
+            if ($null -eq $ack -or $ack -cne '') {
+                Fail-Case "$prefix-observed" 'operator_cancelled' 'External trigger equipment was not confirmed.'
+            }
         }
         $hardStop = $script:watch.ElapsedMilliseconds + $TriggerMaxOnSeconds * 1000
         if ($hardStop -gt $totalDeadlineMs) { throw 'Insufficient total time for a bounded Trigger trial.' }
@@ -1680,15 +1766,12 @@ function Invoke-TriggerTrial($Trial) {
             $observeUntil = $script:watch.ElapsedMilliseconds + $TriggerObservationSeconds * 1000
             if ($observeUntil -gt $startOffBy) { throw 'Insufficient time remains to observe before Input OFF.' }
             Write-Host "Observation started for $($Trial.source)."
-            if ($Trial.source -in @('HOLD','BUS')) {
-                $dispatchBudget = $observeUntil - $script:watch.ElapsedMilliseconds
-                $eventDuration = if ($Trial.isList) {
-                    ([decimal]$TriggerListWidthA + [decimal]$TriggerListWidthB) * $TriggerListRepeat
-                } else { [decimal]$script:triggerPulseWidth }
-                $dispatchBudget -= [Math]::Ceiling($eventDuration * 1000)
-                if ($dispatchBudget -le 0) { throw 'Software trigger observation deadline expired.' }
-                $null = Invoke-TriggerStep "$prefix-dispatch" -DeadlineMs $dispatchBudget -TerminationMs $terminationMs
-            }
+            $captureName = if ($Trial.source -in @('HOLD','BUS')) { "$prefix-dispatch" } else { "$prefix-observed" }
+            $captureBudget = [Math]::Min($script:perCommandDeadlineMs, $observeUntil - $script:watch.ElapsedMilliseconds)
+            if ($captureBudget -le 500) { throw 'Insufficient time remains for automatic Trigger observation.' }
+            $captureDeadline = (Get-TimerMonotonicNs) + ([long]$captureBudget - 500) * 1000000L
+            $capture = Invoke-TriggerStep $captureName -DeadlineMs $captureBudget -TerminationMs $terminationMs `
+                -ObservationDeadlineNs $captureDeadline
             $remaining = $observeUntil - $script:watch.ElapsedMilliseconds
             if ($remaining -gt 0) { Start-Sleep -Milliseconds $remaining }
         } finally {
@@ -1718,12 +1801,17 @@ function Invoke-TriggerTrial($Trial) {
                 Save-Report
             }
         }
-        $answer = Read-ValidationAnswer "Input OFF confirmed. Did you observe the expected $($Trial.source) result? (Yes/No)" `
-            "$prefix-observed" -DiscardPendingKeys
-        $entry['operator_observed'] = if ($answer -ieq 'Yes') { 'Yes' } elseif ($answer -ieq 'No') { 'No' } else { 'Unconfirmed' }
-        if ($answer -ine 'Yes') {
-            Fail-Case "$prefix-observed" 'observation_unconfirmed' 'Operator did not confirm the expected physical trigger result.'
+        $evidence = $capture.result.observation
+        $requiredEvents = if ($Trial.source -ceq 'TIMER') { 2 } elseif ($Trial.isList) { $TriggerListRepeat } else { 1 }
+        if ($capture.result.validation_only -ne $true -or $capture.result.validation_scope -cne 'trigger' -or
+            $capture.result.trigger_source -cne $Trial.source -or $capture.result.waveform_completion_known -ne $true -or
+            $evidence.source -cne 'instrument_current_samples' -or $evidence.sample_count -lt 3 -or
+            $evidence.events_confirmed -lt $requiredEvents -or
+            ($Trial.isList -and $evidence.list_run_completed -ne $true) -or -not $script:triggerOffConfirmed) {
+            Fail-Case "$prefix-observed" 'trigger_observation_unconfirmed' 'Automatic Trigger waveform or OFF evidence was insufficient.'
         }
+        $entry['trigger_observation'] = $evidence
+        $entry.response = $capture
         if ($script:watch.ElapsedMilliseconds -ge $totalDeadlineMs) {
             Fail-Case "$prefix-observed" 'deadline_expired' 'The total CLI validation deadline expired.'
         }
@@ -1893,8 +1981,8 @@ try {
             throw 'Contributor Workflow load trials require a dedicated 5 V / 0.8 A source.'
         }
     }
-    if ($LiveExtensions -and -not @($selectedModes | Where-Object { $_ -in $extensionModes }).Count) {
-        throw '-LiveExtensions requires a selection including an extension or Workflow mode.'
+    if ($LiveExtensions -and -not @($selectedModes | Where-Object { $_ -in ($extensionModes + 'readback') }).Count) {
+        throw '-LiveExtensions requires a selection including Readback, an extension or Workflow mode.'
     }
     if (-not $Target -or (-not $Resource -and -not $offlineOnly)) {
         Write-Host 'BLOCKED: explicit -Target and, for hardware cases, -Resource are required.'
@@ -1962,7 +2050,10 @@ try {
             $planned += @{name=$command;command=$command;args=@('--hardware-validation','system-query')}
         }
     }
-    if ($readbackSelected) {
+    $isolated = @()
+    $legacyReadback = -not $LiveExtensions -or @(@('ExpectedRiseSlew','ExpectedFallSlew','ExpectedVonThreshold','ExpectedVonLatch',
+        'ExpectedShort','ExpectedAverageCount') | Where-Object { $PSBoundParameters.ContainsKey($_) }).Count -gt 0
+    if ($readbackSelected -and $legacyReadback) {
         $baselineParameters = @{
             'fixed-slew-status' = @{rise_slew_a_per_us='ExpectedRiseSlew';fall_slew_a_per_us='ExpectedFallSlew'}
             'von-status' = @{threshold_v='ExpectedVonThreshold';latch='ExpectedVonLatch'}
@@ -2012,8 +2103,26 @@ try {
             $planned += $step
         }
     }
-    $pendingLive = @()
-    $isolatedNeedsSeparateRun = $false
+    if ($readbackSelected -and -not $legacyReadback) {
+        $planned += @{name='readback';command='readback';args=$readbackScope;independent_snapshot=$true;
+                      readback_expected=@{input_state='OFF'}}
+        $readbackTrials = [ordered]@{
+            'fixed-status-cc'='fixed-cc'; 'fixed-status-cv'='fixed-cv';
+            'fixed-status-cr'='fixed-cr'; 'fixed-status-cw'='fixed-cw';
+            'transient-status'='transient'; 'list-status'='list'; 'fixed-slew-status'='slew';
+            'von-status'='von'; 'short-status'='short'; 'average-status'='average'
+        }
+        foreach ($name in $readbackTrials.Keys) {
+            $step = @{name=$name;command='contributor-settings';
+                args=@('--trial',$readbackTrials[$name],'--readback-trial','--confirm-isolated');execution='live';isolated=$true;
+                expected=@{input_state='OFF';restored=$true};
+                condition='Automatic known-setting readback and verified restoration with physically isolated terminals and Input OFF.'}
+            if ($name -ceq 'list-status') {
+                $step.condition += ' Refuse before setting writes if LIST verification and restoration cannot fit 30 s.'
+            }
+            $isolated += $step
+        }
+    }
     if ($LiveExtensions) {
         if ($workflowSelected) {
             $scope = @('--hardware-validation','workflow')
@@ -2029,7 +2138,7 @@ try {
             $planned += @(
                 @{name='workflow-cc-timed-load';command='cc-timed-load';args=$ccArgs + @('--duration-s','5');
                   execution='live';workflow_load=$true;expected=@{stop_reason='duration_elapsed';input_state='OFF'};
-                  condition='5 V / 0.8 A source, Fixed CC Low, 5 s at 0.1 A verified by an independent current record; independent cutoff within 10 s of SCPI Input ON including OFF confirmation'},
+                  condition='5 V / 0.8 A source, Fixed CC Low, 5 s at 0.1 A with bounded current/Input sampling before scheduled OFF; at most 1 s sample uncertainty; independent cutoff within 10 s of SCPI Input ON including OFF confirmation'},
                 @{name='workflow-cc-discharge';command='cc-discharge';args=$ccArgs + @('--interval-s','0.5',
                   '--cutoff-capacity-ah','0.00010','--cutoff-voltage','4.5','--timeout-s','6');
                   execution='live';workflow_load=$true;expected=@{stop_reason='capacity_cutoff';input_state='OFF'};
@@ -2045,13 +2154,12 @@ try {
                   expected=@{average_count=8};execution='live';condition='Input OFF and operator approves leaving Average at 8'}
             )
         }
-        $isolated = @()
         if ('auxiliary-controls' -in $selectedModes) {
-            $isolated = @(foreach ($trial in @('von','short','slew')) {
+            $isolated += @(foreach ($trial in @('von','short','slew')) {
                 @{name="auxiliary-controls-$trial";command='contributor-settings';
                   args=@('--trial',$trial,'--confirm-isolated');execution='live';isolated=$true;
                   expected=@{input_state='OFF';restored=$true};
-                  condition='Source and DUT physically disconnected, Fixed CC with Input OFF. Verify test values and restored settings.'}
+                  condition='Source and DUT physically disconnected, Fixed CC with Input, Short, Transient and Timer OFF; verify and restore settings.'}
             })
         }
         if ('list-cc' -in $selectedModes) {
@@ -2059,19 +2167,19 @@ try {
                 args=@('--trial','list-cc','--slot',[string]$ListScratchSlot,'--confirm-isolated');
                 execution='live';isolated=$true;deadline_ms=300000;
                 expected=@{input_state='OFF';restored=$true;recall_confirmed=$true;exited_list=$true};
-                condition="Fixed CC, source and DUT isolated, Input OFF. Operator must permit overwriting slot $ListScratchSlot. Provide the known prior first-step slot width to verify this Save. Validate A, B, Recall A and restore the original working buffer."}
+                condition="Source and DUT isolated, Fixed CC with Input, Short, Transient and Timer OFF. Authorize overwriting slot $ListScratchSlot once for the isolated batch. Establish and verify B as the slot baseline, then Save A, verify Recall A and restore the original working buffer. Refuse before setting writes if verification and restoration cannot fit the remaining 300 s budget."}
         }
-        $isolationCompatible = @('auxiliary-controls','list-cc','measurement-extensions','readback','system-query')
-        $isolatedNeedsSeparateRun = $isolated.Count -gt 0 -and
-            @($selectedModes | Where-Object { $_ -notin $isolationCompatible }).Count -gt 0
-        if ($isolatedNeedsSeparateRun) {
+        # Isolated cases are appended after source-connected and Trigger trials.
+        # Reuse successful readback trials for identical Auxiliary cases.
+        if ($readbackSelected -and -not $legacyReadback) {
+            $reuse = @{'auxiliary-controls-von'='von-status'; 'auxiliary-controls-short'='short-status';
+                       'auxiliary-controls-slew'='fixed-slew-status'}
             foreach ($step in $isolated) {
-                $step.not_run_reason = 'settings_require_isolated_run'
-                $step.condition = "$($step.condition) Run separately from source-connected or mode-changing trials."
+                if ($reuse.ContainsKey($step.name)) {
+                    $step.reuse_from = $reuse[$step.name]
+                    $step.condition = "Reuse successful $($step.reuse_from) evidence in this isolated batch."
+                }
             }
-            $pendingLive += $isolated
-        } else {
-            $planned += $isolated
         }
     }
     # Read existing configuration before any setup, then prepare and finish Protection
@@ -2106,8 +2214,9 @@ try {
             @{name='timer-status-off';command='input-timer-status';args=$timerScope},
             @{name='timer-on';command='input-on';args=($timerScope + @('--confirm', '--validation-settings-json', $timerExpected));
               condition='LIVE requires the 5 s Timer and an independent 10 s cutoff armed no later than the SCPI ON write'},
-            @{name='timer-expiry';command='input-timer-status';args=$timerScope;
-              condition='Observe Input OFF by Timer seconds plus one second from the SCPI ON write start; after explicit OFF, confirm no manual or external intervention'},
+            @{name='timer-expiry';command='input-timer-status';
+              args=($timerScope + @('--validation-settings-json', ('{"seconds":' + [int]$TimerSeconds + '}')));
+              condition='Single-session observation using live SCPI ON timestamps. Require timed ON and first OFF within Timer seconds plus one second from SCPI ON write start, with at most 1 s observation uncertainty; definite early OFF fails. Authorize a cutoff that cannot intervene during observation'},
             @{name='timer-off';command='input-off';args=@()},
             @{name='timer-disable';command='input-timer-disable';args=$timerScope},
             @{name='timer-status-disabled';command='input-timer-status';args=$timerScope},
@@ -2295,6 +2404,33 @@ try {
     }
     if ($triggerSelected) { New-TriggerPlan }
     if ($protectionSelected) { New-ProtectionPlan }
+    # Readback restores the preceding selection. Hand off only before the
+    # first independent isolated trial, not before the Readback batch.
+    $standalone = @($isolated | Where-Object {
+        $_.name -cin @('auxiliary-controls-von','auxiliary-controls-short','auxiliary-controls-slew','list-cc-settings') -and
+        -not $_.ContainsKey('reuse_from')
+    })
+    if ($standalone.Count -gt 0 -and -not $triggerSelected) {
+        $lastSetup = $planned | Where-Object {
+            ($_.command -cmatch '^set-(cc|cv|cr|cw|cr-led|transient-(cc|cv|cr|cw))$' -and
+             -not $_.ContainsKey('expected_error')) -or $_.command -ceq 'sequence'
+        } | Select-Object -Last 1
+        $lastFunction = if ($lastSetup.command -ceq 'sequence') { $lastSetup.name -replace '^sequence-', '' }
+            elseif ($lastSetup.command) { $lastSetup.command -replace '^set-(transient-)?', '' }
+            else { 'cc' }
+        if ($lastFunction -cin @('cv','cr','cw')) {
+            $handoff = @{name='isolated-fixed-cc-handoff';command='contributor-settings';
+                args=@('--trial','fixed-cc-handoff','--origin-function',$lastFunction.ToUpperInvariant(),'--confirm-isolated');execution='live';isolated=$true;
+                expected=@{input_state='OFF';function='CC'};
+                condition='After successful powered trials and physical isolation, select Fixed CC without changing setpoints; require Fixed mode and all interlocks OFF.'}
+            $firstStandalone = $standalone[0].name
+            $isolated = @(foreach ($step in $isolated) {
+                if ($step.name -ceq $firstStandalone) { $handoff }
+                $step
+            })
+        }
+    }
+    $planned += $isolated
     foreach ($step in ($planned | Where-Object { $_.ContainsKey('cr_handoff_after') })) {
         $step.condition = "$($step.cr_handoff_after) refused a resistance origin before remote"
     }
@@ -2360,19 +2496,16 @@ try {
     $allSteps = $extensionPlans + $workflowPlans + @($planned | Select-Object -First 3) +
         @($triggerPlans | Select-Object -First 1) +
         @($planned | Select-Object -Skip 3 -First ([Math]::Max(0, $protectionIndex - 3))) +
-        $protectionPlans + @($planned | Select-Object -Skip $protectionIndex) + $slowRiseCleanup +
-        @($triggerPlans | Select-Object -Skip 1) + $pendingLive
+        $protectionPlans + @($planned | Select-Object -Skip $protectionIndex | Where-Object { -not $_.isolated }) +
+        $slowRiseCleanup + @($triggerPlans | Select-Object -Skip 1) + $isolated
     $report.results = @($allSteps | ForEach-Object {
         $entry = [ordered]@{name=$_.name;command=$_.command;arguments=$_.args;status='NOT RUN'}
         if ($_.name -like 'workflow-*') { $entry['execution'] = 'simulate' }
         if ($_.ContainsKey('execution')) { $entry['execution'] = $_.execution }
-        if ($_ -in $pendingLive) {
-            if (-not $_.ContainsKey('args')) { $entry.arguments = @() }
-            $entry['execution'] = 'live'
-            $entry['error_code'] = if ($_.not_run_reason) { $_.not_run_reason } else { 'live_procedure_unapproved' }
-        }
+        if ($_.ContainsKey('reuse_from')) { $entry['reuse_from'] = $_.reuse_from }
         if ($_.ContainsKey('expected_error')) { $entry['expected_error'] = $_.expected_error }
         if ($_.ContainsKey('condition')) { $entry['condition'] = $_.condition }
+        if ($_.ContainsKey('deadline_ms')) { $entry['deadline_ms'] = $_.deadline_ms }
         if ($_.ContainsKey('expected_readback')) { $entry['expected_readback'] = $_.expected_readback }
         if ($_.ContainsKey('check_readback_settings')) { $entry['readback_comparison'] = 'NOT RUN' }
         $entry
@@ -2380,8 +2513,7 @@ try {
     $plannedRanges = @{}
     $offlinePlans = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
     foreach ($step in $allSteps) {
-        if ($step.command -in @('operator-observation','pytest') -or
-            ($step -in $pendingLive -and -not $step.ContainsKey('args'))) { continue }
+        if ($step.command -in @('operator-observation','automatic-observation','pytest')) { continue }
         $extras = @($step.args)
         $noConnection = $step.execution -in @('dry-run','simulate') -or
             ($step.name -like 'workflow-*' -and $step.execution -cne 'live')
@@ -2393,7 +2525,8 @@ try {
         if ($step.execution -ceq 'live') {
             $entry = $report.results | Where-Object { $_.name -ceq $step.name }
             foreach ($field in @('queries','planned_writes','conditional_writes')) {
-                if ($null -ne $plan.result.$field) { $entry[$field] = @($plan.result.$field) }
+                if ($step.ContainsKey('reuse_from')) { $entry[$field] = @() }
+                elseif ($null -ne $plan.result.$field) { $entry[$field] = @($plan.result.$field) }
             }
         }
         if ($step.command -in @('set-cc', 'set-cv', 'set-cr', 'set-cr-led',
@@ -2427,16 +2560,16 @@ try {
     Write-Host "Selected modes: $($selectedModes -join ', ')."
     if (-not $offlineOnly) { Write-Host 'Plan: Identify, confirm Input OFF and measure before physical trials.' }
     if ($workflowPlans.Count) { Write-Host 'Workflow: four simulated cases with no VISA or source access.' }
-    if ($pendingLive.Count) {
-        Write-Host 'Some selected LIVE cases require a separate run and will remain NOT RUN.'
-    }
     if ($systemQuerySelected) { Write-Host 'System Query: read version, display mode and one Error Queue entry.' }
     if ($readbackSelected) {
-        Write-Host 'Readback queries existing settings with Input OFF before any setup. Inapplicable modes are skipped.'
-        Write-Host 'Use known front-panel settings as expected values. Incomplete comparisons are recorded as NOT RUN.'
+        if ($legacyReadback) {
+            Write-Host 'Read-only diagnostics: use -LiveExtensions without Expected parameters for automatic isolated Readback.'
+        } else {
+            Write-Host 'Readback automatically sets known values, compares independent readbacks, and restores settings in the isolated batch.'
+        }
     }
     if ($sequenceSelected) {
-        Write-Host 'Sequence: four Fixed trials, each with a separate confirmation, one ON, measurement and confirmed OFF.'
+        Write-Host 'Sequence: one batch confirmation for four Fixed trials, each with one ON, measurement and confirmed OFF.'
     }
     if ($protectionSelected) {
         Write-Host 'Protection: independent software current trip, software power trip and hardware power limit trials at 0.20 A.'
@@ -2456,7 +2589,7 @@ try {
         Write-Host 'CR-LED and Current Slow Rise trials keep Input OFF and verify configuration readback.'
     }
     if ($triggerSelected) {
-        Write-Host 'Trigger: four source trials (HOLD, TIMER, BUS, EXTERNAL) with manual observation, explicit OFF and restoration of original Source and Timer.'
+        Write-Host 'Trigger: four source trials (HOLD, TIMER, BUS, EXTERNAL) with automatic sampled observation, explicit OFF and restoration of original Source and Timer.'
         Write-Host "Each Trigger observation is $TriggerObservationSeconds s. The Input ON/OFF budget is $TriggerMaxOnSeconds s per trial."
     }
     if ('current-slow-rise' -in $selectedModes) {
@@ -2570,18 +2703,19 @@ try {
     $report.prechecks.preflight = 'PASS'
     Write-Host "Operator resource check (LIVE): Target: $Target; Resource: $Resource; Backend: $Backend"
     Write-Host 'Physical checks before pressing Enter:'
-    if (@($planned | Where-Object isolated).Count) {
-        Write-Host '- For the isolated settings trials, physically disconnect the source and DUT and leave Input OFF.'
-    } else {
+    $connectedModes = @('cc','cv','cr','cw','transient-cc','transient-cv','transient-cr','transient-cw',
+        'trace','trigger','input-timer','protection','sequence')
+    $connectedTrials = $workflowLoadSelected -or @($selectedModes | Where-Object { $_ -in $connectedModes }).Count -gt 0
+    if ($connectedTrials -or -not $isolated.Count) {
         Write-Host "- Confirm the external source is manually set to $SourceVoltageLimitV V with a $SourceCurrentLimitA A current limit."
+    }
+    if ($isolated.Count) {
+        Write-Host '- Before the isolated settings batch, physically disconnect the source and DUT and leave Input OFF. The script will prompt once.'
     }
     Write-Host '- Confirm physical load Input OFF, safe wiring/DUT and tolerance of every selected setting (use -Verbose or the report).'
     Write-Host '- Confirm no other application controls this instrument and an independent manual Input OFF procedure is available.'
     if ($protectionSelected) {
         Write-Host '- Confirm Timer, Short, Slow Rise and Transient OFF for Protection. The script can prepare Fixed CC from Fixed CV or CW while Input is OFF.'
-    }
-    if ($isolatedNeedsSeparateRun) {
-        Write-Host '- Run Auxiliary Controls and LIST settings separately with the source and DUT physically disconnected.'
     }
     if ($LiveExtensions -and 'measurement-extensions' -in $selectedModes) {
         Write-Host '- Confirm the Average count may be set to 8 and left at that setting.'
@@ -2632,10 +2766,17 @@ try {
 
     $phase = 'cases'
     $readbackSelection = $null
+    $isolatedBatchConfirmed = $false
+    $sequenceBatchConfirmed = $false
+    $triggerCompleted = $false
     for ($i = 1; $i -le $planned.Count; $i++) {
         if ($protectionSelected -and $i -eq $protectionIndex) { Invoke-ProtectionValidation $readbackSelection }
         if ($i -eq $planned.Count) { break }
         $step = $planned[$i]
+        if ($step.isolated -and $triggerSelected -and -not $triggerCompleted) {
+            Invoke-TriggerValidation
+            $triggerCompleted = $true
+        }
         if ($step.ContainsKey('readback_mode') -and
             ($readbackSelection.active_mode -cne $step.readback_mode -or
              ($step.readback_function -and $readbackSelection.function -cne $step.readback_function))) {
@@ -2655,7 +2796,7 @@ try {
         }
         Write-Host "Running $($step.name)..."
         if ($step.name -ceq 'timer-on') {
-            $answer = Read-ValidationAnswer 'Verify the approved current-limited source and arm the independent 10 s hardware cutoff before SCPI Input ON. Never start the cutoff clock after the ON write. Press Enter only when ready' $step.name -DiscardPendingKeys
+            $answer = Read-ValidationAnswer 'Verify the approved current-limited source and arm the independent 10 s hardware cutoff before SCPI Input ON. The cutoff must not intervene during the 6 s observation; if this cannot be assured, cancel. Do not intervene except for safety. Press Enter only when ready' $step.name -DiscardPendingKeys
             if ($null -eq $answer -or $answer -cne '') {
                 Fail-Case $step.name 'operator_confirmation_required' 'The Timer hardware cutoff was not confirmed.'
             }
@@ -2664,26 +2805,33 @@ try {
         }
         if ($step.workflow_load) {
             $prompt = 'Confirm a controlled 5 V source limited to 0.8 A. Arm the independent cutoff so Input cannot remain ON beyond 10 s from the start of the SCPI ON write, including cleanup.'
-            if ($step.command -ceq 'cc-timed-load') { $prompt += ' Start recording load current before applying Input.' }
+            $prompt += ' Ensure the cutoff cannot intervene during the expected trial and do not manually change the source or load except for safety.'
             $answer = Read-ValidationAnswer "$prompt Press Enter only when ready" $step.name -DiscardPendingKeys
             if ($null -eq $answer -or $answer -cne '') {
                 Fail-Case $step.name 'operator_confirmation_required' 'The independent Workflow cutoff was not confirmed.'
             }
         }
         $liveArgs = $step.args
-        if ($step.isolated) {
-            $confirmation = if ($step.name -ceq 'list-cc-settings') { "OVERWRITE $ListScratchSlot" } else { 'ISOLATED' }
-            $answer = Read-ValidationAnswer "Confirm the source and DUT are physically disconnected and Input is OFF. Type $confirmation to allow this settings trial" $step.name -DiscardPendingKeys
+        if ($step.isolated -and -not $isolatedBatchConfirmed) {
+            $confirmation = if (@($planned | Where-Object { $_.name -ceq 'list-cc-settings' }).Count) {
+                "OVERWRITE $ListScratchSlot"
+            } else { 'ISOLATED' }
+            $answer = Read-ValidationAnswer "Confirm the source and DUT will remain physically disconnected and Input is OFF. Type $confirmation to authorize all isolated settings trials and any indicated slot overwrite in this batch" $step.name -DiscardPendingKeys
             if ($answer -cne $confirmation) {
                 Fail-Case $step.name 'operator_confirmation_required' 'Isolation or LIST slot overwrite was not confirmed.'
             }
-            if ($step.name -ceq 'list-cc-settings') {
-                $width = Read-ValidationAnswer "Enter the previously verified first-step width (seconds) for slot $ListScratchSlot, or press Enter if unknown. With no prior width, this Save will remain unconfirmed" $step.name -DiscardPendingKeys
-                if ($null -eq $width) {
-                    Fail-Case $step.name 'operator_confirmation_required' 'The LIST slot evidence prompt was interrupted.'
-                }
-                if ($width -cne '') { $liveArgs += @('--previous-slot-width', $width) }
+            $isolatedBatchConfirmed = $true
+        }
+        if ($step.ContainsKey('reuse_from')) {
+            $prior = $report.results | Where-Object { $_.name -ceq $step.reuse_from }
+            if ($prior.status -cne 'PASS' -or $prior.response.result.restored -ne $true -or
+                $prior.response.result.input_state -cne 'OFF') {
+                Fail-Case $step.name 'readback_mismatch' 'Reusable isolated readback evidence was not confirmed.'
             }
+            $entry = $report.results | Where-Object { $_.name -ceq $step.name }
+            $entry.response = $prior.response
+            $entry.status = 'PASS'
+            continue
         }
         # Mark uncertainty before dispatch, including subprocess/JSON/runtime failures.
         if ($step.command -eq 'input-on') { $inputOnAttempted = $true }
@@ -2709,9 +2857,12 @@ try {
             $report.protection_input_off_unconfirmed = $true
         }
         if ($step.command -ceq 'sequence') {
-            $answer = Read-ValidationAnswer "Confirm dedicated source, reviewed VISA runtime and safe $($step.name) trial. Press Enter to allow one Input ON" $step.name -DiscardPendingKeys
-            if ($null -eq $answer -or $answer -cne '') {
-                Fail-Case $step.name 'operator_confirmation_required' 'Sequence trial was not confirmed.'
+            if (-not $sequenceBatchConfirmed) {
+                $answer = Read-ValidationAnswer 'Confirm dedicated source, reviewed VISA runtime and all four safe Fixed Sequence trials. Press Enter to authorize their four bounded Input ON operations' $step.name -DiscardPendingKeys
+                if ($null -eq $answer -or $answer -cne '') {
+                    Fail-Case $step.name 'operator_confirmation_required' 'Sequence batch was not confirmed.'
+                }
+                $sequenceBatchConfirmed = $true
             }
             $report.sequence_input_off_unconfirmed = $true
         }
@@ -2743,9 +2894,14 @@ try {
                 Assert-ReadbackFields $result.result $step.expected $step.name
             }
         }
-        if ($step.workflow_load) { Confirm-WorkflowLoad $step.name }
+        if ($step.workflow_load) {
+            Confirm-WorkflowLoad $step.name
+            # The Workflow changed Fixed selection; Protection must read
+            # its current state instead of reusing the pre-Workflow snapshot.
+            $readbackSelection = $null
+        }
         if ($step.name -ceq 'list-cc-settings' -and $result.result.save_confirmed -ne $true) {
-            Write-Host 'NOT RUN list-cc-settings: Recall and restoration verified. This Save could not be distinguished from the prior slot contents.'
+            Write-Host 'NOT RUN list-cc-settings: Save confirmation evidence was missing.'
             continue
         }
         if ($protectionSelected -and $step.name -ceq 'input-state') {
@@ -2797,7 +2953,7 @@ try {
             Fail-Case $step.name 'readback_mismatch' 'Auto Range differs from the Core plan.'
         }
         if ($step.independent_snapshot) { $readbackSelection = $result.result }
-        if ($step.name -ceq 'transient-status') {
+        if ($step.name -ceq 'transient-status' -and $step.ContainsKey('readback_expected')) {
             $step.readback_expected.function = $readbackSelection.function
         }
         if ($step.ContainsKey('readback_expected')) {
@@ -2835,14 +2991,13 @@ try {
         $entry = $report.results | Where-Object { $_.name -eq $step.name } | Select-Object -First 1
         $entry.status = 'SKIP'
     }
-    if ($triggerSelected) { Invoke-TriggerValidation }
+    if ($triggerSelected -and -not $triggerCompleted) { Invoke-TriggerValidation }
     if ($report.results.error_code -contains 'protection_default_out_of_bounds') {
         throw 'Protection defaults validation is incomplete because the instrument MAX exceeded the allowed bounds.'
     }
     if ($report.results.error_code -contains 'list_save_unconfirmed') {
-        throw 'LIST validation is incomplete because the previous slot contents were not independently known.'
+        throw 'LIST validation is incomplete because Save was not confirmed.'
     }
-    if ($pendingLive.Count) { throw 'LIVE validation is incomplete. Review the NOT RUN cases and their required procedures.' }
     $report.status = if ($readbackSelected -and ($report.results.readback_comparison -contains 'OBSERVED ONLY')) {
         'OBSERVED ONLY'
     } else { 'PASS' }

@@ -13,6 +13,7 @@ from electronicload_tool_core.contributor_settings import (COMMAND as SETTINGS_C
 from electronicload_tool_core.discovery import discover_resources
 from electronicload_tool_core.errors import LoadError
 from electronicload_tool_core.identity import MODEL_ID
+from electronicload_tool_core.hardware_validation import TRIGGER_OBSERVATION_COMMAND, execute_trigger_observation
 from electronicload_tool_core.protection import (ARGUMENTS as PROTECTION_ARGUMENTS,
                                                 COMMANDS as PROTECTION_COMMANDS,
                                                 DEFAULTS as PROTECTION_DEFAULTS,
@@ -90,7 +91,7 @@ def main(argv: list[str] | None = None, *, timer_on_write_started: Callable[[int
                     and not {"--help", "-h"}.intersection(argv)))
     mode = "dry-run" if "--dry-run" in argv else "simulate" if "--simulate" in argv else "live"
     command_names = (*COMMANDS, *CONTROL_COMMANDS, *TRACE_COMMANDS, *PROTECTION_COMMANDS, SEQUENCE_COMMAND,
-                     *WORKFLOW_COMMANDS, SETTINGS_COMMAND,
+                     *WORKFLOW_COMMANDS, SETTINGS_COMMAND, TRIGGER_OBSERVATION_COMMAND,
                      "list-resources", "manifest", "worker",
                      "send-command", "status", "stop", "wait-ready")
     command = argv[0] if argv and argv[0] in command_names else None
@@ -154,8 +155,19 @@ def main(argv: list[str] | None = None, *, timer_on_write_started: Callable[[int
         for field, choices in SERIAL_CHOICES.items():
             sub.add_argument("--serial-" + field.replace("_", "-"), choices=tuple(choices),
                              default=argparse.SUPPRESS)
+        if name == TRIGGER_OBSERVATION_COMMAND:
+            sub.add_argument("--hardware-validation", choices=("trigger",), required=True)
+            sub.add_argument("--validation-settings-json", required=True)
+            sub.add_argument("--observation-seconds", type=int, required=True)
+            sub.add_argument("--deadline-ns", type=int, help=argparse.SUPPRESS)
+            sub.add_argument("--confirm", action="store_true")
+            continue
         if name == SETTINGS_COMMAND:
+            sub.add_argument("--deadline-ns", type=int, help=argparse.SUPPRESS)
             sub.add_argument("--trial", required=True, choices=SETTINGS_TRIALS)
+            sub.add_argument("--origin-function", choices=("CC", "CV", "CR", "CW"), help=argparse.SUPPRESS)
+            sub.add_argument("--readback-trial", action="store_true",
+                             help="Use the explicitly authorized automatic Readback procedure.")
             sub.add_argument("--slot", type=int, help="Explicit scratch slot to overwrite for the LIST trial.")
             sub.add_argument("--previous-slot-width", type=_workflow_number,
                              help="Previously verified first-step width in seconds for that scratch slot.")
@@ -388,11 +400,24 @@ def main(argv: list[str] | None = None, *, timer_on_write_started: Callable[[int
                                       hardware_validation=scope, asrl=asrl, stop=contributor_stop,
                                       on_write_started=workflow_on_write_started)
             args.json = True
+        elif args.command == TRIGGER_OBSERVATION_COMMAND:
+            try:
+                expected = decode_decimal_json(args.validation_settings_json)
+            except (ValueError, UnicodeError, RecursionError) as exc:
+                raise LoadError("argument_error", "Trigger observation JSON is invalid.") from exc
+            result = execute_trigger_observation(
+                mode=mode, resource=args.resource, backend=args.backend, model_id=args.model,
+                expected=expected, seconds=args.observation_seconds, confirmed=args.confirm,
+                deadline_ns=args.deadline_ns, asrl=asrl,
+                on_external_ready=lambda: print("Trigger capture ready: apply external pulse now.",
+                                                file=sys.stderr, flush=True),
+            )
         elif args.command == SETTINGS_COMMAND:
             result = settings_execute(args.trial, mode=mode, model_id=args.model, backend=args.backend,
                                       resource=args.resource, confirmed=args.confirm_isolated, slot=args.slot,
                                       previous_slot_width=args.previous_slot_width, asrl=asrl, stop=contributor_stop,
-                                      on_baseline=settings_on_baseline)
+                                      on_baseline=settings_on_baseline, readback_trial=args.readback_trial,
+                                      deadline_ns=args.deadline_ns, origin_function=args.origin_function)
         elif (args.command in PROTECTION_COMMANDS
               or getattr(args, "hardware_validation", None) == "protection"):
             if getattr(args, "validation_settings_json", None) is not None:

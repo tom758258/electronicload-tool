@@ -754,12 +754,16 @@ then confirms Input ON through `--hardware-validation input-timer` with complete
 expected `current`, `range` and integer `seconds`. Before and after remote
 transition Core rechecks physical OFF, CC settings, Short/Transient OFF and Timer
 readback. Core signals the SCPI ON write start before waiting for the instrument,
-so the same six-second deadline covers the ON subprocess and subsequent polls.
-Once ON is confirmed, polling can begin as early as one second before the
-earliest possible expiry. The script accepts an OFF observation if the Input
-state query started at least five seconds after the SCPI Input ON write began
-and the response arrived within six seconds of that write start. An OFF reply
-completed before five seconds fails the trial. Each poll respects the remaining
+so the same six-second deadline covers the ON subprocess and observation.
+Immediately after ON confirmation, a single read-only CLI process opens and
+identifies one VISA session and collects Timer/Input snapshots until the first OFF
+or the observation deadline. It does not reopen VISA or restart Python for each sample. The script requires a timed ON observation followed
+by the first OFF within six seconds of the write start. The conservative
+bracket from the ON query start to the OFF query completion must be at most
+one second and must not end before the five-second boundary. A definite
+early OFF, absent ON evidence or a wider bracket fails; later OFF queries
+cannot replace the first OFF. This is bounded functional acceptance, not
+exact timing calibration. Each poll respects the remaining
 observation window. When the window closes without a valid observation, the
 script fails and begins OFF cleanup. If the CLI process is still running at
 the deadline, the script prompts you to use the independent hardware cutoff
@@ -769,9 +773,11 @@ communication failure in a run that includes Trigger requires independent
 operator action. The CLI records the write, ON confirmation and Input query
 times. `-DebugArtifacts`
 saves these observations privately. The script sends and verifies explicit
-OFF, disables Timer separately and reads the final state. At that point type
-`AUTO` only if Timer switched Input OFF without manual or external intervention
-during the observation. A possible ON attempt gets one bounded OFF cleanup
+OFF, disables Timer separately and reads the final state. Acceptance is automatic
+from the timed ON/OFF evidence and verified cleanup. The operator must ensure
+the independent cutoff cannot intervene in the observation window and must not
+intervene except for safety; sampled evidence does not independently prove causation.
+A possible ON attempt gets one bounded OFF cleanup
 attempt under the existing communication rules. Timer-disable cleanup follows
 confirmed OFF.
 
@@ -780,15 +786,20 @@ confirmed OFF.
 停損。限時必須不超過 10 秒，且計時不得晚於 SCPI Input ON 寫入開始。
 在 Timer Input ON 提示確認上述條件，10 秒上限僅適用這組核准條件。
 Core 在等待儀器回覆前通知 Script SCPI ON 的寫入起點，因此 ON 子程序與
-後續查詢共用 6 秒期限。ON 確認後，最早從可能到期前 1 秒開始查詢。
-OFF 查詢必須在寫入開始後至少 5 秒才啟動，且在第 6 秒前收到結果。
-若在第 5 秒前讀到 OFF 即失敗。第 6 秒仍無有效觀察則判定失敗並開始 OFF
+後續觀察共用 6 秒期限。ON 確認後立即啟動單一唯讀 CLI 程序，開啟並識別一次
+VISA Session，持續取得 Timer／Input 快照至首次 OFF 或觀察期限，
+不為每筆取樣重新啟動 Python 或開啟 VISA。
+須有具時間證據的 ON 查詢，再於第 6 秒前取得首次 OFF。從 ON 查詢起點至
+OFF 查詢完成的保守區間最多 1 秒，且不得在第 5 秒前結束。明確提前 OFF、
+缺乏 ON 證據或區間過寬均失敗，不得以後續 OFF 查詢覆蓋。此為有界功能驗收，
+不是精確時間校正。第 6 秒仍無有效觀察則判定失敗並開始 OFF
 清理。若 CLI 子程序在截止時仍在執行，Script 會先提示立即使用獨立硬體
 停損，再等待子程序退出。子程序已退出且既有通訊規則允許時，才執行
 VISA 清理。混選含 Trigger 且通訊失信時，由現場獨立處理。
 CLI 記錄 SCPI 寫入、ON 確認及 Input 查詢起訖，`-DebugArtifacts` 將觀察
-資料存於私有目錄。明確確認 OFF、獨立停用 Timer 並讀回最終狀態後，
-只有確認觀察期間由 Timer 自動關閉且未經人工或外部介入，才輸入 `AUTO`。
+資料存於私有目錄。依時間與 ON/OFF 證據自動判定，並確認 OFF、停用 Timer
+及讀回最終狀態。操作者須確保獨立停損不在觀察期間動作，除安全需要外不得介入；
+儀器取樣證據並非獨立的因果證明。
 
 The validation-only Core/CLI scope uses `INP:TIM:DEL <seconds>`, `INP:TIM 0|1`,
 `INP:TIM:DEL?` and `INP:TIM?` from the
@@ -1197,8 +1208,9 @@ and Worker LIVE are closed for Sequence.
 
 The contributor scope accepts only the four fixed documents, for 0.1 A CC,
 3 V CV, 1000 Ω CR and 0.10 W CW. Each has one ON, a 0.25 s Wait, measurement,
-and verified OFF. The script requires operator confirmation before each trial
-and enforces a 30 s command deadline and 900 s total deadline. The Core handles
+and verified OFF. The script requires one operator confirmation for the four-trial
+Sequence batch, retaining per-request CLI confirmation, a 30 s command deadline
+and a 900 s total deadline. The Core handles
 trusted cleanup on the existing session. The CLI directs the operator to
 switch off the load independently if a Remote transition during setup or Input ON
 ends without a fresh OFF readback, or if a run fails with Input observed ON
@@ -1370,11 +1382,10 @@ to pass. If pytest deselects any of those cases, the script stops the group
 before running it. The report records `NOT RUN` when no test ran and `SKIP`
 when tests were skipped. Either result leaves the run incomplete.
 
-Readback queries the existing configuration with Input OFF before any setup.
-The current mode determines which Fixed, Slew, Transient or LIST case is
-applicable. Other selections are marked `SKIP`. To cover them, repeat
-`-Modes readback` with the relevant settings already present on the instrument.
-For comparisons with known panel settings, use `-ExpectedRiseSlew` and
+With `-LiveExtensions` and no Expected parameters, Readback uses the isolated settings batch to automatically select
+functions, exercise known settings, compare independent readbacks and verify
+restoration. No panel values or repeated manual function selection are required.
+Without `-LiveExtensions` Readback is read-only. For legacy diagnostics with known panel settings, use `-ExpectedRiseSlew` and
 `-ExpectedFallSlew` together (A/µs), `-ExpectedVonThreshold` (V) and
 `-ExpectedVonLatch` (`on` or `off`) together, `-ExpectedShort` (`on` or
 `off`), and `-ExpectedAverageCount` (2–16). Incomplete baselines leave the case
@@ -1383,7 +1394,7 @@ Fixed, Transient, Trigger and TRACE also keep their own post-setup comparisons.
 
 ### Contributor extension selection
 
-Select `-LiveExtensions` with one or more extension modes or `-Modes full`
+Select `-LiveExtensions` with Readback, one or more extension modes or `-Modes full`
 to request the contributor hardware cases. Provide an explicit `-Resource`
 and matching `-Connection`. Use `-PlanOnly` to review CLI operations and
 the extension SCPI previews without opening VISA. Execution requires the
@@ -1391,23 +1402,26 @@ interactive physical validation procedure.
 The hardware case results carry `execution: live`.
 
 With Input OFF, `workflow` verifies two scheduled measurement samples and
-completion of a voltage condition at 1 V or above. The two CC cases start in
+completion of a voltage condition at 1 V or above. The two CC cases establish
 Fixed CC Low with a dedicated 5 V source limited to 0.8 A and use a 0.1 A
-setpoint. Timed Load requests OFF at 5 seconds. Discharge samples every
+setpoint. Timed Load requests OFF at the five-second boundary without adding queries after that boundary. Discharge samples every
 0.5 seconds and must reach 0.00010 Ah. It stops on a voltage of 4.5 V or lower
 or after 6 seconds if capacity is still below the target. Timing starts at
 the SCPI `INP ON` write. For each case, arm an independent hardware cutoff
 before confirming the trial so that load time, including OFF confirmation,
 cannot exceed 10 seconds from the write. If communication is lost, use that
 cutoff immediately. Skip physical execution if the site cannot enforce this
-limit. For Timed Load, start an independent current recording before Input ON
-and keep it through OFF. After OFF is confirmed, use that run's recording
-to verify current stayed between 0.09 and 0.11 A while loaded through the
-scheduled 5-second boundary, without early dropout or external intervention.
-Keep the recording privately. The standalone CLI reports SCPI write times
-and `load_duration_confirmed: false`. The script records confirmation of the
-current trace after the operator reviews it. For Discharge, confirm that the
-source remained on until cleanup. The CC trials leave Fixed CC at 0.1 A with
+limit. Timed Load automatically samples instrument current and Input state
+before the five-second OFF schedule and checks the current band (0.09–0.11 A),
+sample coverage and integer-nanosecond OFF timestamps. Discharge checks current
+during capacity sampling. Timed Load uses bounded functional evidence: consecutive current
+and Input observations and the final current query start to OFF write must
+span at most one second each, retaining the existing initial ON confirmation
+allowance. A valid schedule and bounded samples pass functional validation,
+not continuous loading calibration. Observed early loss or insufficient
+coverage fails; no manual observation is requested.
+Do not manually intervene or allow the independent cutoff to fire during
+the expected observation except for safety. The CC trials leave Fixed CC at 0.1 A with
 Input OFF.
 
 `measurement-extensions` queries native Min/Max and Discharge values and
@@ -1415,33 +1429,55 @@ verifies Average set to 8. The Average case leaves that setting after operator
 confirmation.
 
 For `auxiliary-controls` and `list-cc`, physically disconnect the source and
-DUT and start in Fixed CC with Input, Short, Transient and Input Timer OFF.
+DUT. Standalone trials require Fixed CC with Input, Short, Transient and Input
+Timer OFF. They do not switch the starting function or mode; other starting
+states are refused before settings writes.
 VON and same-range Slew save the original values, verify test readback, then
 restore and verify the original values. The Short trial checks ON and OFF
 state with isolated terminals and verifies Input OFF. LIST uses different
-first-step widths for A and B, saves A to `-ListScratchSlot`, and checks all
-steps after recalling A. Enter `OVERWRITE <slot>` only if that slot may
-retain A. To verify Save, supply a previously verified first-step width for
-the same instrument and slot, with no intervening change to the slot. The
-standalone CLI takes this value via `--previous-slot-width`. The trial
-chooses an A that differs from the supplied width. With no known prior
-width, Recall and Exit can be verified and Save remains unconfirmed. A
-verified Recall also provides the prior width for a future trial if the slot
-stays unchanged.
+first-step widths for A and B. Confirm isolation once for the isolated settings
+batch. Enter `OVERWRITE <slot>` if LIST is selected, only if that slot may be
+overwritten. Otherwise enter `ISOLATED`. The trial saves B to `-ListScratchSlot`,
+changes the working buffer to A, and verifies Recall restores B. It then saves A,
+changes the working buffer to B, and verifies Recall restores A. Both comparisons
+cover the complete LIST configuration. No manually supplied prior slot width is
+required. The slot retains A after a successful trial.
 
 Before writing, the trial displays a private recovery baseline, including
 the original working LIST and Fixed CC settings for LIST. Keep the terminal
 record private. The standalone CLI sends the baseline to stderr and the
-script keeps it out of shareable reports. The LIST trial returns to Fixed CC
+script keeps it out of shareable reports, including untouched values in successful automatic settings readbacks. The LIST trial returns to Fixed CC
 and verifies the original working buffer. Configuration writes require a
 restorable baseline. If restoration cannot be verified after a write, keep
 the terminals isolated and use the recorded baseline for recovery at the
 instrument.
 
-Run the isolated trials separately from source-connected or mode-changing
-trials. Full and incompatible selections preserve the isolated case previews
-as `NOT RUN` with the separate-run reason. The isolated cases may be combined
-with each other, native measurements, readback and system query.
+The script runs source-connected trials (including Trigger and Protection)
+before the isolated settings batch. Full or mixed selections prompt once
+at the transition to physical isolation; the operator must disconnect both
+source and DUT before authorizing the batch. Automatic Readback needs no panel values
+or manual function selection. With Input OFF it exercises known values and
+restores the original settings and function, including LIST without saving a
+slot. An enabled Transient starting state is supported when its original
+settings and HOLD source can be verified and restored; other unsafe or
+unrestorable states are refused before writing. Only the automatic Readback
+procedure authorizes that temporary Transient change, including its VON,
+Slew and Short readbacks. Standalone Auxiliary Controls and LIST CC retain
+the original Fixed CC and Transient OFF guards. Mixed runs must meet the
+same precondition before standalone trials; Readback evidence may be reused
+for the shared Auxiliary cases. When a preceding powered trial leaves a
+non-CC Fixed function, the mixed plan includes an explicit isolated Fixed CC
+handoff before the first standalone trial, without changing setpoints. It
+requires Fixed mode and the existing interlocks OFF; it is not a standalone
+mode-switch permission. Only the scratch-slot trial has a 300-second
+command allowance; automatic LIST Readback retains the 30-second command limit.
+Both LIST trials check the actual remaining command budget against the buffer
+length, configured query delay, observed snapshot cost and restoration reserve
+before writing. Large buffers or slow exchanges may be refused without settings
+writes. A later unexpected transport stall still requires the existing manual
+recovery procedure; time budgeting is not a hardware guarantee. Without LiveExtensions or
+with explicit legacy Expected parameters, Readback remains a read-only
+diagnostic, not automatic acceptance.
 
 使用 `-LiveExtensions` 搭配單選、多選或 `-Modes full`，明確選擇
 Contributor 實機項目。指定與 `-Connection` 相符的 `-Resource`，
@@ -1449,39 +1485,55 @@ Contributor 實機項目。指定與 `-Connection` 相符的 `-Resource`，
 執行時需遵循互動式實機驗證流程，硬體項目會標記 `execution: live`。
 
 Input OFF 時，`workflow` 驗證定時取樣兩次及電壓達到 1 V 的條件。兩個
-CC 案例從 Fixed CC Low 開始，使用專用的 5 V、限流 0.8 A 電源，負載
-設定為 0.1 A。Timed Load 在第 5 秒要求 OFF。放電每 0.5 秒取樣，須達到
+CC 案例自動設定 Fixed CC Low，使用專用的 5 V、限流 0.8 A 電源，負載
+設定為 0.1 A。Timed Load 在第 5 秒要求 OFF，不在期限後增加查詢。放電每 0.5 秒取樣，須達到
 0.00010 Ah 才通過，電壓降至 4.5 V 以下（含）或第 6 秒容量仍未達標時即停止。
 兩項都從 SCPI `INP ON` 寫入起算。每次確認前先備妥獨立硬體停損，確保從
 寫入至 OFF 確認不超過 10 秒。通訊失信時立即使用停損。現場無法確保期限時，
-不執行實機測試。Timed Load 須在 Input ON 前開始獨立記錄電流，持續記錄至
-OFF。確認 OFF 後，核對本次記錄顯示帶載電流維持在 0.09 至 0.11 A，直到第 5
-秒預定 OFF，期間沒有提前掉載或外部介入。請私下保留記錄。單獨執行 CLI 會提供
-SCPI 寫入時間及 `load_duration_confirmed: false`。操作者核對電流記錄後，腳本
-才記錄確認結果。放電案例須確認電源持續供電至清理。CC 案例結束後，Fixed CC
+不執行實機測試。Timed Load 在 5 秒 OFF 排程前自動取樣儀器電流及 Input 狀態，
+核對 0.09 至 0.11 A、取樣涵蓋程度及整數奈秒 OFF 時間。放電在容量取樣時核對電流。
+Timed Load 採有界功能驗收：相鄰電流及 Input 觀察區間、最後電流查詢起點至 OFF
+寫入均最多 1 秒，保留既有初始 ON 確認時間。有效排程及有界取樣可通過功能驗收，
+不代表最後未取樣區間持續帶載或精確校正；觀察到提前掉載或涵蓋不足即失敗，
+不要求人工判讀。
+除安全需要外，不得人工介入或讓獨立停損在預定觀察期間動作。CC 案例結束後，Fixed CC
 設定保留 0.1 A，Input 為 OFF。
 
 `measurement-extensions` 查詢原生 Min/Max 與放電讀值，經操作者確認後
 將 Average 設為 8、驗證讀回並保留設定。
 
-`auxiliary-controls` 與 `list-cc` 須物理隔離來源及待測物，從 Fixed CC 開始，
-確認 Input、Short、Transient 與 Input Timer 皆為 OFF。VON 與同檔 Slew
+`auxiliary-controls` 與 `list-cc` 須物理隔離來源及待測物，
+獨立試驗須在 Fixed CC 且 Input、Short、Transient 與 Input Timer 皆為 OFF，
+不切換起始功能或模式；其他起始狀態在設定寫入前拒絕。VON 與同檔 Slew
 保存原值、確認測試值讀回，再還原並比對原值。Short 只在端子隔離時驗證 ON／OFF
-狀態並確認 Input OFF。LIST 只修改第一步寬度來區分 A 與 B，存 A 至
-`-ListScratchSlot`，召回後逐步核對 A。只有容許該槽保留 A 時，才輸入
-`OVERWRITE <槽號>`。要驗證 Save，請提供同一台儀器、同一槽位先前已驗證且至今
-未被修改的第一步寬度。單獨執行 CLI 可用 `--previous-slot-width` 傳入。試驗會
-選用與該寬度不同的 A。舊寬度未知時，可確認 Recall 與 Exit，Save 則維持未確認。
-已驗證的 Recall 可提供下次試驗的舊寬度，前提是這段期間該槽沒有變更。
+狀態並確認 Input OFF。隔離設定批次只需確認一次實體隔離。選取 LIST 時，
+只有容許覆寫指定槽位才輸入 `OVERWRITE <槽號>`，否則不含 LIST 的批次輸入
+`ISOLATED`。LIST 以不同第一步寬度區分 A 與 B。試驗將 B 存至
+`-ListScratchSlot`、將工作緩衝改為 A，再確認 Recall 還原 B。接著儲存 A、
+把工作緩衝改為 B，確認 Recall 還原 A。兩次均比對完整 LIST 設定，
+不需人工提供槽位舊寬度。試驗成功後該槽保留 A。
 
 試驗會在寫入前顯示私有復原基準，LIST 基準包含原始工作緩衝及 Fixed CC 設定。
 請私下保留終端紀錄。單獨執行 CLI 時，基準會由 stderr 輸出。腳本的可分享報告
 不包含基準。LIST 最後退出至 Fixed CC 並驗證原工作緩衝。只有可安全還原原值時
 才執行設定寫入。寫入後若無法確認還原，維持端子隔離，依記錄的基準在儀器上還原。
 
-請將隔離設定案例與需接電源或切換模式的試驗分開執行。Full 或不相容的混選將隔離
-案例列為 `NOT RUN`，並保留預覽及另跑原因。隔離案例可彼此混選，也可搭配原生量測、
-設定讀回及 System Query。
+需接電源的試驗（含 Trigger 與 Protection）先執行，再進入隔離設定批次。
+Full 或混選在切換至隔離批次時只提示一次；操作者須實體斷開來源及待測物。
+Readback 加上 `-LiveExtensions` 且未提供 Expected 參數時，不需提供面板值或手動選擇功能；
+Input OFF 時自動測試已知設定並還原原始設定及功能，LIST 讀回不需儲存槽位。
+已啟用 Transient 的起始狀態須可確認並還原原設定及 HOLD 來源；不安全或不可還原的
+狀態在寫入前拒絕。僅自動 Readback 流程（含 VON／Slew／Short）授權此暫時切換；
+獨立 Auxiliary Controls 與 LIST CC 保留原 Fixed CC 及 Transient OFF 守衛，
+混選亦須符合此條件才執行獨立試驗；共用 Auxiliary 案例可重用 Readback 證據。
+若前置接電試驗留下非 CC 的 Fixed 功能，混選計畫在首個獨立試驗前安排明確的隔離
+Fixed CC 交接，不更動設定值，並要求 Fixed 模式及既有互鎖皆為 OFF；
+不擴大獨立試驗的模式切換權限。只有 Scratch Slot 試驗適用 300 秒單命令例外，
+自動 LIST Readback 維持 30 秒。兩者在寫入前依緩衝長度、設定的查詢延遲、
+實際快照成本及還原預留檢查剩餘期限；較長緩衝或較慢通訊可能在設定寫入前拒絕。
+之後若通訊意外停滯，仍須依既有人工復原程序處理，時間預算並非硬體保證。
+未加 LiveExtensions 或明確提供舊有 Expected 參數時為唯讀診斷，
+不代表自動驗收。
 
 ### Script parameters
 
@@ -1492,7 +1544,7 @@ SCPI 寫入時間及 `load_duration_confirmed: false`。操作者核對電流記
 | `-Connection` | `usb` | `usb` for USB INSTR or `asrl` for RS-232 ASRL INSTR |
 | `-Backend` | `system` | System VISA (`@ivi`) only |
 | `-Modes` | `full` | FULL, a single mode or a comma-separated selection |
-| `-LiveExtensions` | Off | Request contributor hardware cases for Workflow and extension modes |
+| `-LiveExtensions` | Off | Request automatic Readback and contributor hardware cases for Workflow and extension modes |
 | `-ListScratchSlot` | 1 | LIST test slot (1–7) with per-run overwrite confirmation |
 | `-InputTimerOnly` | Off | Backward-compatible Timer-only shortcut, incompatible with `-Modes` |
 | `-SourceVoltageLimitV` | **5 V** | Operator-declared external source voltage, override >0 to 18 V |
@@ -1668,7 +1720,7 @@ interlocks, saves and restores the original Fixed CC and protection settings,
 and stops at the first failed trial. The temporary Fixed CC setpoint is 0.20 A.
 The operator confirms each Input ON with a fresh Enter.
 
-The script reuses an available independent Readback snapshot. From Fixed CV
+The script reuses an available independent Readback snapshot only if no intervening mode-changing Workflow ran; otherwise it reads the current state. From Fixed CV
 or CW it confirms Input and Short are both OFF, prepares Fixed CC at 0.20 A Low,
 and independently verifies the settings with Input OFF before taking the first
 Protection snapshot. The prepared Fixed CC settings become the trial restore
@@ -1741,16 +1793,22 @@ independent operator action; the run stays FAIL.
 
 | Parameters | Purpose |
 | --- | --- |
-| `-TriggerObservationSeconds`, `-TriggerMaxOnSeconds` | Whole seconds of observation and the larger per-trial deadline from before Input ON through OFF confirmation, within the 900 s total deadline. Allow time for VISA setup, command readbacks and cleanup. The script reserves part of the difference for OFF and any process termination. |
+| `-TriggerObservationSeconds`, `-TriggerMaxOnSeconds` | Whole seconds of observation and the larger per-trial deadline from before Input ON through OFF confirmation, within the 900 s total deadline. Capture is additionally limited to a single 30 s command minus the existing 500 ms return reserve. Plans must fit the required event and minimum query costs within the smaller window. Actual VISA latency may still limit evidence. The script reserves part of the difference for OFF and any process termination. |
 | `-LevelA`, `-LevelB`, `-RiseSlew`, `-FallSlew`, `-PulseWidth` | Distinct bounded Low-range CC levels, slew rates in A/μs and the Transient pulse width in seconds. Both current levels must fit the declared source limit. |
 | `-TriggerIntervalSeconds` | TIMER interval in seconds. The observation must accommodate two periods plus the pulse width. |
 | `-TriggerListWidthA`, `-TriggerListWidthB`, `-TriggerListRepeat` | LIST CC dwell times in seconds and a finite repeat count. The LIST must fit the observation window. |
 | `-TriggerExternalSetup` | Optional explanatory note; the console still requires physical equipment and wiring confirmation. |
 
-Use a current observation method that can resolve the chosen levels and pulse
-or dwell times. The IT8812C panel display may suffice for qualitative 2-second
-changes; if no change can be reliably observed, answer No rather than inferring
-PASS from command acceptance. This is not a pulse-width or amplitude calibration.
+The Contributor CLI samples instrument current in one session, dispatching the
+software Trigger only for HOLD or BUS after the baseline is observed and Input ON is rechecked. Plans with pulse or dwell too short for configured VISA query delays are rejected. It checks
+ordered current plateaus and bounded time brackets; insufficient sample
+resolution, missing pulses or wrong order fail the trial. Finite BUS/EXTERNAL
+LIST additionally requires a clear-to-set-to-clear RUN condition (bit 7 of
+the existing read-only `STAT:QUES:COND?`, IT8800 Programming Guide V2.1
+printed pp.15,29), with the final dwell bracket ending at the first stopped
+condition. A stuck final level without RUN completion fails, even if it
+lasts the expected dwell. No assumption is made about terminal current. This is sampled
+functional evidence, not independent pulse-width or amplitude calibration.
 HOLD and TIMER use Transient CC Pulse (baseline B, pulse at A for the
 configured width, then back to B). BUS and EXTERNAL use a two-step LIST CC,
 with a zero fixed-current baseline before LIST selection. The test replaces
@@ -1764,16 +1822,13 @@ against the instrument and signal equipment before use. Confirm external On/Off 
 disabled. [IT8800 User’s Manual V2.7, §§3.1, 3.4, 3.19.2](https://mm.digikey.com/Volume0/opasdata/d220001/medias/docus/5562/IT8800%20User%20Manual.pdf)
 
 The script saves the original Trigger Source and interval while Input is OFF.
-Press Enter before each trial to confirm the setup and then perform any
-requested physical trigger during the bounded observation. The script
-explicitly attempts and verifies Input OFF before requesting a Yes/No answer.
-The readiness and observation prompts count toward the existing 900 s
-limit, including default all-mode runs. If the complete selection cannot
-finish within that deadline, the run fails rather than silently skipping
-a mode or removing the bound. A missed
-trial or run deadline fails validation even if bounded emergency cleanup is
-still possible. Yes confirms the expected observable effect. Insufficient
-observation, cancellation and unsuccessful restoration fail validation.
+After the initial batch safety authorization, HOLD, BUS and TIMER run without
+operator observation prompts. EXTERNAL retains equipment readiness and the
+physical pulse, requested only after the capture-ready message. The script
+attempts and verifies Input OFF before marking waveform acceptance. The
+existing 900 s total limit and per-trial ON/OFF budget remain. Missing
+evidence, cancellation, deadlines or unsuccessful restoration fail validation;
+there is no manual Yes/No override.
 The script restores and reports readback for each original Trigger setting
 after confirmed OFF and with trusted communication. If communication becomes
 untrusted, use the independent manual OFF procedure immediately. The script
@@ -1781,11 +1836,26 @@ skips further VISA commands in that situation. Treat TIMER observation as a
 functional test.
 
 The standalone contributor scope `--hardware-validation trigger` is limited to
-IT8812C USB/System VISA. In that scope, Enable, Input ON and software Trigger
+IT8812C USB/ASRL System VISA. In that scope, Enable, Input ON and software Trigger
 compare the expected function, full dynamic configuration and Trigger Setup
 with physical readback. Input ON also requires `--confirm`. When restoring a
 snapshot, contributor `trigger-configure` can supply both Source and interval
 for any source. The Product and Worker LIVE paths reject Trigger Setup.
+The CLI-only `trigger-observe` command accepts the exact validation
+configuration and a bounded observation deadline. It does not enable Input.
+
+HOLD／BUS／TIMER 在初始安全授權後自動取得儀器電流取樣、核對電平順序及
+時間區間，不需人工觀察或回答 Yes／No；HOLD／BUS 派送前再次確認 Input ON。
+有限 BUS／EXTERNAL LIST 另以既有唯讀 `STAT:QUES:COND?` 的 RUN bit 7
+確認從未執行、執行中到首次停止（IT8800 Programming Guide V2.1 印刷頁 15、29），
+最後一段停留時間以首次停止為結束區間；卡在末段且 RUN 未結束不得通過，
+不假設終端電流必定回到零。
+若脈衝或停留時間短到既有 VISA 查詢延遲無法取樣，PlanOnly 即拒絕。
+擷取受單一命令 30 秒與既有 500 ms 返回預留限制，必須在較短的觀察窗內容納事件與最低必要查詢耗時；實際 VISA 延遲仍可能使證據不足。
+EXTERNAL 只保留設備準備及收到擷取
+就緒提示後提供實體訊號。程式在確認 OFF 後才完成波形驗收。取樣不足、期限超過
+或還原失敗均不得 PASS。這是儀器自身取樣的功能證據，不是獨立波形校正。
+既有 ON／OFF 期限及 Product／Worker LIVE 權限不變。
 
 ### Reports
 
