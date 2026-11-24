@@ -551,7 +551,12 @@ and Trigger trials. Check automatic Readback settings and restoration with
 a recording fake, and one isolation/slot authorization for the batch. Check
 the original Fixed CC/Transient OFF guard for standalone settings, separate
 from automatic Readback mode restoration; only scratch-slot settings retain
-the 300-second command exception. For Timer expiry, check single-session
+the 300-second command exception. For both LIST trials, check budget refusal
+before settings writes for long buffers and actual remaining time, and
+restoration of the normal short buffer with configured query delays. Mixed
+plans that leave a non-CC Fixed function must include an isolated handoff
+before standalone settings, with the original interlocks and no setpoint
+changes. For Timer expiry, check single-session
 read-only polling with actual simulated query delays and use a controlled clock for definite early OFF refusal, first OFF with a bracket exceeding one second, and indistinguishable normal and early events within the approved one-second observation bracket; confirmation follows cleanup. Use a delayed Fake VISA ON reply to verify
 that the SCPI write-start deadline already applies while the ON subprocess is
 still running. With a process substitute that stays running after termination is
@@ -570,7 +575,9 @@ Input。LIST 核對從不同工作值 Recall B 建立基準，再 Save A 並從 
 PlanOnly 核對安全查詢及條件式清理。混選先執行需接電源的試驗及 Trigger，
 再進入一次隔離及槽位授權批次；以 Fake VISA 驗證 Readback 自動設定與還原，
 獨立設定保留原 Fixed CC／Transient OFF 守衛，只有 Scratch Slot 適用 300 秒例外。
-Timer 核對單一唯讀 Session 持續查詢並納入模擬查詢延遲，使用可控制的
+兩種 LIST 試驗核對長緩衝及剩餘時間不足時在設定寫入前拒絕，以及納入查詢延遲的
+短緩衝正常還原。前置試驗留下非 CC Fixed 功能的混選計畫須在獨立設定前安排隔離交接，
+維持原互鎖且不改設定值。Timer 核對單一唯讀 Session 持續查詢並納入模擬查詢延遲，使用可控制的
 時鐘驗證明確過早 OFF、首次 OFF 區間超過 1 秒不得通過，以及在核准 1 秒觀察區間內不可區分的正常與提前事件依相同證據驗收，清理後才自動確認。以 Fake VISA 模擬延遲的
 ON 回覆，驗證 ON 子程序尚在執行時已受 SCPI 寫入起點的期限約束。用收到
 終止要求後仍在執行的程序替身，確認提示在觀察期限到達時發出，且清理時

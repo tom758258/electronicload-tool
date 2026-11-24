@@ -1458,6 +1458,10 @@ def test_workflow_only_stays_offline_with_optional_connection(run_script, plan_o
     ('list-cc', 'usb', RESOURCE, True),
     ('list-cc,protection', 'usb', RESOURCE, True),
     ('list-cc,input-timer', 'usb', RESOURCE, True),
+    ('sequence,auxiliary-controls,list-cc', 'usb', RESOURCE, True),
+    ('cv,list-cc', 'asrl', ASRL, True),
+    ('cr,auxiliary-controls', 'usb', RESOURCE, True),
+    ('transient-cw,readback,list-cc', 'usb', RESOURCE, True),
     ('list-cc,auxiliary-controls', 'asrl', ASRL, True),
     ('workflow,auxiliary-controls,list-cc,measurement-extensions', 'asrl', ASRL, False),
     ('full', 'usb', RESOURCE, True),
@@ -1515,6 +1519,21 @@ def test_explicit_live_extensions_never_use_simulation(run_script, mode, connect
             assert short['planned_writes'] == ['SYST:REM', 'INP:SHOR 1', 'INP:SHOR 0']
             assert short['conditional_writes'][0]['writes'] == ['SYST:REM', 'INP OFF']
             assert not any(write.startswith('CURR:RANG ') for write in cases['auxiliary-controls-slew']['planned_writes'])
+    needs_handoff = mode in ('sequence,auxiliary-controls,list-cc', 'cv,list-cc',
+                             'cr,auxiliary-controls', 'transient-cw,readback,list-cc')
+    assert ('isolated-fixed-cc-handoff' in cases) == needs_handoff
+    if needs_handoff:
+        handoff = cases['isolated-fixed-cc-handoff']
+        names = list(cases)
+        assert handoff['command'] == 'contributor-settings'
+        assert handoff['conditional_writes'][0]['writes'] == ['SYST:REM', 'FUNC CURR']
+        assert handoff['planned_writes'] == []
+        first = 'auxiliary-controls-von' if 'auxiliary-controls' in mode else 'list-cc-settings'
+        assert names.index('isolated-fixed-cc-handoff') + 1 == names.index(first)
+        if 'sequence' in mode:
+            assert names.index('sequence-cw') < names.index('isolated-fixed-cc-handoff')
+        if 'readback' in mode:
+            assert names.index('average-status') < names.index('isolated-fixed-cc-handoff')
     if 'workflow-measure-log' in cases:
         assert cases['workflow-measure-log']['queries'][:2] == ['*IDN?', 'INP:STAT?']
         assert cases['workflow-measure-until']['queries'] == ['*IDN?', 'INP:STAT?', 'MEAS:VOLT?']

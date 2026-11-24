@@ -1,6 +1,7 @@
 """Isolated IT8812C settings trials. No trial sends Input ON or a trigger."""
 
 from decimal import Decimal
+from time import monotonic_ns
 
 from . import control as c
 from . import readback
@@ -8,13 +9,14 @@ from .errors import LoadError
 from .hardware_validation import _stopping, _trigger_snapshot, list_program_writes
 from .trigger import SOURCE_TOKENS
 from .identity import MODEL_ID, parse_identity
-from .visa import open_request_session, validate_request_connection
+from .visa import QUERY_DELAY_S, open_request_session, validate_request_connection
 
 
 COMMAND = "contributor-settings"
 READBACK_TRIALS = ("fixed-cc", "fixed-cv", "fixed-cr", "fixed-cw", "transient", "list", "average")
 SHARED_READBACK_TRIALS = ("von", "slew", "short")
-TRIALS = ("von", "slew", "short", "list-cc", *READBACK_TRIALS)
+HANDOFF_TRIAL = "fixed-cc-handoff"
+TRIALS = ("von", "slew", "short", "list-cc", *READBACK_TRIALS, HANDOFF_TRIAL)
 _FIXED = {"FIX", "FIXED"}
 _CURRENT = {"CURR", "CURRENT"}
 
@@ -38,14 +40,18 @@ def _mismatch(message):
     return LoadError("readback_mismatch", message, 3)
 
 
-def _exercise_and_restore(session, stop, exercise, restore):
+def _exercise_and_restore(session, stop, exercise, restore, *, before_write=None):
     changed = False
     failure = None
 
     def write(command):
         nonlocal changed
         _stopping(stop)
+        if before_write is not None:
+            before_write()
         c._input_off(session)
+        if before_write is not None:
+            before_write()
         changed = True
         c._write(session, command)
 
@@ -56,7 +62,7 @@ def _exercise_and_restore(session, stop, exercise, restore):
     if changed:
         # A semantic mismatch or cooperative Stop leaves the exchange trusted.
         # A failed/ambiguous exchange must never cause blind cleanup writes.
-        if failure is not None and failure.code not in {"readback_mismatch", "stopping", "input_not_off"}:
+        if failure is not None and failure.code not in {"readback_mismatch", "stopping", "input_not_off", "settings_budget_insufficient"}:
             raise _restore_error(failure) from failure
         try:
             restore()
@@ -65,6 +71,8 @@ def _exercise_and_restore(session, stop, exercise, restore):
             raise _restore_error(failure, exc) from exc
     if failure is not None:
         failure.details.update(restored=changed, input_state="OFF" if changed else "UNKNOWN")
+        if failure.code == "settings_budget_insufficient" and not changed:
+            failure.details["no_settings_written"] = True
         raise failure
     return {**result, "restored": True, "input_state": "OFF"}
 
@@ -170,9 +178,9 @@ def _list_settings(session):
     return c.validate_list_cc({key: raw[key] for key in c.LIST_FIELDS})
 
 
-def _list_trial(session, slot, previous_slot_width):
+def _list_trial(session, slot, previous_slot_width, budget):
     fixed = readback._fixed(session, "CC")
-    baseline = _list_settings(session)
+    baseline = budget.snapshot(lambda: _list_settings(session), preparing=True)
     width = baseline["steps"][0]["width_s"]
     first = next(Decimal(value) for value in (1, 2, 3) if value not in (width, previous_slot_width))
     second = Decimal(2) if first == 1 else Decimal(1)
@@ -185,11 +193,11 @@ def _list_trial(session, slot, previous_slot_width):
 
     def require_list(expected, label):
         mode, function = c._load_mode(session)
-        if mode != "LIST" or function not in _CURRENT or _list_settings(session) != expected:
+        if mode != "LIST" or function not in _CURRENT or budget.snapshot(lambda: _list_settings(session)) != expected:
             raise _mismatch(f"LIST {label} did not match the expected configuration.")
 
     def exercise(write):
-        if c._check_mode_change(session) or _list_settings(session) != baseline:
+        if c._check_mode_change(session) or budget.snapshot(lambda: _list_settings(session)) != baseline:
             raise _mismatch("The original LIST or its mode interlocks changed before the trial.")
         # Establish a known slot baseline before testing a different Save.
         write(f"LIST:WID 1,{second:f}")
@@ -423,8 +431,8 @@ def _transient_readback_trial(session):
     return exercise, restore, {"transient": baseline, "trigger": trigger}
 
 
-def _list_readback_trial(session):
-    baseline = _list_settings(session)
+def _list_readback_trial(session, budget):
+    baseline = budget.snapshot(lambda: _list_settings(session), preparing=True)
     fixed = readback._fixed(session, "CC")
     original = baseline["steps"][0]["width_s"]
     candidate = Decimal(2) if original == 1 else Decimal(1)
@@ -433,11 +441,11 @@ def _list_readback_trial(session):
 
     def exercise(write):
         _guard(session)
-        if _list_settings(session) != baseline:
+        if budget.snapshot(lambda: _list_settings(session)) != baseline:
             raise _mismatch("Original LIST buffer changed before testing.")
         write(f"LIST:WID 1,{candidate:f}")
         write("FUNC:MODE LIST")
-        observed = readback.snapshot(session, "list-status")
+        observed = budget.snapshot(lambda: readback.snapshot(session, "list-status"), extra_queries=4)
         configuration = observed["configuration"]
         # Public readback preserves width and slew as decimal strings.
         # Normalize only this trusted snapshot, not caller-provided LIST JSON.
@@ -485,7 +493,7 @@ def _average_readback_trial(session):
     return exercise, restore, {"average_count": original}
 
 
-def _prepare_trial(session, trial, slot, previous_slot_width, *, readback_trial=False):
+def _prepare_trial(session, trial, slot, previous_slot_width, *, readback_trial=False, deadline_ns=None):
     target = trial[-2:].upper() if trial.startswith("fixed-") else "CC"
     selection = None
     needs_selection = False
@@ -498,30 +506,116 @@ def _prepare_trial(session, trial, slot, previous_slot_width, *, readback_trial=
         _guard(session)
     if target == "CR" and c._flag(session, c.LED_QUERY) != "OFF":
         raise LoadError("unsafe_mode", "Plain CR settings require LED OFF.")
+    budget = (_ListBudget(session, trial, deadline_ns, selection, needs_selection)
+              if trial in {"list", "list-cc"} else None)
     if trial == "short":
         functions = _short_trial(session)
     elif trial == "list-cc":
-        functions = _list_trial(session, slot, previous_slot_width)
+        functions = _list_trial(session, slot, previous_slot_width, budget)
     elif trial.startswith("fixed-"):
         functions = _fixed_readback_trial(session, target)
     elif trial == "transient":
         functions = _transient_readback_trial(session)
     elif trial == "list":
-        functions = _list_readback_trial(session)
+        functions = _list_readback_trial(session, budget)
     elif trial == "average":
         functions = _average_readback_trial(session)
     else:
         functions = _round_trip(session, trial)
     if needs_selection:
-        return _with_selection(session, selection, target, *functions)
-    if readback_trial:
+        functions = _with_selection(session, selection, target, *functions)
+    elif readback_trial:
         exercise, restore, original = functions
-        return exercise, restore, {"selection": selection, **original}
-    return functions
+        functions = exercise, restore, {"selection": selection, **original}
+    return (*functions, budget)
+
+
+class _ListBudget:
+    """Conservative admission and restoration reserve for the two LIST trials.
+
+    A query-delay budget is not a guarantee against future transport stalls.
+    Never extend the runner deadline or retry a failed exchange.
+    """
+
+    def __init__(self, session, trial, deadline_ns, selection, needs_selection):
+        self.deadline_ns = deadline_ns
+        self.count = readback._list_integer(session, readback.LIST_HEADER_QUERIES[1], 2, 84)
+        self.snapshot_queries = 3 + 3 * self.count
+        self.query_ns = int(max(QUERY_DELAY_S, getattr(session, "query_delay", 0) or 0) * 1e9)
+        if trial == "list-cc":
+            # Seven exercise snapshots; cleanup can read a different buffer,
+            # rewrite its headers/steps with OFF guards, then verify baseline.
+            self.exercise_queries = 7 * self.snapshot_queries + 55
+            self.restore_queries = (3 + 3 * 84) + 2 * self.snapshot_queries + 40
+        else:
+            # Two exercise snapshots, one cleanup snapshot, Fixed settings
+            # and interlocks. Include both selection legs when applicable.
+            self.exercise_queries = 2 * self.snapshot_queries + 22
+            self.restore_queries = self.snapshot_queries + 22
+            if needs_selection:
+                self.exercise_queries += 45
+                self.restore_queries += 42
+                if selection["transient_enabled"]:
+                    self.exercise_queries += 24
+                    self.restore_queries += 28
+        # Admission also includes baseline and pre-remote/recheck overhead.
+        self.require(self.snapshot_queries + self.exercise_queries + 24)
+
+    def require(self, queries=0):
+        # Reserve time for restoration even when a trial is interrupted.
+        required_ns = (queries + self.restore_queries) * self.query_ns + 1_000_000_000
+        if monotonic_ns() + required_ns >= self.deadline_ns:
+            raise LoadError("settings_budget_insufficient",
+                            "Insufficient time for LIST verification and restoration within the command deadline.",
+                            3)
+
+    def snapshot(self, read, *, preparing=False, extra_queries=0):
+        queries = self.snapshot_queries + extra_queries
+        self.require(queries)
+        started = monotonic_ns()
+        result = read()
+        elapsed_ns = monotonic_ns() - started
+        # Account for actual baseline/readback costs, not just USB's
+        # configured delay; later samples may be slower.
+        self.query_ns = max(self.query_ns, (elapsed_ns + queries - 1) // queries)
+        configuration = result.get("configuration", result)
+        if len(configuration["steps"]) != self.count:
+            raise _mismatch("LIST step count changed during the settings trial.")
+        self.require(self.exercise_queries + 20 if preparing else 0)
+        return result
+
+    def before_write(self):
+        self.require(2)
+
+
+def _execute_handoff(session, *, stop, on_baseline, marker, runtime):
+    # This is a separate, explicitly isolated mixed-run transition, not
+    # permission for standalone Auxiliary/LIST to change their origin.
+    original = _selection_guard(session)
+    if original["active_mode"] != "fixed":
+        raise LoadError("unsafe_mode", "Mixed-run handoff requires Fixed mode.")
+    if on_baseline is not None:
+        on_baseline({"trial": HANDOFF_TRIAL, "selection": original})
+    _stopping(stop)
+    if _selection_guard(session) != original:
+        raise _mismatch("Fixed mode changed before the mixed-run handoff.")
+
+    def write(command):
+        _stopping(stop)
+        c._input_off(session)
+        c._write(session, command)
+
+    if original["function"] != "CC":
+        write("SYST:REM")
+        if _selection_guard(session) != original:
+            raise _mismatch("Fixed mode changed during remote transition.")
+        write("FUNC CURR")
+    _guard(session)
+    return {**marker, "visa": runtime, "input_state": "OFF", "function": "CC"}
 
 
 def execute(trial, *, mode, resource, backend, model_id, confirmed, slot=None, previous_slot_width=None,
-            asrl=None, stop=None, on_baseline=None, readback_trial=False):
+            asrl=None, stop=None, on_baseline=None, readback_trial=False, deadline_ns=None):
     if model_id != MODEL_ID:
         raise LoadError("unsupported_model", "The requested model profile is not registered.")
     if trial not in TRIALS or mode not in {"live", "dry-run"}:
@@ -541,6 +635,22 @@ def execute(trial, *, mode, resource, backend, model_id, confirmed, slot=None, p
         raise LoadError("confirmation_required", "Confirm terminal isolation and any requested slot overwrite.")
     validate_request_connection(resource, backend, mode=mode, asrl=asrl, allowed=True)
     marker = {"validation_only": True, "validation_scope": COMMAND, "trial": trial}
+    if deadline_ns is not None and (trial not in {"list", "list-cc"} or mode != "live"
+                                    or type(deadline_ns) is not int):
+        raise LoadError("argument_error", "A live LIST settings deadline is required.")
+    if trial in {"list", "list-cc"} and mode == "live":
+        now = monotonic_ns()
+        limit_ns = (300 if trial == "list-cc" else 30) * 10**9
+        if deadline_ns is None:
+            deadline_ns = now + limit_ns
+        if not now < deadline_ns <= now + limit_ns:
+            raise LoadError("argument_error", "Invalid LIST settings deadline.")
+    if mode == "dry-run" and trial == HANDOFF_TRIAL:
+        return {**marker, "hardware_access": False, "planned_writes": [],
+                "conditional_writes": [{"condition": "Fixed non-CC origin, all interlocks OFF",
+                                        "writes": ["SYST:REM", "FUNC CURR"]}],
+                "queries": ["*IDN?", "INP:STAT?", "FUNC:MODE?", "FUNC?", "TRAN?", "INP:TIM?",
+                            readback.SHORT_QUERY, c.SLOW_RISE_QUERY, c.LED_QUERY]}
     if mode == "dry-run":
         writes = {
             "von": ["VOLT:ON <test/original>", "VOLT:LATC <test/original>"],
@@ -609,15 +719,23 @@ def execute(trial, *, mode, resource, backend, model_id, confirmed, slot=None, p
     with open_request_session(resource, asrl, c.open_session) as (session, runtime):
         _stopping(stop)
         parse_identity(c._query(session, "*IDN?"))
+        if trial == HANDOFF_TRIAL:
+            return _execute_handoff(session, stop=stop, on_baseline=on_baseline, marker=marker, runtime=runtime)
         try:
-            exercise, restore, original = _prepare_trial(
-                session, trial, slot, previous_slot_width, readback_trial=readback_trial)
+            exercise, restore, original, budget = _prepare_trial(
+                session, trial, slot, previous_slot_width, readback_trial=readback_trial, deadline_ns=deadline_ns)
         except LoadError as exc:
             exc.details["no_settings_written"] = True
             raise
         if on_baseline is not None:
             on_baseline({"trial": trial, **original})
         _stopping(stop)
+        if budget is not None:
+            try:
+                budget.require(budget.exercise_queries + 20)
+            except LoadError as exc:
+                exc.details["no_settings_written"] = True
+                raise
         c._input_off(session)
         c._write(session, "SYST:REM")
         c._input_off(session)
@@ -628,4 +746,6 @@ def execute(trial, *, mode, resource, backend, model_id, confirmed, slot=None, p
             _selection_guard(session)
         else:
             _guard(session)
-        return {**_exercise_and_restore(session, stop, exercise, restore), **marker, "visa": runtime}
+        return {**_exercise_and_restore(session, stop, exercise, restore,
+                                         before_write=budget.before_write if budget is not None else None),
+                **marker, "visa": runtime}

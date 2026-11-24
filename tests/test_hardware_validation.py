@@ -194,6 +194,42 @@ def test_automatic_readback_trials_restore_original_mode_and_settings(monkeypatc
             assert fake.values[key] == value
 
 
+@pytest.mark.parametrize("origin", ["CURR", "VOLT", "RES", "POW", "LIST", "transient", "short", "timer", "slow", "led"])
+def test_isolated_mixed_handoff_then_standalone_guard(monkeypatch, capsys, origin):
+    fake = ValidationFake()
+    fake.range = 6
+    fake.values.update({"INP:TIM": "0", "VOLT:ON": ".5", "VOLT:LATC": "1"})
+    fake.function = origin if origin in {"CURR", "VOLT", "RES", "POW"} else "CURR"
+    if origin == "LIST":
+        fake.mode = "LIST"
+    if origin == "transient":
+        fake.transient = True
+    if origin == "short":
+        fake.short = True
+    if origin == "timer":
+        fake.values["INP:TIM"] = "1"
+    if origin == "slow":
+        fake.values["CURR:SLEW:STAT"] = "1"
+    if origin == "led":
+        fake.function = "RES"
+        fake.values["RES:LED:STAT"] = "1"
+    session(fake, monkeypatch)
+    args = ["contributor-settings", "--trial", "fixed-cc-handoff", "--resource", RESOURCE, "--json"]
+    assert cli.main(args) == 2 and not fake.calls
+    capsys.readouterr()
+    code = cli.main([*args, "--confirm-isolated"])
+    capsys.readouterr()
+    writes = [command for command in fake.calls if "?" not in command]
+    if origin in {"CURR", "VOLT", "RES", "POW"}:
+        assert code == 0 and fake.function == "CURR" and not fake.input
+        assert writes == ([] if origin == "CURR" else ["SYST:REM", "FUNC CURR"])
+        assert cli.main(["contributor-settings", "--trial", "von", "--resource", RESOURCE,
+                         "--json", "--confirm-isolated"]) == 0
+        assert not fake.input
+    else:
+        assert code != 0 and writes == []
+
+
 def test_validation_cr_led_native_settings_and_confirmed_exit(monkeypatch):
     fake = ValidationFake()
     session(fake, monkeypatch)

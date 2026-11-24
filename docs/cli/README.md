@@ -1465,8 +1465,17 @@ procedure authorizes that temporary Transient change, including its VON,
 Slew and Short readbacks. Standalone Auxiliary Controls and LIST CC retain
 the original Fixed CC and Transient OFF guards. Mixed runs must meet the
 same precondition before standalone trials; Readback evidence may be reused
-for the shared Auxiliary cases. Only the scratch-slot trial has a 300-second
-command allowance; automatic LIST Readback retains the 30-second command limit. Without LiveExtensions or
+for the shared Auxiliary cases. When a preceding powered trial leaves a
+non-CC Fixed function, the mixed plan includes an explicit isolated Fixed CC
+handoff before the first standalone trial, without changing setpoints. It
+requires Fixed mode and the existing interlocks OFF; it is not a standalone
+mode-switch permission. Only the scratch-slot trial has a 300-second
+command allowance; automatic LIST Readback retains the 30-second command limit.
+Both LIST trials check the actual remaining command budget against the buffer
+length, configured query delay, observed snapshot cost and restoration reserve
+before writing. Large buffers or slow exchanges may be refused without settings
+writes. A later unexpected transport stall still requires the existing manual
+recovery procedure; time budgeting is not a hardware guarantee. Without LiveExtensions or
 with explicit legacy Expected parameters, Readback remains a read-only
 diagnostic, not automatic acceptance.
 
@@ -1517,7 +1526,12 @@ Input OFF 時自動測試已知設定並還原原始設定及功能，LIST 讀�
 狀態在寫入前拒絕。僅自動 Readback 流程（含 VON／Slew／Short）授權此暫時切換；
 獨立 Auxiliary Controls 與 LIST CC 保留原 Fixed CC 及 Transient OFF 守衛，
 混選亦須符合此條件才執行獨立試驗；共用 Auxiliary 案例可重用 Readback 證據。
-只有 Scratch Slot 試驗適用 300 秒單命令例外，自動 LIST Readback 維持 30 秒。
+若前置接電試驗留下非 CC 的 Fixed 功能，混選計畫在首個獨立試驗前安排明確的隔離
+Fixed CC 交接，不更動設定值，並要求 Fixed 模式及既有互鎖皆為 OFF；
+不擴大獨立試驗的模式切換權限。只有 Scratch Slot 試驗適用 300 秒單命令例外，
+自動 LIST Readback 維持 30 秒。兩者在寫入前依緩衝長度、設定的查詢延遲、
+實際快照成本及還原預留檢查剩餘期限；較長緩衝或較慢通訊可能在設定寫入前拒絕。
+之後若通訊意外停滯，仍須依既有人工復原程序處理，時間預算並非硬體保證。
 未加 LiveExtensions 或明確提供舊有 Expected 參數時為唯讀診斷，
 不代表自動驗收。
 
