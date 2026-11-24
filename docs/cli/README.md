@@ -549,10 +549,20 @@ require the exact IT8812C identity and an explicit USB or ASRL INSTR Resource wi
 System VISA. The new contributor readbacks identify their source as
 `instrument_readback`. Query failures and invalid replies return errors.
 `fixed-slew-status` checks both rates against the current CC Range. An out-of-range
-rate reports the query, observed rate, range and bounds. A rate observed under
-one range does not establish how the instrument retains settings across ranges.
-Slew 超界時會回報查詢、觀測值、Range 與上下限。單一 Range 的讀值
-無法判定切換 Range 後是否保留原設定。
+rate reports the query, observed rate, range and bounds. The programming guide
+for `CURR:RANG` says existing current settings, including slew, that exceed the
+new range are set to its maximum. The tool still checks the actual readback
+against the reported range. To investigate a mismatch, record the range and
+both slew rates before and after the range change with Input OFF.
+[Programming Guide, printed p. 47](https://assets.testequity.com/te1/Documents/pdf/itech/ITECH_IT8800-Programming-Guide-EN.pdf#page=57)
+
+`fixed-slew-status` 依目前 CC Range 檢查正、負 Slew。超界時會回報查詢、
+觀測值、Range 與上下限。Programming Guide 的 `CURR:RANG` 說明指出，
+含 Slew 在內的電流設定若超出新檔範圍，儀器會調整至新檔上限。工具仍以
+儀器回報的 Range 驗證實際讀值。若需釐清不符原因，請保持 Input OFF，
+記錄切換前後的 Range 和兩個 Slew 讀值。
+[Programming Guide，第 47 頁](https://assets.testequity.com/te1/Documents/pdf/itech/ITECH_IT8800-Programming-Guide-EN.pdf#page=57)
+
 For CV, CR and LIST, a valid numeric Range selector without a known label is
 returned as its raw readback with `range: null`. The IT8812C has a single 250 W
 CW range, so CW reports `range: null` and reads the power setpoint without a
