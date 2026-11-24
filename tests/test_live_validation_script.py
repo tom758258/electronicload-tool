@@ -59,7 +59,7 @@ def run_script(tmp_path):
                 "    if ($node.Name -in @('Invoke-ProtectionValidation','Invoke-ProtectionStep',"
                 "'Get-ProtectionWriteProgress','Assert-InputOff',"
                 "'Assert-ReadbackFields','Fail-Case','Invoke-TimerExpiry','Invoke-LiveCommand',"
-                "'Assert-Runtime','Save-Report')) {\n"
+                "'Get-TimerMonotonicNs','Confirm-TimerExpiry','Assert-Runtime','Save-Report')) {\n"
                 "        Invoke-Expression $node.Extent.Text\n"
                 "    }\n}\n" + harness, encoding='utf-8')
             args = [str(harness_path)]
@@ -634,10 +634,20 @@ def test_input_timer_is_also_selectable_with_modes(run_script):
     assert 'trigger-snapshot' not in names and 'set-cc-high' not in names
     assert report['hardware_touched'] is False
     assert all(case['status'] == 'NOT RUN' for case in report['cases'])
+    cases = {case['name']: case for case in report['cases']}
+    assert '10 s cutoff' in cases['timer-on']['condition']
+    assert 'SCPI ON write start' in cases['timer-expiry']['condition']
+
+    preview = run_script(['-PlanOnly', '-Modes', 'input-timer', '-TimerSeconds', '3'])
+    assert preview.returncode == 0, preview.stdout + preview.stderr
+    refused = run_script(['-Modes', 'input-timer', '-TimerSeconds', '3'])
+    assert refused.returncode == 2, refused.stdout + refused.stderr
+    assert 'cutoff applies only to the 5 s Timer trial' in refused.stdout
 
 
 @pytest.mark.parametrize('scenario,checks,status,code', [
-    ('off-after-retry', 2, 'PASS', None),
+    ('off-after-late-write', 3, 'PASS', None),
+    ('external-off', 3, 'FAIL', 'timer_automatic_off_unconfirmed'),
     ('stays-on', 4, 'FAIL', 'timer_expiry_unconfirmed'),
     ('invalid', 1, 'FAIL', 'readback_mismatch'),
     ('late-off', 1, 'FAIL', 'timer_expiry_unconfirmed'),
@@ -645,32 +655,46 @@ def test_input_timer_is_also_selectable_with_modes(run_script):
     ('early-off', 1, 'FAIL', 'timer_expiry_early'),
     ('unconfirmed-timing', 1, 'FAIL', 'timer_timing_unconfirmed'),
 ])
-def test_timer_expiry_requires_off_within_original_window(run_script, scenario, checks, status, code):
+def test_timer_expiry_requires_automatic_off_within_scpi_window(run_script, scenario, checks, status, code):
     result = run_script(['-Scenario', scenario], harness="""
-$script:watch = @{ElapsedMilliseconds=$(if ($Scenario -eq 'late-on-confirmation') { 2001 } else { 500 })}
+$script:watch = @{ElapsedMilliseconds=$(if ($Scenario -eq 'late-on-confirmation') { 9801 } else { 4000 })}
 $script:timerOnStartMs = 0
-$script:timerOnConfirmedMs = 450
-$script:timerOnTiming = @{on_write_started_ns=1200000000L;on_confirmed_ns=1450000000L}
+$script:timerOnConfirmedMs = $script:watch.ElapsedMilliseconds
+$script:timerOnTiming = @{on_write_started_ns=4800000000L;on_confirmed_ns=$(
+    if ($Scenario -eq 'late-on-confirmation') { 10801000000L } else { 5000000000L }
+)}
 $script:checks = 0
 $script:perCommandDeadlineMs = 30000
-$TimerSeconds = '1'
+$TimerSeconds = '5'
 $script:report = @{results=@([ordered]@{name='timer-expiry';status='NOT RUN'})}
+function Get-TimerMonotonicNs { 1000000000L + $script:watch.ElapsedMilliseconds * 1000000L }
 function Start-Sleep([int]$Milliseconds) { $script:watch.ElapsedMilliseconds += $Milliseconds }
 function Assert-Runtime($Result, [string]$Name) {}
-function Invoke-LiveCommand([string]$Command, [string]$CaseName, [string[]]$ExtraArgs, [int]$DeadlineMs) {
+function Read-ValidationAnswer {
+    if ($Scenario -eq 'external-off') { 'EXTERNAL' } else { 'AUTO' }
+}
+function Invoke-LiveCommand([string]$Command, [string]$CaseName, [string[]]$ExtraArgs,
+                            [int]$DeadlineMs, [long]$TimerObservationDeadlineNs) {
+    if ($TimerObservationDeadlineNs -ne 10800000000L) { throw 'Unexpected observation deadline.' }
     $script:checks++
-    $script:watch.ElapsedMilliseconds += $(if ($Scenario -eq 'late-off') { 1001 } else { 100 })
+    $queryStarted = Get-TimerMonotonicNs
+    $script:watch.ElapsedMilliseconds += $(if ($Scenario -eq 'late-off') { 2001 } else { 350 })
     $script:report.results[0]['observed_at_ms'] = $script:watch.ElapsedMilliseconds
-    $off = $Scenario -in @('late-off','early-off') -or ($Scenario -eq 'off-after-retry' -and $script:checks -eq 2)
-    $queryStarted = 1000000000L + ($script:watch.ElapsedMilliseconds - 100) * 1000000L
+    $script:report.results[0]['observed_at_ns'] = Get-TimerMonotonicNs
+    $off = $Scenario -in @('late-off','early-off') -or
+        ($Scenario -in @('off-after-late-write','external-off') -and $script:checks -eq 3)
     $timing = if ($Scenario -ne 'unconfirmed-timing') {
         @{query_started_ns=$queryStarted;query_completed_ns=($queryStarted + 10000000L)}
     }
-    return @{result=@{seconds=1;enabled=(-not $off);timer_timing=$timing;input_state=$(
+    return @{result=@{seconds=5;enabled=(-not $off);timer_timing=$timing;input_state=$(
         if ($off) { 'OFF' } elseif ($Scenario -eq 'invalid') { 'UNKNOWN' } else { 'ON' }
     )}}
 }
-try { Invoke-TimerExpiry @{name='timer-expiry';command='input-timer-status';args=@()} }
+try {
+    Invoke-TimerExpiry @{name='timer-expiry';command='input-timer-status';args=@()}
+    if ($script:report.results[0].status -ne 'NOT RUN') { throw 'Expiry was marked before operator confirmation.' }
+    Confirm-TimerExpiry
+}
 catch { if ($script:report.results[0].status -ne 'FAIL') { throw } }
 $entry = $script:report.results[0]
 @{checks=$script:checks;status=$entry.status;error_code=$entry.error_code} | ConvertTo-Json -Compress
@@ -684,6 +708,7 @@ $entry = $script:report.results[0]
 @pytest.mark.parametrize('scenario,code', [
     ('late-readback', 'timer_expiry_unconfirmed'),
     ('command-timeout', 'deadline_expired'),
+    ('observation-timeout', 'timer_expiry_unconfirmed'),
 ])
 def test_timer_expiry_preserves_cleanup_when_communication_is_trusted(run_script, tmp_path, scenario, code):
     fake_cli = tmp_path / 'fake_timer_cli.py'
@@ -694,8 +719,9 @@ def test_timer_expiry_preserves_cleanup_when_communication_is_trusted(run_script
         'command = sys.argv[1]\n'
         'result = {"visa": {"library": "fake", "manufacturer": "fake"}, "input_state": "OFF"}\n'
         'if command == "input-timer-status":\n'
-        '    time.sleep(1.2)\n'
-        '    result.update(seconds=1, enabled=True, input_state="ON")\n'
+        '    if sys.argv[2] != "late-readback":\n'
+        '        time.sleep(1.2)\n'
+        '    result.update(seconds=5, enabled=True, input_state="ON")\n'
         'print(json.dumps({"ok": True, "result": result}))\n', encoding='utf-8')
     result = run_script(['-Scenario', scenario], extra_env={
         'FAKE_TIMER_PYTHON': sys.executable, 'FAKE_TIMER_CLI': str(fake_cli),
@@ -710,15 +736,22 @@ $script:triggerSelected = $true
 $script:triggerTrusted = $true
 $inputOnAttempted = $true
 $timerEnableAttempted = $true
-$TimerSeconds = '1'
+$TimerSeconds = '5'
 $script:timerOnStartMs = -1000
 $script:timerOnConfirmedMs = -750
-$script:timerOnTiming = @{on_write_started_ns=1L;on_confirmed_ns=2L}
+$script:timerOnTiming = @{on_write_started_ns=1000000000L;on_confirmed_ns=1100000000L}
+$script:clockReads = 0
+function Get-TimerMonotonicNs {
+    $script:clockReads++
+    if ($Scenario -eq 'late-readback' -and $script:clockReads -ge 5) { return 7001000000L }
+    if ($Scenario -eq 'observation-timeout') { return 6600000000L }
+    return 5500000000L
+}
 function New-CliProcessInfo([string[]]$Arguments) {
     $command = $Arguments[2]
     $script:calls += $command
     $start = [Diagnostics.ProcessStartInfo]::new($env:FAKE_TIMER_PYTHON)
-    $start.Arguments = '\"{0}\" {1}' -f $env:FAKE_TIMER_CLI, $command
+    $start.Arguments = '\"{0}\" {1} {2}' -f $env:FAKE_TIMER_CLI, $command, $Scenario
     $start.UseShellExecute = $false
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
@@ -990,7 +1023,10 @@ def test_workflow_only_stays_offline_with_optional_connection(run_script, plan_o
 @pytest.mark.parametrize('mode,connection,resource,plan_only', [
     ('measurement-extensions', 'usb', RESOURCE, True),
     ('list-cc', 'usb', RESOURCE, False),
+    ('list-cc', 'usb', RESOURCE, True),
+    ('list-cc,protection', 'usb', RESOURCE, True),
     ('workflow,auxiliary-controls,list-cc,measurement-extensions', 'asrl', ASRL, False),
+    ('full', 'usb', RESOURCE, True),
     ('full', 'asrl', ASRL, True),
 ])
 def test_explicit_live_extensions_never_use_simulation(run_script, mode, connection, resource, plan_only):
@@ -1009,8 +1045,21 @@ def test_explicit_live_extensions_never_use_simulation(run_script, mode, connect
         assert 'SENS:AVER:COUN 8' in cases['measurement-extensions-average']['planned_writes']
     if mode != 'measurement-extensions':
         assert cases['list-cc-save']['error_code'] == 'live_procedure_unapproved'
-    if mode not in ('measurement-extensions', 'list-cc'):
-        assert '*IDN?' in cases['workflow-measure-log']['queries']
+        assert cases['list-cc-status']['planned_writes'] == []
+        assert cases['list-cc-status']['queries'] == [
+            '*IDN?', 'FUNC:MODE?', 'FUNC?', 'TRAN?', 'LIST:RANG?', 'LIST:STEP?', 'LIST:COUN?',
+            'LIST:LEV? {step}', 'LIST:SLEW? {step}', 'LIST:WID? {step}', 'INP:STAT?',
+        ]
+        if mode in ('full', 'list-cc,protection'):
+            assert cases['list-cc-status']['error_code'] == 'list_requires_separate_live_run'
+            assert list(cases).index('protection-start-state') < list(cases).index('list-cc-status')
+        else:
+            assert 'error_code' not in cases['list-cc-status']
+    if 'workflow-measure-log' in cases:
+        assert cases['workflow-measure-log']['queries'][:2] == ['*IDN?', 'INP:STAT?']
+        assert cases['workflow-measure-until']['queries'] == ['*IDN?', 'INP:STAT?', 'MEAS:VOLT?']
+        assert cases['auxiliary-controls-von-status']['queries'] == ['*IDN?', 'VOLT:ON?', 'VOLT:LATC?']
+        assert cases['auxiliary-controls-short-status']['queries'] == ['*IDN?', 'INP:SHOR:STAT?']
         assert cases['workflow-cc-discharge']['error_code'] == 'live_procedure_unapproved'
 
 

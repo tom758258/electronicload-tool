@@ -724,39 +724,49 @@ approved resource only for a separately authorized physical run:
 .\scripts\live-cli-check.ps1 -Target itech-it8812c -Resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" -InputTimerOnly -Current 0.1 -TimerSeconds 5 -PlanOnly
 ```
 
-The Timer-only script accepts 3–10 seconds (default 5) and positive CC up to
-2 A (default 0.1 A), valid for both CC ranges. The script defaults to an
+PlanOnly accepts 3–10 seconds. The physical trial uses 5 seconds and positive
+CC up to 2 A (default 0.1 A), valid for both CC ranges. The script defaults to an
 operator-managed 5 V / 0.8 A source (overrides: >0 to 18 V / >0 to 2 A).
 The operator must configure and verify the source before physical testing.
 It retains the common approved setup/manual OFF contingency, interactive
 confirmation, runtime checks, process deadlines, redaction and explicit OFF
-cleanup requirements described below.
+cleanup requirements described below. Use an independently armed hardware
+cutoff that limits actual loading to at most 10 seconds. Its clock must start
+no later than the SCPI Input ON write. Confirm the cutoff and the approved
+current-limited source at the Timer Input ON prompt. The 10-second cutoff
+applies to this 5-second trial under its approved conditions.
 
 The planned physical trial confirms Input OFF, explicitly disables Timer,
 sets low-range Fixed CC, configures/enables Timer, reads status while OFF,
 then confirms Input ON through `--hardware-validation input-timer` with complete
 expected `current`, `range` and integer `seconds`. Before and after remote
 transition Core rechecks physical OFF, CC settings, Short/Transient OFF and Timer
-readback. The script begins status checks at the configured duration after CLI
-dispatch and retains the one-second observation window. To accept OFF, the
-Input state query must start at least the configured duration after the
-actual SCPI write began. An OFF reply that completes before this earliest
-possible expiry fails the trial. The CLI records when the write began, when
-ON was confirmed and when each state query began and completed. These times
-bound the observations around the physical transition. A status query
-already in progress keeps the regular CLI command deadline. A late, valid
-response fails the trial and allows the usual cleanup. A communication failure
-in a run that includes Trigger requires independent operator action. The console
-records the elapsed time, Timer state and Input state. `-DebugArtifacts` also
-saves those observations in the private report directory. The script then explicitly
-sends/verifies Input OFF, separately disables Timer and reads final Timer/Input state.
-Failure stops further trials. A possible ON attempt gets one bounded OFF cleanup attempt.
-Timer-disable cleanup is a separate operation after confirmed OFF.
+readback. The script starts polling one second before the earliest possible
+expiry. It accepts an OFF observation if the Input state query started at
+least five seconds after the SCPI Input ON write began and the response arrived
+within six seconds of that write start. An OFF reply completed before five
+seconds fails the trial. Each poll also respects the remaining observation
+window. When the window closes without a valid observation, the script fails
+and enters the existing OFF cleanup immediately. A communication failure in
+a run that includes Trigger requires independent operator action. The CLI
+records the write, ON confirmation and Input query times. `-DebugArtifacts`
+saves these observations privately. The script sends and verifies explicit
+OFF, disables Timer separately and reads the final state. At that point type
+`AUTO` only if Timer switched Input OFF without manual or external intervention
+during the observation. A possible ON attempt gets one bounded OFF cleanup
+attempt under the existing communication rules. Timer-disable cleanup follows
+confirmed OFF.
 
-Timer 保留從 CLI 派送開始計算的原觀察時限。CLI 另記錄 SCPI 寫入開始、
-ON 確認和 Input 狀態查詢的起訖時間。要通過驗收，OFF 查詢必須在
-SCPI 寫入開始後至少經過設定秒數才啟動。若在最早可能到期前就讀到
-OFF，驗證失敗。試驗後仍依既有程序確認 OFF，再獨立停用 Timer。
+`-PlanOnly` 可預覽 3–10 秒，實機試驗使用 5 秒。使用已核准的限流來源、
+在兩檔 CC 範圍內的正電流（預設 0.1 A、上限 2 A），以及獨立的硬體
+停損。限時必須不超過 10 秒，且計時不得晚於 SCPI Input ON 寫入開始。
+在 Timer Input ON 提示確認上述條件，10 秒上限僅適用這組核准條件。
+最早可能到期前一秒開始查詢。OFF 查詢必須在寫入開始後至少 5 秒才
+啟動，且在第 6 秒前收到結果。若在第 5 秒前讀到 OFF 即失敗。第 6 秒
+仍無有效觀察則立即進入既有 OFF 清理。通訊失信時依既有規則處理。
+CLI 記錄 SCPI 寫入、ON 確認及 Input 查詢起訖，`-DebugArtifacts` 將觀察
+資料存於私有目錄。明確確認 OFF、獨立停用 Timer 並讀回最終狀態後，
+只有確認觀察期間由 Timer 自動關閉且未經人工或外部介入，才輸入 `AUTO`。
 
 The validation-only Core/CLI scope uses `INP:TIM:DEL <seconds>`, `INP:TIM 0|1`,
 `INP:TIM:DEL?` and `INP:TIM?` from the
@@ -1185,10 +1195,14 @@ waiting, reading the simulator, or creating files. CLI runs return one JSON
 object. Press Ctrl+C to interrupt a CLI run. For a separately authorized run,
 the standalone CLI can execute `measure-log` and `measure-until` with
 `--hardware-validation workflow` and an explicit System VISA resource.
-Both use one verified session for read-only measurements. See the
+Both verify the instrument identity and confirm Input OFF in the same session
+before read-only sampling. See the
 [contributor extension selection](#contributor-extension-selection).
 The simulator uses a fixed 12 V source, so a discharge simulation with a
 3 V cutoff ends at the timeout, capacity cutoff, or sample limit.
+
+兩個 Contributor 量測指令都在取樣的同一個 Session 驗明身分，
+並確認 Input OFF 後才開始唯讀量測。
 
 | Command | Required options | Optional options |
 | --- | --- | --- |
@@ -1349,8 +1363,9 @@ Fixed, Transient, Trigger and TRACE also keep their own post-setup comparisons.
 
 Select `-LiveExtensions` with one or more extension modes or `-Modes full`
 to request the contributor hardware cases. Provide an explicit `-Resource`
-and matching `-Connection`. Use `-PlanOnly` to review CLI operations without
-opening VISA. Execution requires the interactive physical validation procedure.
+and matching `-Connection`. Use `-PlanOnly` to review CLI operations and
+the extension SCPI previews without opening VISA. Execution requires the
+interactive physical validation procedure.
 The hardware case results carry `execution: live`.
 
 With Input OFF, `workflow` verifies two scheduled measurement samples and
@@ -1358,7 +1373,11 @@ completion of a voltage condition at 1 V or above. `measurement-extensions`
 queries native Min/Max and Discharge values and verifies Average set to 8.
 The Average case leaves the count set to 8 after operator confirmation.
 `auxiliary-controls` can query VON and Short state, and `list-cc` can read
-an already configured, selected LIST with Input OFF. Powered
+an already configured, selected LIST with Input OFF. The LIST preview repeats
+each indexed query for the step count read from the instrument. Full and any
+selection that includes Protection must start in Fixed CC, CV or CW. They leave
+the LIST CC readback `NOT RUN` with a reason. Use `-Modes list-cc` separately
+with LIST selected for that readback. Powered
 workflows, VON/Short/Slew changes and the LIST CC configuration and slot
 cycle require their own approved operating procedures. If a selected case
 has no executable procedure, it stays `NOT RUN` with a reason and the
@@ -1366,14 +1385,17 @@ requested hardware validation remains incomplete.
 
 使用 `-LiveExtensions` 搭配單選、多選或 `-Modes full`，明確選擇
 Contributor 實機項目。指定與 `-Connection` 相符的 `-Resource`，
-可用 `-PlanOnly` 先檢視 CLI 操作，預覽不會開啟 VISA。
+可用 `-PlanOnly` 先檢視 CLI 操作與擴充模式的 SCPI 預覽，預覽不會開啟 VISA。
 執行時需遵循互動式實機驗證流程，硬體項目會標記 `execution: live`。
 
 Input OFF 時，`workflow` 驗證定時取樣兩次及電壓達到 1 V 的條件。
 `measurement-extensions` 查詢原生 Min/Max 與放電讀值，經操作者
 確認後將 Average 設為 8、驗證讀回並保留設定。`auxiliary-controls`
 可觀察 VON 和 Short 狀態，`list-cc` 可在 Input OFF 時讀回已設定並
-選取的 LIST。CC 帶載流程、VON／Short／Slew 設定變更和 LIST CC
+選取的 LIST。LIST 預覽的索引查詢依儀器讀出的步數逐步執行。Full 或含
+Protection 的混選從 Fixed CC、CV 或 CW 開始，LIST CC 讀回會保留為
+`NOT RUN` 並列原因。要讀回該案例，請在 LIST 已選取時單獨執行
+`-Modes list-cc`。CC 帶載流程、VON／Short／Slew 設定變更和 LIST CC
 設定與記憶槽操作均需各自核准的操作流程。沒有可執行
 流程的案例會保留為 `NOT RUN` 並列出原因，該次實機驗證維持未完成。
 
@@ -1414,7 +1436,7 @@ source limit is not a measured value or a guarantee of DUT safety.
 | `-RiseSlew` / `-FallSlew` | `0.1` / `0.1` | A/µs, Transient CC; Auto High trial uses 0.5 A/µs |
 | `-WidthA` / `-WidthB` | `0.001` / `0.002` | Seconds, Continuous |
 | `-PulseWidth` | `0.001` | Seconds, Pulse |
-| `-TimerSeconds` | `5` | Seconds, Input Timer mode (allowed integer 3–10) |
+| `-TimerSeconds` | `5` | Input Timer seconds (5 for LIVE, integer 3–10 for PlanOnly) |
 | `-TriggerObservationSeconds` / `-TriggerMaxOnSeconds` | `15` / `60` | Seconds per Trigger trial; includes explicit OFF deadline |
 | `-TriggerIntervalSeconds` | `5` | Seconds, Trigger TIMER source |
 | `-TriggerListWidthA` / `-TriggerListWidthB` | `2` / `2` | Seconds, finite LIST dwell |

@@ -28,6 +28,20 @@ SETPOINT_LIMITS = {
 }
 FIXED_FIELDS = {"CC": "current_a", "CV": "voltage_v", "CR": "resistance_ohm", "CW": "power_w"}
 SHORT_QUERY = "INP:SHOR:STAT?"
+VON_THRESHOLD_QUERY = "VOLT:ON?"
+VON_LATCH_QUERY = "VOLT:LATC?"
+LIST_HEADER_QUERIES = ("LIST:RANG?", "LIST:STEP?", "LIST:COUN?")
+LIST_STEP_QUERIES = {
+    "current_a": "LIST:LEV? {}",
+    "slew_a_per_us": "LIST:SLEW? {}",
+    "width_s": "LIST:WID? {}",
+}
+CONTROL_STATUS_QUERIES = {
+    "von-status": (VON_THRESHOLD_QUERY, VON_LATCH_QUERY),
+    "short-status": (SHORT_QUERY,),
+    "list-status": ("FUNC:MODE?", "FUNC?", "TRAN?", *LIST_HEADER_QUERIES,
+                    *(query.format("{step}") for query in LIST_STEP_QUERIES.values()), "INP:STAT?"),
+}
 
 
 def _selection(session):
@@ -167,28 +181,30 @@ def _list_integer(session, query, minimum, maximum):
 
 
 def _list_configuration(session, *, summary=False):
-    raw = c._decimal_readback(session, "LIST:RANG?")
+    range_query, count_query, repeat_query = LIST_HEADER_QUERIES
+    raw = c._decimal_readback(session, range_query)
     if not 0 <= raw <= c.RANGE_LIMITS["high"]:
         raise LoadError("invalid_range_readback", "LIST range is outside model limits.", 3,
-                        query="LIST:RANG?")
-    count = _list_integer(session, "LIST:STEP?", 2, 84)
-    repeat = _list_integer(session, "LIST:COUN?", 1, 65536)
+                        query=range_query)
+    count = _list_integer(session, count_query, 2, 84)
+    repeat = _list_integer(session, repeat_query, 1, 65536)
     ranges = {value: name for name, value in c.RANGE_LIMITS.items()}
     metadata = {"range": ranges.get(raw), "range_readback_a": float(raw),
                 "repeat_count": repeat, "step_count": count}
     if summary:
         return metadata
     range_name = metadata["range"]
-    fields = (
-        ("current_a", "LIST:LEV", _bounds(SETPOINT_LIMITS["CC"], range_name)),
-        ("slew_a_per_us", "LIST:SLEW", _bounds(c.SLEW_LIMITS, range_name)),
-        ("width_s", "LIST:WID", c.LIST_WIDTH_LIMITS),
-    )
+    limits = {
+        "current_a": _bounds(SETPOINT_LIMITS["CC"], range_name),
+        "slew_a_per_us": _bounds(c.SLEW_LIMITS, range_name),
+        "width_s": c.LIST_WIDTH_LIMITS,
+    }
     steps = []
     for index in range(1, count + 1):
         step = {}
-        for field, stem, (minimum, maximum) in fields:
-            query = f"{stem}? {index}"
+        for field, template in LIST_STEP_QUERIES.items():
+            query = template.format(index)
+            minimum, maximum = limits[field]
             value = c._decimal_readback(session, query)
             if not minimum <= value <= maximum:
                 raise LoadError("invalid_response", "LIST step readback is outside model limits.", 3,
@@ -220,11 +236,11 @@ def _list_status(session, selection, *, summary=False):
 
 
 def von_status(session):
-    voltage = c._decimal_readback(session, "VOLT:ON?")
+    voltage = c._decimal_readback(session, VON_THRESHOLD_QUERY)
     if not 0 <= voltage <= c.VON_MAX_VOLTAGE:
         raise LoadError("invalid_response", "VON threshold is outside model limits.", 3,
-                        query="VOLT:ON?")
-    return {"threshold_v": str(voltage), "latch": c._flag(session, "VOLT:LATC?").lower()}
+                        query=VON_THRESHOLD_QUERY)
+    return {"threshold_v": str(voltage), "latch": c._flag(session, VON_LATCH_QUERY).lower()}
 
 
 def snapshot(session, command):
@@ -279,7 +295,9 @@ def execute(command, *, mode, resource, backend="system", model_id=MODEL_ID,
         raise LoadError("unsupported_live_scope", "Product LIVE is not open for this readback.")
     marker = ({"validation_only": True, "validation_scope": SCOPE} if hardware_validation else {})
     if mode == "dry-run":
-        return {"command": command, "hardware_access": False, "planned_writes": [], **marker}
+        queries = CONTROL_STATUS_QUERIES.get(command)
+        return {"command": command, "hardware_access": False, "planned_writes": [], **marker,
+                **({"queries": ["*IDN?", *queries]} if queries else {})}
     if mode == "simulate":
         require_trusted_session(simulator)
         return {**snapshot(simulator or ControlSimulator(), command), "state_source": "simulate"}

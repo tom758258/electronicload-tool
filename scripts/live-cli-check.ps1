@@ -578,6 +578,7 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
                             [string[]]$ExtraArgs = @(),
                             [int]$DeadlineMs = 30000,
                             [int]$TerminationMs = 5000,
+                            [long]$TimerObservationDeadlineNs = 0,
                             [string]$ExpectedError,
                             [switch]$AllowCrHandoff,
                             [switch]$AllowProtectionDefaultRefusal,
@@ -610,12 +611,21 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
     $terminationAttempted = $false
     if ($script:slowRiseEnableAttempted) { $script:slowRiseCommunicationTrusted = $false }
     try {
+        if ($TimerObservationDeadlineNs -and (Get-TimerMonotonicNs) -ge $TimerObservationDeadlineNs) {
+            Fail-Case $CaseName 'timer_expiry_unconfirmed' 'The Timer observation window closed before the next query.'
+        }
         [void]$process.Start()
         $started = $true
         $script:report.hardware_touched = $true
         $entry.status = 'FAIL'
         $stdout = $process.StandardOutput.ReadToEndAsync()
         $stderr = $process.StandardError.ReadToEndAsync()
+        $timerLimited = $false
+        if ($TimerObservationDeadlineNs) {
+            $observationMs = [Math]::Floor(($TimerObservationDeadlineNs - (Get-TimerMonotonicNs)) / 1000000)
+            $timerLimited = $observationMs -le $remaining
+            $remaining = [Math]::Max(0, [Math]::Min($remaining, $observationMs))
+        }
         if (-not $process.WaitForExit([int]$remaining)) {
             if ($traceCase) { $script:traceCommunicationUntrusted = $true }
             if ($script:triggerSelected) { $script:triggerTrusted = $false }
@@ -626,11 +636,14 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
                 $output = $stdout.GetAwaiter().GetResult()
                 $diagnostic = $stderr.GetAwaiter().GetResult()
             }
-            $entry['error_code'] = 'deadline_expired'
+            $entry['error_code'] = if ($timerLimited) { 'timer_expiry_unconfirmed' } else { 'deadline_expired' }
             throw "$CaseName exceeded its deadline; physical Input state is unconfirmed."
         }
         $exitStatus = [string]$process.ExitCode
-        if ($CaseName -ceq 'timer-expiry') { $entry['observed_at_ms'] = $script:watch.ElapsedMilliseconds }
+        if ($CaseName -ceq 'timer-expiry') {
+            $entry['observed_at_ns'] = Get-TimerMonotonicNs
+            $entry['observed_at_ms'] = $script:watch.ElapsedMilliseconds
+        }
         $output = $stdout.GetAwaiter().GetResult()
         $diagnostic = $stderr.GetAwaiter().GetResult()
         try {
@@ -822,27 +835,33 @@ function Assert-InputOff([object]$Result, [string]$CaseName) {
     }
 }
 
+function Get-TimerMonotonicNs {
+    # Stopwatch and Python monotonic_ns use the system-wide monotonic clock
+    # (QueryPerformanceCounter on Windows, CLOCK_MONOTONIC on Linux).
+    [long]([decimal][Diagnostics.Stopwatch]::GetTimestamp() * 1000000000L /
+        [Diagnostics.Stopwatch]::Frequency)
+}
+
 function Invoke-TimerExpiry($Step) {
-    # Keep the existing process window for cleanup. Only the Core timestamps
-    # can establish the earliest possible expiry after the SCPI write.
-    $firstCheck = $script:timerOnStartMs + [int]$TimerSeconds * 1000
-    $deadline = $firstCheck + 1000
-    $delay = $firstCheck - $script:watch.ElapsedMilliseconds
-    if ($delay -gt 0) { Start-Sleep -Milliseconds $delay }
     $entry = $script:report.results | Where-Object { $_.name -ceq $Step.name }
     $observations = @()
     try {
         $on = $script:timerOnTiming
+        $nowNs = Get-TimerMonotonicNs
         if ($null -eq $on.on_write_started_ns -or $null -eq $on.on_confirmed_ns -or
-            $on.on_write_started_ns -le 0 -or $on.on_confirmed_ns -lt $on.on_write_started_ns) {
+            $on.on_write_started_ns -le 0 -or $on.on_confirmed_ns -lt $on.on_write_started_ns -or
+            $on.on_confirmed_ns -gt $nowNs) {
             Fail-Case $Step.name 'timer_timing_unconfirmed' 'The SCPI Input ON timing was not confirmed.'
         }
         $earliestExpiryNs = $on.on_write_started_ns + [long][int]$TimerSeconds * 1000000000L
-        while ($script:watch.ElapsedMilliseconds -lt $deadline) {
-            # An out-of-window observation fails the trial. The normal command deadline
-            # still determines whether the exchange can be trusted for cleanup.
+        $deadlineNs = $earliestExpiryNs + 1000000000L
+        # Start one second before expiry so a definite early OFF can be rejected.
+        $delay = [Math]::Floor(($earliestExpiryNs - 1000000000L - $nowNs) / 1000000)
+        if ($delay -gt 0) { Start-Sleep -Milliseconds $delay }
+        while ((Get-TimerMonotonicNs) -lt $deadlineNs) {
             $result = Invoke-LiveCommand -Command $Step.command -CaseName $Step.name `
-                -ExtraArgs $Step.args -DeadlineMs $script:perCommandDeadlineMs
+                -ExtraArgs $Step.args -DeadlineMs $script:perCommandDeadlineMs `
+                -TimerObservationDeadlineNs $deadlineNs
             Assert-Runtime $result $Step.name
             $status = $result.result
             $now = $entry.observed_at_ms
@@ -861,10 +880,11 @@ function Invoke-TimerExpiry($Step) {
                 $status.input_state -cnotin @('ON','OFF')) {
                 Fail-Case $Step.name 'readback_mismatch' 'Timer expiry status did not match the configured trial.'
             }
-            if ($now -gt $deadline) { break }
+            if ($entry.observed_at_ns -gt $deadlineNs) { break }
             if ($null -eq $query.query_started_ns -or $null -eq $query.query_completed_ns -or
                 $query.query_started_ns -lt $on.on_confirmed_ns -or
-                $query.query_completed_ns -lt $query.query_started_ns) {
+                $query.query_completed_ns -lt $query.query_started_ns -or
+                $query.query_completed_ns -gt $entry.observed_at_ns) {
                 Fail-Case $Step.name 'timer_timing_unconfirmed' 'The SCPI Input state query timing was not confirmed.'
             }
             # Post-expiry Timer enable retention is reported as observed.
@@ -873,11 +893,10 @@ function Invoke-TimerExpiry($Step) {
                     Fail-Case $Step.name 'timer_expiry_early' 'Input was observed OFF before the earliest possible Timer expiry.'
                 }
                 if ($query.query_started_ns -ge $earliestExpiryNs) {
-                    $entry.status = 'PASS'
                     return
                 }
             }
-            $delay = [Math]::Min(150, $deadline - $script:watch.ElapsedMilliseconds)
+            $delay = [Math]::Min(150, [Math]::Floor(($deadlineNs - (Get-TimerMonotonicNs)) / 1000000))
             if ($delay -gt 0) { Start-Sleep -Milliseconds $delay }
         }
         Fail-Case $Step.name 'timer_expiry_unconfirmed' 'Input OFF was not confirmed within the Timer validation window.'
@@ -892,6 +911,16 @@ function Invoke-TimerExpiry($Step) {
                 [Text.UTF8Encoding]::new($false))
         }
     }
+}
+
+function Confirm-TimerExpiry {
+    $answer = Read-ValidationAnswer 'After explicit OFF, type AUTO and press Enter only if Timer switched Input OFF without manual or external intervention during the observation. Otherwise press Enter to fail the trial' 'timer-expiry' -DiscardPendingKeys
+    if ($answer -cne 'AUTO') {
+        Fail-Case 'timer-expiry' 'timer_automatic_off_unconfirmed' 'Automatic OFF without intervention was not confirmed.'
+    }
+    $entry = $script:report.results | Where-Object { $_.name -ceq 'timer-expiry' }
+    $entry.status = 'PASS'
+    Write-Host 'PASS timer-expiry'
 }
 
 function Assert-ReadbackFields($Actual, [hashtable]$Expected, [string]$Name) {
@@ -1787,10 +1816,10 @@ try {
             $scope = @('--hardware-validation','workflow')
             $planned += @(
                 @{name='workflow-measure-log';command='measure-log';args=$scope + @('--interval-s','0.1','--count','2');
-                  expected=@{stop_reason='completed';sample_count=2};execution='live'},
+                  expected=@{stop_reason='completed';sample_count=2;input_state='OFF'};execution='live'},
                 @{name='workflow-measure-until';command='measure-until';args=$scope + @('--interval-s','0.1',
                   '--metric','voltage','--operator','ge','--threshold','1','--timeout-s','2');
-                  expected=@{stop_reason='condition_met'};execution='live';
+                  expected=@{stop_reason='condition_met';input_state='OFF'};execution='live';
                   condition='Observed voltage at least 1 V with Input OFF'}
             )
             $pendingLive += @(
@@ -1820,9 +1849,16 @@ try {
             )
         }
         if ('list-cc' -in $selectedModes) {
-            $planned += @{name='list-cc-status';command='list-status';args=$readbackScope;execution='live';
+            $listStatus = @{name='list-cc-status';command='list-status';args=$readbackScope;execution='live';
                 readback_expected=@{selected=$true;input_state='OFF'};check_readback_settings=$true;
-                condition='Read an existing configured LIST with Input OFF'}
+                condition='Read an existing configured LIST with Input OFF; repeat each step query for the reported LIST:STEP? count'}
+            if ($protectionSelected) {
+                $listStatus.condition = 'Protection requires Fixed at startup. Run LIST status separately with an existing configured LIST, Input OFF, and one query per reported step for each step field.'
+                $listStatus.not_run_reason = 'list_requires_separate_live_run'
+                $pendingLive += $listStatus
+            } else {
+                $planned += $listStatus
+            }
             $pendingLive += @(
                 @{name='list-cc-setup';command='set-list-cc';condition='Requires approved working-buffer replacement and release procedure'},
                 @{name='list-cc-save';command='list-save';condition='Requires an operator-approved scratch slot and verified overwrite behavior'},
@@ -1861,9 +1897,10 @@ try {
             @{name='timer-setup';command='set-input-timer';args=($timerScope + @('--seconds', $TimerSeconds))},
             @{name='timer-enable';command='input-timer-enable';args=$timerScope},
             @{name='timer-status-off';command='input-timer-status';args=$timerScope},
-            @{name='timer-on';command='input-on';args=($timerScope + @('--confirm', '--validation-settings-json', $timerExpected))},
+            @{name='timer-on';command='input-on';args=($timerScope + @('--confirm', '--validation-settings-json', $timerExpected));
+              condition='LIVE requires the 5 s Timer and an independent 10 s cutoff armed no later than the SCPI ON write'},
             @{name='timer-expiry';command='input-timer-status';args=$timerScope;
-              condition='confirm Input OFF by Timer seconds plus one second from ON dispatch'},
+              condition='Observe Input OFF by Timer seconds plus one second from the SCPI ON write start; after explicit OFF, confirm no manual or external intervention'},
             @{name='timer-off';command='input-off';args=@()},
             @{name='timer-disable';command='input-timer-disable';args=$timerScope},
             @{name='timer-status-disabled';command='input-timer-status';args=$timerScope},
@@ -2123,9 +2160,9 @@ try {
         if ($_.name -like 'workflow-*') { $entry['execution'] = 'simulate' }
         if ($_.ContainsKey('execution')) { $entry['execution'] = $_.execution }
         if ($_ -in $pendingLive) {
-            $entry.arguments = @()
+            if (-not $_.ContainsKey('args')) { $entry.arguments = @() }
             $entry['execution'] = 'live'
-            $entry['error_code'] = 'live_procedure_unapproved'
+            $entry['error_code'] = if ($_.not_run_reason) { $_.not_run_reason } else { 'live_procedure_unapproved' }
         }
         if ($_.ContainsKey('expected_error')) { $entry['expected_error'] = $_.expected_error }
         if ($_.ContainsKey('condition')) { $entry['condition'] = $_.condition }
@@ -2136,7 +2173,8 @@ try {
     $plannedRanges = @{}
     $offlinePlans = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
     foreach ($step in $allSteps) {
-        if ($step.command -in @('operator-observation','pytest') -or $step -in $pendingLive) { continue }
+        if ($step.command -in @('operator-observation','pytest') -or
+            ($step -in $pendingLive -and -not $step.ContainsKey('args'))) { continue }
         $extras = @($step.args)
         $noConnection = $step.execution -in @('dry-run','simulate') -or
             ($step.name -like 'workflow-*' -and $step.execution -cne 'live')
@@ -2287,6 +2325,13 @@ try {
         }
         $phase = 'plan'
     }
+    if ($timerSelected -and [int]$TimerSeconds -ne 5) {
+        $report.status = 'BLOCKED'
+        Save-Report
+        Show-Summary
+        Write-Host 'BLOCKED: the independent 10 s hardware cutoff applies only to the 5 s Timer trial. Review other settings with PlanOnly.'
+        exit 2
+    }
     if ([Console]::IsInputRedirected -or -not [Environment]::UserInteractive) {
         $report.status = 'BLOCKED'
         Save-Report
@@ -2393,14 +2438,19 @@ try {
             }
         }
         Write-Host "Running $($step.name)..."
+        if ($step.name -ceq 'timer-on') {
+            $answer = Read-ValidationAnswer 'Verify the approved current-limited source and arm the independent 10 s hardware cutoff before SCPI Input ON. Never start the cutoff clock after the ON write. Press Enter only when ready' $step.name -DiscardPendingKeys
+            if ($null -eq $answer -or $answer -cne '') {
+                Fail-Case $step.name 'operator_confirmation_required' 'The Timer hardware cutoff was not confirmed.'
+            }
+            $timerOnStartMs = $watch.ElapsedMilliseconds
+        }
         # Mark uncertainty before dispatch, including subprocess/JSON/runtime failures.
         if ($step.command -eq 'input-on') { $inputOnAttempted = $true }
-        if ($step.name -eq 'timer-on') { $timerOnStartMs = $watch.ElapsedMilliseconds }
         if ($step.command -eq 'input-timer-enable') { $timerEnableAttempted = $true }
         if ($step.command -eq 'current-slow-rise-enable') { $slowRiseEnableAttempted = $true }
         if ($step.name -eq 'timer-expiry') {
             Invoke-TimerExpiry $step
-            Write-Host "PASS $($step.name)"
             continue
         }
         if ($step.command -eq 'transient-enable') {
@@ -2523,6 +2573,7 @@ try {
         }
         if ($step.command -eq 'input-off') { $inputOnAttempted = $false }
         if ($step.command -eq 'input-timer-disable') { $timerEnableAttempted = $false }
+        if ($step.name -ceq 'timer-final-state') { Confirm-TimerExpiry }
         if ($step.command -eq 'transient-disable') { $transientEnableAttempted = $false }
         if ($step.name -eq 'slow-rise-status-disabled') { $slowRiseEnableAttempted = $false }
         if ($step.name -eq 'input-state') { $report.prechecks.input_off = 'PASS' }

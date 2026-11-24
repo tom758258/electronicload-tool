@@ -537,9 +537,16 @@ and ASRL. The extension modes run focused Core and CLI tests for native
 measurements and Average, VON/Short/CC Slew, or LIST CC setup/Save/Recall/Exit.
 Check `-LiveExtensions` for explicit single, mixed and Full selection and
 verify that it never falls back to the offline cases. Exercise the contributor
-read-only sampling and measurements and the Input OFF guard for Average with
-recording Fake VISA.
-For Timer expiry, use a controlled clock to verify the retry window, SCPI
-timing evidence and Input OFF requirement, and select the affected Fake VISA cases in
-`tests/test_input_timer.py`. Physical expiry remains a separately authorized
-check.
+read-only sampling and measurements and the Input OFF guards for Workflow and
+Average with recording Fake VISA. Verify VON, Short and indexed LIST queries
+in PlanOnly and the separate LIST readback required when Protection is selected.
+For Timer expiry, use a controlled clock to verify the window relative to the
+SCPI write start, early OFF refusal and operator confirmation after cleanup.
+Select affected Fake VISA cases in `tests/test_input_timer.py`. Physical expiry
+remains a separately authorized check with an independent hardware cutoff.
+
+離線檢查使用虛構 Resource 並阻擋實體 VISA。以 Fake VISA 驗證 Workflow
+和 Average 的 Input OFF 前置，並核對 PlanOnly 的 VON、Short 及 LIST 索引
+查詢。混選含 Protection 時，LIST 讀回須分開執行。Timer 使用可控制的
+時鐘驗證以 SCPI 寫入開始為基準的時限、過早 OFF 拒絕，以及清理完畢後
+由操作者確認。實機到期驗證仍需另行授權及獨立的硬體停損。

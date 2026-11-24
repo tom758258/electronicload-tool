@@ -12,7 +12,7 @@ from . import control
 from .errors import LoadError
 from .hardware_validation import sequence_fixed_setup, sequence_input_on
 from .identity import MODEL_ID, parse_identity
-from .readonly import BASIC_MEASUREMENTS, read_measurement
+from .readonly import BASIC_MEASUREMENTS, QUERIES, read_measurement
 from .simulator import ControlSimulator
 from .visa import (open_request_session, open_session, require_trusted_session,
                    validate_request_connection)
@@ -293,7 +293,7 @@ def _wait_load(stop, duration_s):
     return "duration_elapsed"
 
 
-def _run(session, command, settings, stop, result, quantities, record_row):
+def _run(session, command, settings, stop, result, quantities, record_row, *, require_input_off=False):
     if command in CC_COMMANDS:
         def run_load():
             if command == "cc-timed-load":
@@ -305,6 +305,10 @@ def _run(session, command, settings, stop, result, quantities, record_row):
         _check_stop(stop)
         require_trusted_session(session)
         parse_identity(control._query(session, "*IDN?"))
+        if require_input_off:
+            result.update(read_measurement(session, "input-state"))
+            if result["input_state"] != "OFF":
+                raise LoadError("input_not_off", "Input must be confirmed OFF before Workflow sampling.")
         result["stop_reason"] = _measure(session, command, settings, quantities, stop, result, record_row)
 
 
@@ -330,7 +334,7 @@ def execute(command, *, mode="live", arguments, model_id=MODEL_ID, backend="syst
                               for key, value in settings.items() if key not in {"confirm_input_on", "csv"}},
                 "csv_requested": "csv" in settings, "hardware_access": False,
                 "input_on_requires_confirmation": command in CC_COMMANDS, **marker,
-                **({"queries": ["*IDN?", *(BASIC_MEASUREMENTS[item][1] for item in quantities)]}
+                **({"queries": [*QUERIES["input-state"], *(BASIC_MEASUREMENTS[item][1] for item in quantities)]}
                    if contributor else {})}
 
     if simulator is not None and not isinstance(simulator, ControlSimulator):
@@ -353,7 +357,7 @@ def execute(command, *, mode="live", arguments, model_id=MODEL_ID, backend="syst
             _run(session, command, settings, stop, result, quantities, record_row)
             return
         with open_request_session(resource, asrl, open_session) as (session, runtime):
-            _run(session, command, settings, stop, result, quantities, record_row)
+            _run(session, command, settings, stop, result, quantities, record_row, require_input_off=True)
         result["visa"] = runtime
 
     started = monotonic()

@@ -443,11 +443,21 @@ def test_workflow_contributor_cli_uses_one_readonly_visa_session(fake_visa, caps
     assert main([*args, "--simulate"]) == 2
     assert not fake_visa.calls
     capsys.readouterr()
+    assert main(args) == 2
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "input_not_off"
+    assert [call for call in fake_visa.calls if isinstance(call, str) and call.endswith("?")] == [
+        "*IDN?", "INP:STAT?",
+    ]
+    assert fake_visa.calls.count("open_resource") == fake_visa.calls.count("session_close") == 1
+
+    fake_visa.calls.clear()
+    fake_visa.responses["INP:STAT?"] = "0"
     assert main(args) == 0
     result = json.loads(capsys.readouterr().out)["result"]
-    assert result["validation_only"] and result["sample_count"] == count
+    assert result["validation_only"] and result["sample_count"] == count and result["input_state"] == "OFF"
     assert result["stop_reason"] == stop_reason and result["last_measurement"]["voltage_v"] == 12.0
     assert fake_visa.calls.count("*IDN?") == 1
+    assert fake_visa.calls.index("*IDN?") < fake_visa.calls.index("INP:STAT?") < fake_visa.calls.index("MEAS:VOLT?")
     assert fake_visa.calls.count("MEAS:VOLT?") == count
     assert fake_visa.calls.count("open_resource") == fake_visa.calls.count("session_close") == 1
 
