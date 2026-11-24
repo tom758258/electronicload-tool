@@ -409,8 +409,15 @@ def _list_readback_trial(session):
         write("FUNC:MODE LIST")
         observed = readback.snapshot(session, "list-status")
         configuration = observed["configuration"]
+        # Public readback preserves width and slew as decimal strings.
+        # Normalize only this trusted snapshot, not caller-provided LIST JSON.
+        actual = {key: configuration[key] for key in c.LIST_FIELDS}
+        actual["steps"] = [
+            {field: c._decimal(value) for field, value in step.items()}
+            for step in configuration["steps"]
+        ]
         if (not observed["selected"] or observed["input_state"] != "OFF"
-                or c.validate_list_cc({key: configuration[key] for key in c.LIST_FIELDS}) != expected):
+                or c.validate_list_cc(actual) != expected):
             raise _mismatch("LIST readback did not match the test buffer.")
         return {"observed": observed, "expected_width_s": str(candidate)}
 

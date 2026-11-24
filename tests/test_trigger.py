@@ -120,17 +120,31 @@ def test_contributor_list_requires_independent_recall_then_restores_working_buff
 
 
 
-def test_readback_list_buffer_without_slot_or_trigger(monkeypatch, capsys):
+@pytest.mark.parametrize("ignored_width", [False, True])
+def test_readback_list_buffer_without_slot_or_trigger(monkeypatch, capsys, ignored_width):
     fake = TriggerFake()
     fake.range = 6
     fake.list_steps = {f"LIST:{key}? {index}": value for index in (1, 2)
-                       for key, value in (("LEV", ".2"), ("SLEW", ".1"), ("WID", "0.3"))}
+                       for key, value in (("LEV", ".2"), ("SLEW", "0.1234567890123456789"),
+                                          ("WID", "0.3000000000000000001"))}
     original = fake.list_steps.copy()
+    if ignored_width:
+        fake.ignore = "LIST:WID 1,1"
     session(fake, monkeypatch)
     args = ["contributor-settings", "--trial", "list", "--resource", RESOURCE, "--json", "--confirm-isolated"]
-    assert cli.main(args) == 0
-    result = json.loads(capsys.readouterr().out)["result"]
-    assert result["observed"]["selected"] and result["restored"]
+    status = cli.main(args)
+    outcome = json.loads(capsys.readouterr().out)
+    if ignored_width:
+        assert status == 3 and outcome["error"]["code"] == "readback_mismatch"
+        assert outcome["error"]["details"]["restored"]
+    else:
+        assert status == 0
+        result = outcome["result"]
+        assert result["observed"]["selected"] and result["restored"]
+        steps = result["observed"]["configuration"]["steps"]
+        assert steps[0]["width_s"] == "1"
+        assert steps[1]["width_s"] == original["LIST:WID? 2"]
+        assert steps[0]["slew_a_per_us"] == original["LIST:SLEW? 1"]
     assert fake.list_steps == original and fake.mode == "FIX" and not fake.input
     assert not any(call.startswith(("LIST:SAV", "LIST:RCL", "INP ON", "TRIG")) and "?" not in call
                    for call in fake.calls)
