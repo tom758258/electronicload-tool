@@ -6,7 +6,7 @@ Standalone CLI and bundled Common v3 Worker. The initial supported model is
 ITECH IT8812C (`itech-it8812c`).
 
 Product LIVE is limited to the IT8812C scope listed in
-[Product LIVE Support](docs/core/supported-models.md#product-live-support--product-live-支援範圍).
+[Product LIVE Support](docs/core/supported-models.md#product-live-support).
 Core enforces model and range
 limits without optional Safety Config. Input ON requires deliberate confirmation.
 Simulation and dry-run never grant hardware authorization.
@@ -14,7 +14,7 @@ Simulation and dry-run never grant hardware authorization.
 ## Features
 
 - Read-only identification, Input state and measurements for the exact supported IT8812C Product LIVE scope.
-- [RS-232 contributor validation](docs/cli/README.md#asrl-contributor-validation--asrl-貢獻者驗證) for the shared IT8812C validation matrix over an explicit ASRL INSTR resource.
+- [RS-232 contributor validation](docs/cli/README.md#asrl-contributor-validation) for the shared IT8812C validation matrix over an explicit ASRL INSTR resource.
 - Fixed CC and deliberate Input ON/OFF with the existing hardware safety gates.
 - Offline Fixed CV/CR/CW and software Auto Range for Fixed CC/CV/CR.
 - Offline Fixed CC paired optional Slew, standalone VON setup/status, and Fixed-mode Short ON/OFF/status.
@@ -40,9 +40,6 @@ CLI. WebUI is not implemented. The bundled Worker is part of the CLI package and
 Core currently implements one model, ITECH IT8812C. The multi-model design
 applies when a second physical model is selected. See
 [Supported Models](docs/core/supported-models.md).
-
-Core 目前採 ITECH IT8812C 單型號實作。選定第二個實際型號後，才導入多型號設計。
-詳見[支援型號](docs/core/supported-models.md)。
 
 ## Key Dependencies
 
@@ -128,7 +125,7 @@ is implied by a documentation change.
 ## Documentation
 
 - [CLI README — detailed commands and validation](docs/cli/README.md)
-- [Supported Models and Multi-Model Architecture / 支援型號與多型號架構](docs/core/supported-models.md)
+- [Supported Models and Multi-Model Architecture](docs/core/supported-models.md)
 - [Core VISA transport and LIVE support policy](docs/visa-connections.md)
 - [Electronic Load Worker Contract](docs/contracts/electronicload-worker-contract.md)
 - [Common Worker Protocol](docs/contracts/common-worker-protocol.md)

@@ -78,7 +78,7 @@ Both commands support `--json` (one success/error object). Text output uses
 Discovery text and JSON may contain **real resource names and IDN serials**:
 use them only as local diagnostics; do not publish unredacted output.
 To verify one operator-selected ASRL INSTR resource, use `identify` with the
-[ASRL contributor validation scope](#asrl-contributor-validation--asrl-貢獻者驗證).
+[ASRL contributor validation scope](#asrl-contributor-validation).
 
 ### Results and exits
 
@@ -741,12 +741,6 @@ sends/verifies Input OFF, separately disables Timer and reads final Timer/Input 
 Failure stops further trials. A possible ON attempt gets one bounded OFF cleanup attempt.
 Timer-disable cleanup is a separate operation after confirmed OFF.
 
-腳本以送出 Input ON 命令的時間為起點，在設定秒數到期後的一秒內讀取 Timer
-與 Input 狀態。只有在此時間窗內實際讀到 Input OFF 才通過。已送出的查詢沿用
-一般 CLI 命令期限。超過時間窗才收到有效回覆時，試驗會失敗並執行既有清理。
-若執行包含 Trigger 且通訊失去信任，需由操作員獨立處置。主控台會列出經過時間
-與兩種狀態，`-DebugArtifacts` 會另存於私人報告目錄。
-
 The validation-only Core/CLI scope uses `INP:TIM:DEL <seconds>`, `INP:TIM 0|1`,
 `INP:TIM:DEL?` and `INP:TIM?` from the
 [IT8800 Programming Guide V2.1, printed pp.45–46](https://assets.testequity.com/te1/Documents/pdf/itech/ITECH_IT8800-Programming-Guide-EN.pdf),
@@ -1141,37 +1135,13 @@ new confirmation each time. Results are JSON, with one V/I/P record per
 `arguments.document` and `arguments.confirm_input_on` as described in the
 [Worker contract](../contracts/electronicload-worker-contract.md#software-sequence).
 
-### Software Sequence（繁體中文）
-
-建立 UTF-8 JSON 檔，包含 `version: 1`、1 至 255 的整數 `loop_count`
-及 1 至 255 個步驟。展開後最多執行 10,000 個步驟，每步只包含
-`action` 和 `arguments`。範例、參數與單位如上表。Range 可選
-`auto`、`low` 或 `high`，Setpoint 與 Wait 必須使用 JSON 數字。Wait
-接受 0 至 3600 秒的有限小數，包含端點。CC 的上升和下降 Slew 必須成對提供，
-限離線使用。
-
-正式執行前會確認 Input OFF。若起始已 ON，會拒絕執行並保留原狀態。
-**每次** `input-on` 前都要在 Input OFF 時重新設定 Fixed Setpoint，
-同一輪再次 ON 也要重新設定。每輪結束時必須 OFF。`input-off` 後可以
-保留只讀步驟，未使用 ON 的輪次可以省略 OFF 步驟。整份文件會在第一步前預檢，
-`fresh_fixed_setup_required` 會指出須補上新設定的 ON 步驟。
-Sequence 要求 Input Timer OFF 才能啟用 Input。CV、CR、CW 模式也要求
-Current Slow Rise OFF，設定 Fixed CR 前則要求 CR-LED OFF。模擬執行時，
-Input ON 前也會確認指定的 CC 上升及下降 Slew 仍與設定相符。
-
-使用上方的 `--dry-run` 指令預檢，不需確認。每次正式執行若含
-`input-on`，都要重新提交確認。CLI 以 `--file` 讀取 JSON，執行結果為
-JSON，每個 `measure` 回傳一筆 V／I／P，並包含讀回確認的最終 Input 狀態。
-Worker 使用 `arguments.document` 與 `arguments.confirm_input_on`。
-[Worker 契約](../contracts/electronicload-worker-contract.md#software-sequence)
-
-### Contributor Software Sequence validation / 貢獻者實機驗證
+### Contributor Software Sequence validation
 
 For separately authorized physical runs, select `-Modes sequence` or include
 Sequence in a combined run with a dedicated 5 V / 0.8 A source. The script uses
 `sequence --file <file> --hardware-validation sequence --resource <USB-INSTR> --backend system --confirm --json`
 with the registered IT8812C over System VISA. For ASRL, use the explicit
-[contributor transport option](#asrl-contributor-validation--asrl-貢獻者驗證). Each trial uses one session.
+[contributor transport option](#asrl-contributor-validation). Each trial uses one session.
 Fixed setup and Input switching verify the applicable interlocks and settings.
 Use an exclusive instrument and an independent manual OFF method. Ordinary CLI
 and Worker LIVE are closed for Sequence.
@@ -1189,23 +1159,6 @@ loss of trusted communication stops further commands. The CLI reports Input
 original error, and gives the same independent OFF instructions. The script
 also gives independent OFF instructions if the process times out or Input OFF
 is unconfirmed. Cleanup stays within the original session.
-
-另行授權實機驗證後，可單獨選擇 `-Modes sequence` 或與其他模式一起執行，並使用
-專用 5 V／0.8 A 電源。腳本以 System VISA 連接已註冊的 IT8812C。
-ASRL 需指定[貢獻者連線參數](#asrl-contributor-validation--asrl-貢獻者驗證)。
-每次試驗使用一個 Session，確認 Fixed 設定與 Input 切換的適用安全條件。
-實機操作需獨占儀器，並備妥獨立手動 OFF 手段。一般 CLI 與 Worker 維持拒絕
-Sequence LIVE。
-
-貢獻者驗證範圍只接受四份固定文件，分別驗證 0.1 A CC、3 V CV、1000 Ω CR、
-0.10 W CW。每份只有一次 ON、0.25 秒 Wait、量測及確認 OFF。Script 在每次
-試驗前要求操作員確認，並執行單一命令 30 秒與總時限 900 秒的限制。通訊可信時
-由 Core 在原 Session 處理清理。若設定或啟用 Input 時切換 Remote，卻無法重新
-讀回確認 OFF，或起始已確認 OFF、執行失敗時仍觀測到 ON，CLI 會要求操作員獨立
-手動 OFF。識別儀器後若失去可信通訊，便停止發送命令。CLI 將 Input
-回報為 `UNKNOWN`、記錄清理原因 `session_untrusted`、保留原始錯誤，並提供相同的獨立
-手動 OFF 指引。程序逾時或無法確認 Input OFF 時，Script 也會提供獨立手動 OFF 指引。
-清理僅使用原 Session。
 
 ## Basic Workflows
 
@@ -1277,54 +1230,6 @@ electronicload-tool cc-discharge --dry-run --current 0.5 --cutoff-voltage 3 --cu
 For Worker argument names, results and Stop behavior, see the
 [Worker contract](../contracts/electronicload-worker-contract.md#basic-workflows).
 
-### 基礎工作流程（繁體中文）
-
-每條命令可獨立在 CLI 執行，也可提交為一個 Worker 工作。使用
-`--simulate` 執行，或用 `--dry-run` 預覽已驗證的參數。預覽不等待、
-不讀取模擬器，也不建立檔案。CLI 回傳單一 JSON 物件，可按 Ctrl+C
-中斷執行。這些指令僅供離線使用。模擬電壓固定為 12 V，因此用 3 V
-截止模擬放電時，會在超時、容量截止或取樣達上限時結束。
-
-| 指令 | 必填選項 | 選填選項 |
-| --- | --- | --- |
-| `measure-log` | `--interval-s`，另指定 `--count` 或 `--duration-s` 其中一項 | `--csv` |
-| `measure-until` | `--interval-s`、`--metric`、`--operator`、`--threshold`、`--timeout-s` | `--csv` |
-| `cc-timed-load` | `--current`、`--duration-s`，模擬時需 `--confirm` | `--range` |
-| `cc-discharge` | `--current`、`--cutoff-voltage`、`--timeout-s`，模擬時需 `--confirm` | `--interval-s`（預設 1 秒）、`--cutoff-capacity-ah`、`--range`、`--csv` |
-
-- 量測指令維持原本的 Input 狀態。`measure-log` 讀取電壓、電流與功率。
-  `measure-until` 只讀取所選項目（`voltage`、`current` 或 `power`），以
-  `lt`、`le`、`gt` 或 `ge` 比較門檻，達成條件即結束。門檻使用對應的
-  V、A 或 W。
-- 取樣立即開始，錯過的取樣時點直接略過。間隔接受 0.001 至 3600 秒。
-  持續時間和超時接受正的有限秒數，無固定上限。`measure-log --count`
-  接受 1 至 10,000 筆，達到指定筆數回報 `completed`。總時長模式只在
-  期限前取樣，若先到期限則回報 `duration_elapsed`。監控超時回報
-  `workflow_timeout` 與已有摘要。若先達到 10,000 筆實際取樣，取樣指令
-  以 `sample_limit_reached` 正常結束。放電達到取樣上限時仍會執行
-  Input OFF 清理。定時負載依指定時間等待，期間不取樣。
-- CC 指令確認初始 Input OFF，並在確認固定 CC 設定後才開啟 Input。電流
-  必須為正值且符合所選檔位，預設 `auto`，也可選 `low` 或 `high`。定時負載
-  自確認 ON 後開始計時。放電先在 Input OFF 時讀取起始電壓，若小於或
-  等於截止電壓，會保持 OFF 並結束。確認 ON 後依序讀取電壓、電流與
-  最新可用的功率。電壓小於或等於正值截止電壓（V），或容量大於或等於
-  選填的正值截止容量（Ah），就結束放電。達到電壓截止時，直接結束取樣，
-  省略電流及功率查詢；達到容量截止時，省略功率查詢。容量採相鄰實測
-  電流的讀值與時間戳積分，首筆為 0 Ah。
-- CC 指令結束時確認 Input OFF。若無法確認，結果會要求操作人員獨立關閉
-  負載。定時負載回傳執行摘要。三條取樣指令另回傳 `sample_count` 與
-  `last_measurement`。放電也回傳 `capacity_ah`，成功讀取起始電壓時另有
-  `initial_voltage_v`。若起始電壓已達截止，負載取樣筆數與容量皆為零。
-  截止當下的 `last_measurement` 只包含該筆已取得的讀值。
-- 只有明確指定 `--csv` 才建立 CSV。相對路徑以執行程序的工作目錄為準。
-  缺少的上層目錄會建立，既有檔案會保留。欄位包含 `sample_index`、
-  `elapsed_s` 和量測欄位，放電另有 `capacity_ah`。部分取樣中未取得的
-  欄位留空。放電 CSV 資料列在 OFF 清理流程結束後才寫入。若回報無法確認
-  OFF 清理，CSV 只保留標題列，結果回報 `csv_incomplete`。建檔後若發生
-  其他錯誤，也會保留檔案並回報 `csv_incomplete`。
-
-Worker 的參數、結果與 Stop 行為見 [Worker 契約](../contracts/electronicload-worker-contract.md#basic-workflows)。
-
 ## Worker and Automation
 
 Standalone simulation commands each start with fresh state. To exercise a CV/CR/CW
@@ -1354,7 +1259,7 @@ does not authorize physical instrument operation.
 | `scripts/live-cli-check.ps1 -PlanOnly` | Validate command plans; reported physical cases remain `NOT RUN` | Never |
 | `scripts/live-cli-check.ps1` | Separately approved interactive IT8812C validation, including deliberate Input ON/OFF | With operator approval |
 
-### Available validation modes / 驗證模式
+### Available validation modes
 
 `-Modes full` selects every mode in the table. Omitting `-Modes` also selects
 FULL. A single name or a comma-separated list such as `cc,readback` selects
@@ -1364,44 +1269,34 @@ with `-Modes`. Hardware selections first identify the instrument, confirm
 Input OFF and measure V/I/P. Trigger snapshots Source and Timer before any
 legacy Transient write and restores them after its trials when safe.
 
-`-Modes full` 或省略 `-Modes` 都會選取下表所有模式。可指定單一模式或以逗號結合
-多個模式，例如 `cc,readback`。每個選取的模式執行一次。USB 和 ASRL 共用模式與
-驗收條件。`-InputTimerOnly` 等同 `-Modes input-timer`，兩個參數不可並用。實機
-驗證會先識別儀器、確認 Input OFF 並量測 V/I/P。Trigger 會在原有 Transient 寫入
-前讀取 Source 和 Timer，並在試驗後於安全條件下還原。
-
-| `-Modes` | FULL coverage / 完整驗證範圍 |
+| `-Modes` | FULL coverage |
 | --- | --- |
-| `cc` | Fixed CC High, Auto, Low and one Input ON/OFF / 三種檔位與一次 Input ON/OFF |
-| `cv` | Fixed CV Low, Auto, High / 三種檔位 |
-| `cr` | Fixed CR Low, Auto, High / 三種檔位 |
+| `cc` | Fixed CC High, Auto, Low and one Input ON/OFF |
+| `cv` | Fixed CV Low, Auto, High |
+| `cr` | Fixed CR Low, Auto, High |
 | `cw` | Fixed CW |
-| `transient-cc` | Continuous, Pulse, Toggle with Low/High/Auto / 三種波形及檔位 |
+| `transient-cc` | Continuous, Pulse, Toggle with Low/High/Auto |
 | `transient-cv` | Continuous Auto, Pulse Low, Toggle High |
 | `transient-cr` | Continuous Auto, Pulse High, Toggle High |
-| `transient-cw` | Continuous, Pulse, Toggle / 三種波形 |
-| `trace` | Five captures, including powered CC and Full CSV / 五次擷取，含 CC 帶載和 Full CSV |
-| `cr-led` | CR-LED, plain CR and return to CC with Input OFF / Input OFF 下驗證 CR-LED、一般 CR 與切回 CC |
-| `current-slow-rise` | Fixed CC enable, retention, interlock and disable / 啟用、保留設定、互鎖及停用 |
-| `trigger` | HOLD, TIMER, BUS and EXTERNAL with Transient CC and finite LIST CC / 四種觸發來源、Transient CC、有限次 LIST CC 與還原 |
-| `input-timer` | Fixed CC timer, expiry and disable / 計時、到期與停用 |
-| `protection` | Current and power trips, hardware power limit and defaults / 保護觸發、硬體功率限制與預設值 |
-| `system-query` | SCPI version, display mode and one Error Queue entry / SCPI 版本、顯示模式及單筆錯誤佇列 |
-| `readback` | Existing Fixed CC/CV/CR/CW, CC Slew, Transient, LIST, VON, Short and Average / 獨立查詢現有設定 |
-| `sequence` | Four bounded Fixed CC/CV/CR/CW trials / 四項有界 Fixed 試驗 |
-| `workflow` | Four CLI Workflows in dry-run and simulation / 四條 CLI 流程的離線規劃及模擬 |
-| `measurement-extensions` | Native Min/Max, Discharge and Average setting / 原生極值、放電量測與平均次數設定 |
-| `auxiliary-controls` | VON setting, Short ON/OFF interlocks and Fixed CC Slew / VON 設定、Short 開關互鎖與 Fixed CC 斜率 |
-| `list-cc` | LIST CC setup, Save, Recall and Exit / LIST CC 設定、儲存、載入及退出 |
+| `transient-cw` | Continuous, Pulse, Toggle |
+| `trace` | Five captures, including powered CC and Full CSV |
+| `cr-led` | CR-LED, plain CR and return to CC with Input OFF |
+| `current-slow-rise` | Fixed CC enable, retention, interlock and disable |
+| `trigger` | HOLD, TIMER, BUS and EXTERNAL with Transient CC, finite LIST CC and setting restoration |
+| `input-timer` | Fixed CC timer, expiry and disable |
+| `protection` | Current and power trips, hardware power limit and defaults |
+| `system-query` | SCPI version, display mode and one Error Queue entry |
+| `readback` | Existing Fixed CC/CV/CR/CW, CC Slew, Transient, LIST, VON, Short and Average |
+| `sequence` | Four bounded Fixed CC/CV/CR/CW trials |
+| `workflow` | Four CLI Workflows in dry-run and simulation |
+| `measurement-extensions` | Native Min/Max, Discharge and Average setting |
+| `auxiliary-controls` | VON setting, Short ON/OFF interlocks and Fixed CC Slew |
+| `list-cc` | LIST CC setup, Save, Recall and Exit |
 
 The System Query case reads one Error Queue entry and records the numeric
 code, including zero for an empty queue. Workflow
 cases use no connection arguments and record simulated results separately
 in the report. A Workflow-only run needs only `-Target` and `-Modes workflow`.
-
-System Query 案例只讀取一筆錯誤佇列並記錄數字代碼，空佇列的代碼為零。
-Workflow 案例使用模擬器，報告會標記模擬結果。僅執行 Workflow 時，只需提供
-`-Target` 與 `-Modes workflow`。
 
 The three extension modes use CLI dry-runs and focused Simulator or Fake VISA
 tests from the contributor environment. Run any of them alone or together
@@ -1419,14 +1314,6 @@ to pass. If pytest deselects any of those cases, the script stops the group
 before running it. The report records `NOT RUN` when no test ran and `SKIP`
 when tests were skipped. Either result leaves the run incomplete.
 
-三個擴充模式使用 CLI dry-run 與開發環境中既有的 Simulator 或 Fake VISA
-聚焦測試。可用上例組合執行，也可只選其中一個模式，均只需提供 `-Target`
-與 `-Modes`。混合選取時，擴充模式先執行，實機確認被擋下時實機案例維持
-`NOT RUN`。`-PlanOnly` 驗證 dry-run 請求，案例結果維持 `NOT RUN`。
-擴充模式指定的 pytest 案例須全部執行並通過。若 pytest 篩選排除任何指定案例，
-腳本會在測試開始前停止整組。沒有案例執行時記錄 `NOT RUN`，有案例跳過時記錄
-`SKIP`。兩者都表示本次驗證未完成。
-
 Readback queries the existing configuration with Input OFF before any setup.
 The current mode determines which Fixed, Slew, Transient or LIST case is
 applicable. Other selections are marked `SKIP`. To cover them, repeat
@@ -1437,12 +1324,6 @@ For comparisons with known panel settings, use `-ExpectedRiseSlew` and
 `off`), and `-ExpectedAverageCount` (2–16). Incomplete baselines leave the case
 `NOT RUN` with observed values and the overall result `OBSERVED ONLY`.
 Fixed, Transient, Trigger and TRACE also keep their own post-setup comparisons.
-
-Readback 在任何設定寫入前，以 Input OFF 查詢儀器的現有設定。腳本依目前模式判斷
-適用的 Fixed、Slew、Transient 或 LIST 案例，其他案例標示 `SKIP`。若要涵蓋
-其餘案例，可在儀器已有相應設定時另跑 `-Modes readback`。使用上列參數可比對
-已知的面板設定。預期值不足時，案例記為 `NOT RUN` 並保留觀測值，整體結果為
-`OBSERVED ONLY`。各 Fixed、Transient、Trigger、TRACE 試驗也保留設定後比對。
 
 ### Script parameters
 
@@ -1522,7 +1403,7 @@ an interactive Windows console with the **real** Resource and remove
 .\scripts\live-cli-check.ps1 -Target itech-it8812c -Connection usb -Resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" -Backend system -Modes cc
 ```
 
-## ASRL contributor validation / ASRL 貢獻者驗證
+## ASRL contributor validation
 
 Use `-Connection asrl`, an explicit `ASRL<number>::INSTR` resource and System
 VISA (`@ivi`) with the same FULL or focused matrix as USB. Standalone contributor
@@ -1533,16 +1414,9 @@ The following serial overrides are optional. Omitted values come from VISA
 and PyVISA. The shareable JSON records explicitly supplied values in
 `serial_overrides` and redacts the VISA resource.
 
-以 `-Connection asrl`、明確的 `ASRL<number>::INSTR` 資源及 System VISA
-（`@ivi`）執行與 USB 共用的 FULL 或個別模式。獨立 CLI 的貢獻者指令使用
-`--validation-connection asrl`，並保留命令所需的 `--hardware-validation` 範圍。
-原有三條唯讀 CLI 仍接受 `--hardware-validation asrl-readonly`。序列埠參數可
-選填，省略時沿用 VISA 與 PyVISA 的設定。可分享的 JSON 會在 `serial_overrides`
-記錄明確指定的值，並遮蔽 VISA 資源。
-
-| CLI | PowerShell | Value / 值 |
+| CLI | PowerShell | Value |
 | --- | --- | --- |
-| `--serial-baud-rate` | `-SerialBaudRate` | Positive 32-bit unsigned integer / 32 位元無號正整數 |
+| `--serial-baud-rate` | `-SerialBaudRate` | Positive 32-bit unsigned integer |
 | `--serial-data-bits` | `-SerialDataBits` | 5–8 |
 | `--serial-parity` | `-SerialParity` | `none`, `odd`, `even`, `mark`, `space` |
 | `--serial-stop-bits` | `-SerialStopBits` | `1`, `1.5`, `2` |
@@ -1553,15 +1427,13 @@ and PyVISA. The shareable JSON records explicitly supplied values in
 Use a fictional resource for the offline preview. Both examples below use
 System VISA and leave the serial settings as provided by the session.
 
-離線預覽請使用虛構資源。以下兩例皆使用 System VISA，並沿用 session 的序列埠設定。
-
 ```powershell
 $resource = 'ASRL999::INSTR'
 .\.venv\Scripts\electronicload-tool.exe identify --resource $resource --validation-connection asrl --dry-run --json
 .\scripts\live-cli-check.ps1 -Target itech-it8812c -Connection asrl -Resource $resource -Modes full -PlanOnly
 ```
 
-### Physical validation procedure / 實機驗證步驟
+### Physical validation procedure
 
 1. Obtain separate authorization for the instrument, resource and bounded
    source/DUT. Verify RS-232 wiring and both ends' serial settings, confirm
@@ -1574,16 +1446,7 @@ $resource = 'ASRL999::INSTR'
    conditional Readback coverage with focused runs as needed. Record
    instrument evidence separately from simulated and planned cases.
 
-1. 取得特定儀器、資源與受限電源及待測物的實機驗證授權。核對 RS-232 接線及
-   兩端設定，確認 Input OFF，並準備獨立的手動 OFF 方式。
-2. 用 `-PlanOnly` 檢查 FULL 或個別模式。獲准後，在互動式主控台填入指定的
-   ASRL INSTR 資源，依 USB 共用的模式確認與驗收規則執行。
-3. 檢查 `.tmp_tests/` 下已遮蔽的報告。ASRL Product 與 Worker LIVE 的開放
-   需要各對應範圍的實機證據。依需要用個別模式補齊 Readback 的條件式案例，並
-   將實機證據與模擬、規劃案例分開記錄。
-
 See the [Core transport and LIVE support policy](../visa-connections.md).
-傳輸與 LIVE 支援規則請參閱 [Core 設計](../visa-connections.md)。
 
 ## Controlled instrument validation
 
@@ -1653,12 +1516,6 @@ baseline. From Fixed CC the initial settings are the baseline. Setup writes are
 skipped when the settings already match the trial. If starting in another mode,
 select Fixed CC at the panel before beginning validation.
 
-若同時選取 Readback，Protection 會沿用該獨立快照。從 Fixed CV 或 CW 開始時，
-腳本會先確認 Input 與 Short 皆為 OFF，再設定 0.20 A Low 的 Fixed CC，在 Input
-OFF 下獨立讀回確認後才取得第一份 Protection 快照，並以該 Fixed CC 設定作為
-試驗還原基準。若原本已是 Fixed CC，則沿用原設定作為基準。設定符合試驗條件時
-會略過寫入。其他模式請在開始驗證前，先從面板選取 Fixed CC。
-
 | Trial | Temporary setting | Physical acceptance |
 | --- | --- | --- |
 | Software current | Enabled, 0.10 A, 1 s | OC and PS with Input OFF |
@@ -1689,8 +1546,6 @@ With `-DebugArtifacts`, Protection MAX replies that parse as numbers and
 their bounds are recorded in the private command stderr. Invalid replies
 still stop the trial before a defaults write.
 
-`-DebugArtifacts` 會將可解析為數字的 Protection MAX 回應及其範圍寫入私人
-命令 stderr。回應無效時，試驗會在寫入預設值前停止。
 The contributor scope does not open Product or Worker LIVE.
 
 The register meanings, Clear behavior and configuration syntax are in the

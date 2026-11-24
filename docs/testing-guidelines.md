@@ -78,7 +78,7 @@ affected CLI parser/help/version and read-only CLI contracts:
 
 Worker integration uses a real local simulated subprocess, HTTP and JSONL,
 but never physical hardware. The **single** `live-cli-check.ps1` defaults to
-FULL for USB and ASRL. See the [CLI validation modes](cli/README.md#available-validation-modes--驗證模式)
+FULL for USB and ASRL. See the [CLI validation modes](cli/README.md#available-validation-modes)
 for the complete matrix. Use `-Modes` to focus checks on affected behavior.
 Hardware modes retain the common read-only safety prechecks and any explicit
 Input ON/OFF flow. Test `-PlanOnly` and unattended LIVE refusal with a fictional
@@ -421,10 +421,6 @@ before a Protection snapshot. Use Fake VISA for ordinary and MAX power
 readback, including out-of-range and malformed replies. Check that diagnostic
 values stay in private output.
 
-Fixed CC 前置流程應涵蓋從 Fixed CW 開始，並確認 Input ON、不支援的模式或讀回
-不符會在取得 Protection 快照之前停止。用 Fake VISA 檢查一般與 MAX 功率讀值，
-包含超出範圍及格式無效的回應。診斷數值應留在私人輸出。
-
 Only the separately approved, operator-confirmed
 [Protection procedure](cli/README.md#contributor-protection-validation)
 can establish physical trip, power limit, Clear, defaults and restoration.
@@ -499,7 +495,7 @@ using a fictional resource and blocked VISA. Verify the four fixed plans,
 deadline and report redaction. Run existing help/version, Input/Fixed, and
 read-only checks affected by shared execution paths and Ruff on changed
 Python files. Hardware validation requires separate authorization and the
-operator procedure in the [CLI guide](cli/README.md#contributor-software-sequence-validation--貢獻者實機驗證).
+operator procedure in the [CLI guide](cli/README.md#contributor-software-sequence-validation).
 
 ## Basic Workflow focused checks
 
@@ -530,15 +526,7 @@ Run Ruff on changed Python files.
 Verify the independent ASRL lifetime, omitted and explicit settings, timeout
 transition, identity, cleanup errors, USB isolation, and refusal before VISA
 for unapproved scopes. Reserve physical validation for the separately
-authorized [ASRL procedure](cli/README.md#physical-validation-procedure--實機驗證步驟).
-
-從 repo 根目錄選跑受影響的 Core、CLI、探索與基礎測試。PowerShell 比對 USB
-及 ASRL 的 FULL 計畫，並檢查混合模式、報告遮蔽和非互動拒絕。離線計畫使用
-虛構資源，封鎖 PyVISA 函式庫與 Resource Manager。System Query 和 ASRL
-可使用 `preflight-cli.ps1 -SystemQueryOnly` 驗證。只對修改的 Python 檔案執行 Ruff。
-驗證 ASRL 獨立生命週期、選填設定、逾時切換、身分、清理錯誤、USB 隔離與未許可
-範圍在 VISA 存取前被拒絕。實機測試依據另行授權的
-[ASRL 步驟](cli/README.md#physical-validation-procedure--實機驗證步驟)。
+authorized [ASRL procedure](cli/README.md#physical-validation-procedure).
 
 ## CLI validation extensions and Timer expiry
 
@@ -551,10 +539,3 @@ For Timer expiry, use a controlled clock to verify the retry window and
 Input OFF requirement, and select the affected Fake VISA cases in
 `tests/test_input_timer.py`. Physical expiry remains a separately authorized
 check.
-
-從 `tests/test_live_validation_script.py` 選跑受影響的 PowerShell 案例。使用虛構
-資源並封鎖 VISA，檢查單獨擴充模式、重複選取、混合模式的非互動拒絕，以及 USB
-和 ASRL 的 Full PlanOnly。擴充模式沿用 Core 與 CLI 聚焦測試，分別驗證原生量測與
-Average、VON／Short／CC Slew、LIST CC 設定／Save／Recall／Exit。Timer 到期使用
-可控制時鐘驗證重查時間窗與 Input OFF 條件，再選跑 `tests/test_input_timer.py`
-內受影響的 Fake VISA 案例。實機到期仍需另行授權驗證。
