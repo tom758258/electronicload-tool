@@ -1446,7 +1446,7 @@ $resource = 'ASRL999::INSTR'
    conditional Readback coverage with focused runs as needed. Record
    instrument evidence separately from simulated and planned cases.
 
-See the [Core transport and LIVE support policy](../visa-connections.md).
+See the [VISA connections and LIVE support](../../README.md#visa-connections-and-live-support).
 
 ## Controlled instrument validation
 

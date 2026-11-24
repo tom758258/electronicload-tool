@@ -55,6 +55,40 @@ The single Python distribution and its dependencies are defined in
 [pyproject.toml](pyproject.toml) and [uv.lock](uv.lock).
 There is no implemented WebUI or Desktop component.
 
+## VISA Connections and LIVE Support
+
+Core validates VISA resource strings and owns session lifetime, identity checks,
+SCPI communication, and reply parsing. IT8812C uses separate USB INSTR and
+ASRL INSTR paths through System VISA (`@ivi`), with the same model identity
+rules and read-only command implementations.
+
+| Transport | VISA open timeout | Identity query timeout | Other I/O timeout | Framing |
+| --- | --- | --- | --- | --- |
+| USB INSTR | 5000 ms | 5000 ms | 5000 ms | LF read/write, 150 ms query delay |
+| ASRL INSTR | 1000 ms | 1000 ms | 5000 ms | VISA/PyVISA settings with selective overrides |
+
+The USB open timeout is passed to the VISA driver, which controls its
+enforcement. ASRL open and `*IDN?` have separate 1000 ms deadlines; the
+identity write and all response reads share the identity deadline. Core rejects
+late results before using the session or issuing more queries. Native VISA
+calls are synchronous, so Core cannot report an overrun or clean up until
+the driver returns. After successful ASRL identification, other queries use
+the normal I/O timeout. ASRL owns a separate native manager handle and closes
+the device handle before the manager. Open, configuration, query, and cleanup
+errors terminate the request; cleanup failures are reported alongside the
+original error. Neither connection path relies on PyVISA automatic clear or retry.
+
+Core gates LIVE access by canonical model ID, command, transport, VISA backend,
+execution scope, and required feature. IT8812C Product and Worker LIVE require
+USB INSTR and System VISA, subject to the exact command permissions in
+[Supported Models](docs/core/supported-models.md#product-live-support).
+ASRL INSTR is available only for separately authorized Standalone CLI
+Contributor validation via `--validation-connection asrl`, with the relevant
+command-specific scope and confirmation. Optional serial overrides affect ASRL
+only. Passive discovery may list ASRL resources, but automatic identification
+queries USB resources only. See [ASRL contributor validation](docs/cli/README.md#asrl-contributor-validation)
+for serial options and the controlled physical procedure.
+
 ## Install
 
 Python 3.10 or newer is required. From the repository root in PowerShell, install
@@ -126,7 +160,6 @@ is implied by a documentation change.
 
 - [CLI README — detailed commands and validation](docs/cli/README.md)
 - [Supported Models and Multi-Model Architecture](docs/core/supported-models.md)
-- [Core VISA transport and LIVE support policy](docs/visa-connections.md)
 - [Electronic Load Worker Contract](docs/contracts/electronicload-worker-contract.md)
 - [Common Worker Protocol](docs/contracts/common-worker-protocol.md)
 - [Common CLI JSON / JSONL Contract](docs/contracts/common-cli-jsonl-contract.md)

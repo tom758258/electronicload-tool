@@ -53,7 +53,7 @@ entries. Keep detected values, canonical tokens, aliases and stable IDs distinct
 The operator supplies the USB resource and Core verifies the exact identity.
 Fixed CC controls apply to `set-cc` and `input-on`. Input ON requires explicit
 confirmation. ASRL is available for controlled Contributor validation. See the
-[Core VISA connections and LIVE support policy](../visa-connections.md#live-support-policy).
+[VISA connections and LIVE support](../../README.md#visa-connections-and-live-support).
 
 ## Future Model Onboarding
 
