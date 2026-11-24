@@ -106,12 +106,15 @@ jobs:
               - 'scripts/preflight-cli.ps1'
               - 'scripts/live-cli-check.ps1'
               - 'tests/test_live_validation_script.py'
-              - 'src/electronicload_tool_core/control.py'
-              - 'src/electronicload_tool_core/hardware_validation.py'
-              - 'src/electronicload_tool_core/trace.py'
-              - 'src/electronicload_tool_core/visa.py'
-              - 'src/electronicload_tool_cli/cli.py'
-              - 'src/electronicload_tool_cli/json_input.py'
+              - 'src/electronicload_tool_core/**'
+              - 'src/electronicload_tool_cli/**'
+              - 'tests/conftest.py'
+              - 'tests/test_readonly_cli.py'
+              - 'tests/test_readonly_core.py'
+              - 'tests/test_control_core.py'
+              - 'tests/test_control_cli.py'
+              - 'tests/test_list_core.py'
+              - 'tests/test_list_cli.py'
               - 'pyproject.toml'
               - 'uv.lock'
               - '.github/workflows/tests.yml'
@@ -138,13 +141,10 @@ jobs:
         run: python -m pip install --upgrade uv
       - name: Install locked dependencies
         run: uv sync --python 3.13 --all-extras --locked --link-mode=copy
-      - name: Run offline PowerShell preflight and Trigger boundary
-        shell: pwsh
-        run: |
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\preflight-cli.ps1
-          if ($LASTEXITCODE -ne 0) { throw "Offline preflight failed ($LASTEXITCODE)" }
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\preflight-cli.ps1 -TriggerOnly
-          if ($LASTEXITCODE -ne 0) { throw "Trigger preflight failed ($LASTEXITCODE)" }
+      - name: Prepare ignored test directory
+        run: python -c "from pathlib import Path; Path('.tmp_tests').mkdir(exist_ok=True)"
+      - name: Run offline PowerShell preflight contracts (fake VISA only)
+        run: uv run --no-sync python -m pytest -q -rs --durations=12 tests/test_live_validation_script.py -k preflight
 
   windows-live-validation:
     name: Windows Live Validation script contracts
@@ -164,7 +164,7 @@ jobs:
       - name: Prepare ignored test directory
         run: python -c "from pathlib import Path; Path('.tmp_tests').mkdir(exist_ok=True)"
       - name: Run Windows Live Validation script tests (fake VISA only)
-        run: uv run --no-sync python -m pytest -q -rs --durations=12 tests/test_live_validation_script.py
+        run: uv run --no-sync python -m pytest -q -rs --durations=12 tests/test_live_validation_script.py -k "not preflight"
 
   package-smoke:
     name: Python packaging smoke

@@ -21,6 +21,8 @@ def run_script(tmp_path):
     if powershell is None:
         local = ROOT / '.tmp_tests/powershell/pwsh'
         if not local.is_file():
+            if os.environ.get('GITHUB_ACTIONS') == 'true':
+                pytest.fail('PowerShell is required in the Windows validation jobs.')
             pytest.skip('PowerShell is required for the script check.')
         powershell = str(local)
     (tmp_path / 'sitecustomize.py').write_text(
@@ -37,7 +39,13 @@ def run_script(tmp_path):
         directory.mkdir()
         env[name] = str(directory)
     def run(extra, *, source_limits=False, mode_array=None, preflight=False, resource=RESOURCE,
-            harness=None, extra_env=None):
+            harness=None, extra_env=None, windows_powershell=False):
+        engine = powershell
+        policy = []
+        if windows_powershell and os.name == 'nt':
+            engine = shutil.which('powershell.exe')
+            assert engine is not None, 'Windows PowerShell is required for default preflight.'
+            policy = ['-ExecutionPolicy', 'Bypass']
         script = ROOT / 'scripts/live-cli-check.ps1'
         if harness is None:
             args = ([str(ROOT / 'scripts/preflight-cli.ps1')] if preflight else
@@ -74,7 +82,7 @@ def run_script(tmp_path):
                       for arg in args]
             invocation = ['-Command', '& ' + ' '.join(quoted) + ' -Modes ' + mode_array]
         result = subprocess.run(
-            [powershell, '-NoProfile', '-NonInteractive', *invocation], cwd=ROOT,
+            [engine, '-NoProfile', '-NonInteractive', *policy, *invocation], cwd=ROOT,
             env={**env, **(extra_env or {})},
             stdin=subprocess.DEVNULL, text=True, capture_output=True, timeout=180)
         assert not (tmp_path / 'visa-attempt').exists(), result.stdout + result.stderr
@@ -183,14 +191,23 @@ def assert_report(result, expected, modes):
     return report
 
 
+def test_default_offline_preflight(run_script):
+    # Keep the existing Windows PowerShell 5.1 boundary, with the child VISA blocker.
+    result = run_script([], preflight=True, windows_powershell=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_fixed_auto_offline_preflight(run_script):
     result = run_script(['-FixedAutoOnly'], preflight=True)
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_protection_preflight_and_explicit_mode_report_without_visa(run_script):
+def test_protection_offline_preflight(run_script):
     preflight = run_script(['-ProtectionOnly'], preflight=True)
     assert preflight.returncode == 0 and 'PASS: Protection preflight' in preflight.stdout
+
+
+def test_protection_explicit_mode_report_without_visa(run_script):
     for args, expected in [(['-PlanOnly'], 'PLAN ONLY'), ([], 'BLOCKED')]:
         result = run_script(['-Modes', 'protection', *args])
         assert result.returncode == (0 if args else 2), result.stdout + result.stderr
@@ -368,14 +385,17 @@ def test_cr_led_slow_rise_offline_preflight(run_script):
     assert 'PASS: CR-LED and Current Slow Rise preflight' in result.stdout
 
 
-@pytest.mark.parametrize('modes', [('cr-led',), ('current-slow-rise',), ('cr-led', 'current-slow-rise')])
-def test_cr_led_slow_rise_script_plans_and_refuses_unattended(run_script, modes):
-    selection = ['-Modes', ','.join(modes)]
-    for args, expected in [(selection + ['-PlanOnly'], 'PLAN ONLY'), (selection, 'BLOCKED')]:
-        result = run_script(args)
-        report = assert_report(result, expected, modes)
-        assert all(case['command'] != 'input-on' for case in report['cases'])
-    assert 'requires an interactive console' in result.stdout
+@pytest.mark.parametrize('modes,plan_only', [
+    (('cr-led',), True), (('current-slow-rise',), True),
+    (('cr-led', 'current-slow-rise'), False),
+])
+def test_cr_led_slow_rise_script_plans_and_refuses_unattended(run_script, modes, plan_only):
+    # Individual selection owns plan isolation; one mixed request covers the shared LIVE refusal.
+    result = run_script(['-Modes', ','.join(modes), *(['-PlanOnly'] if plan_only else [])])
+    report = assert_report(result, 'PLAN ONLY' if plan_only else 'BLOCKED', modes)
+    assert all(case['command'] != 'input-on' for case in report['cases'])
+    if not plan_only:
+        assert 'requires an interactive console' in result.stdout
 
 
 def test_fixed_slew_von_short_offline_preflight(run_script):
@@ -410,7 +430,16 @@ def test_fixed_auto_script_current_bounds_and_no_rounding(run_script, current):
 ])
 def test_hardware_script_mode_plans(run_script, selection, modes):
     extra = ['-PlanOnly'] + (['-Modes', selection] if selection is not None else [])
-    assert_report(run_script(extra), 'PLAN ONLY', modes)
+    result = run_script(extra)
+    report = assert_report(result, 'PLAN ONLY', modes)
+    if selection == 'cv':
+        assert report['declared_source_limits']['current_a'] == 0.8
+        assert report['declared_source_limits']['voltage_v'] == 5
+    if selection == 'cc,transient-cc':
+        assert 'Selected modes:' in result.stdout
+        assert 'transient-continuous-auto-setup:' not in result.stdout
+        assert '--validation-settings-json' not in result.stdout
+        assert result.stdout.count('Report: ') == 1
 
 
 def test_default_usb_and_explicit_asrl_full_plan_share_the_matrix(run_script):
@@ -460,14 +489,7 @@ def test_default_usb_and_explicit_asrl_full_plan_share_the_matrix(run_script):
         assert names.index(f'{mode}-simulation') < names.index('input-state')
 
 
-def test_plan_only_console_summary_and_verbose_steps(run_script):
-    normal = run_script(['-PlanOnly', '-Modes', 'cc,transient-cc'])
-    assert normal.returncode == 0, normal.stdout + normal.stderr
-    assert 'Selected modes:' in normal.stdout
-    assert 'transient-continuous-auto-setup:' not in normal.stdout
-    assert '--validation-settings-json' not in normal.stdout
-    assert normal.stdout.count('Report: ') == 1
-
+def test_plan_only_verbose_steps(run_script):
     verbose = run_script(['-PlanOnly', '-Verbose', '-Modes', 'transient-cv'])
     assert verbose.returncode == 0, verbose.stdout + verbose.stderr
     assert 'transient-cv-continuous-setup:' in verbose.stdout
@@ -502,10 +524,6 @@ def test_hardware_script_selected_parameter_checks(run_script):
     # A CV-only plan does not validate CC/Transient-only settings.
     assert_report(run_script(['-PlanOnly', '-Modes', 'cv', '-Current', '3', '-LevelA', '3']),
                   'PLAN ONLY', ('cv',))
-    report = assert_report(run_script(['-PlanOnly', '-Modes', 'cv'], source_limits=False),
-                           'PLAN ONLY', ('cv',))
-    assert report['declared_source_limits']['current_a'] == 0.8
-    assert report['declared_source_limits']['voltage_v'] == 5
 
 
 @pytest.mark.parametrize('parameter,value', [
@@ -618,6 +636,8 @@ def test_input_timer_script_plan_and_live_refusal(run_script, planned):
     assert 'transient-enable' not in commands and 'set-cv' not in commands
     on = next(c for c in report['cases'] if c['command'] == 'input-on')
     assert '--confirm' in on['arguments'] and 'input-timer' in on['arguments']
+    assert report['declared_source_limits']['current_a'] == 0.8
+    assert report['declared_source_limits']['voltage_v'] == 5
 
 
 @pytest.mark.parametrize('extra', [['-Modes', 'cc'], ['-TimerSeconds', '0'],
@@ -1188,15 +1208,6 @@ Save-Report
     assert '0.536' not in report_text and not (report_dir / 'private').exists()
 
 
-def test_input_timer_script_uses_default_source_limits(run_script):
-    result = run_script(['-InputTimerOnly', '-PlanOnly'], source_limits=False)
-    assert result.returncode == 0, result.stdout + result.stderr
-    paths = re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)
-    report = json.loads(Path(paths[-1]).read_text(encoding='utf-8-sig'))
-    assert report['declared_source_limits']['current_a'] == 0.8
-    assert report['declared_source_limits']['voltage_v'] == 5
-
-
 def test_trace_validation_preflight_only(run_script):
     checked = run_script(['-TraceOnly'], preflight=True)
     assert checked.returncode == 0, checked.stdout + checked.stderr
@@ -1237,7 +1248,7 @@ def test_trace_validation_script_plan_only_and_noninteractive_refusal(run_script
     assert 'requires an interactive console' in refused.stdout
 
 
-def test_trigger_validation_script_plan_preflight_and_noninteractive_refusal(run_script):
+def test_trigger_validation_script_plan_and_noninteractive_refusal(run_script):
     plan = run_script(['-Modes', 'trigger', '-PlanOnly'])
     assert plan.returncode == 0, plan.stdout + plan.stderr
     report_path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', plan.stdout)[-1])
@@ -1294,15 +1305,20 @@ def test_trigger_validation_script_plan_preflight_and_noninteractive_refusal(run
     mixed_names = [case['name'] for case in json.loads(
         mixed_report_path.read_text(encoding='utf-8-sig'))['cases']]
     assert mixed_names.index('trigger-snapshot') < mixed_names.index('transient-continuous-auto-setup')
+
+
+def test_trigger_offline_preflight(run_script):
     preflight = run_script(['-TriggerOnly'], preflight=True)
     assert preflight.returncode == 0, preflight.stdout + preflight.stderr
 
 
-def test_configuration_readback_script_plan_preflight_and_noninteractive_refusal(run_script):
+def test_readback_offline_preflight(run_script):
     preflight = run_script(['-ReadbackOnly'], preflight=True)
     assert preflight.returncode == 0, preflight.stdout + preflight.stderr
     assert 'PASS: Readback preflight' in preflight.stdout
 
+
+def test_configuration_readback_script_plan_and_noninteractive_refusal(run_script):
     expected = ['input-state', 'measure-off', 'readback',
                 *(f'fixed-status-{mode}' for mode in ('cc', 'cv', 'cr', 'cw')),
                 'transient-status', 'list-status', 'fixed-slew-status', 'von-status',
@@ -1415,9 +1431,12 @@ def test_asrl_mixed_mode_plan_and_noninteractive_refusal(run_script, plan_only, 
         assert 'requires an interactive console' in result.stdout
 
 
-def test_system_query_focused_plan_and_preflight(run_script):
+def test_system_query_offline_preflight(run_script):
     preflight = run_script(['-SystemQueryOnly'], preflight=True)
     assert preflight.returncode == 0, preflight.stdout + preflight.stderr
+
+
+def test_system_query_focused_plan(run_script):
     result = run_script(['-Modes', 'system-query', '-PlanOnly'])
     assert result.returncode == 0, result.stdout + result.stderr
     path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)[-1])
@@ -1427,8 +1446,10 @@ def test_system_query_focused_plan_and_preflight(run_script):
     assert all(case['arguments'] == ['--hardware-validation', 'system-query'] for case in cases)
 
 
-@pytest.mark.parametrize('plan_only', [True, False])
-@pytest.mark.parametrize('connection,resource', [('usb', None), ('usb', RESOURCE), ('asrl', ASRL)])
+@pytest.mark.parametrize('plan_only,connection,resource', [
+    (True, 'usb', None), (True, 'asrl', ASRL),
+    (False, 'usb', None), (False, 'usb', RESOURCE), (False, 'asrl', ASRL),
+])
 def test_workflow_only_stays_offline_with_optional_connection(run_script, plan_only, connection, resource):
     result = run_script(['-Connection', connection, '-Modes', 'workflow',
                          *(['-PlanOnly'] if plan_only else [])], resource=resource)
@@ -1464,8 +1485,9 @@ def test_workflow_only_stays_offline_with_optional_connection(run_script, plan_o
     ('transient-cw,readback,list-cc', 'usb', RESOURCE, True),
     ('list-cc,auxiliary-controls', 'asrl', ASRL, True),
     ('workflow,auxiliary-controls,list-cc,measurement-extensions', 'asrl', ASRL, False),
+    # Full USB covers the combined LiveExtensions order; the default Full test compares
+    # USB/ASRL, and the explicit ASRL selections above exercise LiveExtensions separately.
     ('full', 'usb', RESOURCE, True),
-    ('full', 'asrl', ASRL, True),
 ])
 def test_explicit_live_extensions_never_use_simulation(run_script, mode, connection, resource, plan_only):
     flags = ['-Modes', mode, '-LiveExtensions', '-Connection', connection]
@@ -1478,12 +1500,17 @@ def test_explicit_live_extensions_never_use_simulation(run_script, mode, connect
     report = json.loads(path.read_text(encoding='utf-8-sig'))
     assert report['overall_status'] == ('PLAN ONLY' if plan_only else 'BLOCKED')
     assert not report['hardware_touched'] and report['resource'] == '<redacted>'
+    assert report['connection'] == connection
     cases = {case['name']: case for case in report['cases']}
     if mode == 'full':
         assert len(report['modes']) == 21
+    else:
+        assert set(report['modes']) == set(mode.split(','))
+    if not plan_only:
+        assert 'requires an interactive console' in result.stdout
     assert all(case['status'] == 'NOT RUN' for case in cases.values())
     assert all(case.get('execution') in (None, 'live') for case in cases.values())
-    if mode in ('full', 'measurement-extensions'):
+    if mode == 'full' or 'measurement-extensions' in mode.split(','):
         assert 'MEAS:VOLT:MIN?' in cases['measurement-extensions-min-max']['queries']
         assert 'SENS:AVER:COUN 8' in cases['measurement-extensions-average']['planned_writes']
     if 'list-cc-settings' in cases:

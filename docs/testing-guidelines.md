@@ -25,10 +25,19 @@ Linux Python 3.10–3.13 and Windows Python 3.10, 3.12 and 3.13. It excludes
 `tests/test_live_validation_script.py`, which exercises real PowerShell
 processes and is not part of routine Python-version compatibility testing.
 
-Changes to validation scripts, their direct CLI/Core boundaries or their
-script tests run the PowerShell PlanOnly, refusal and report contracts once on
-Windows Python 3.13. Windows offline preflight runs separately on the same
-affected boundary. Python Core/CLI/Worker tests own command, sequencing and
+Changes to validation scripts, CLI/Core, the shared test fixture or the tests
+invoked by the script run the PowerShell contracts once on Windows Python 3.13.
+The existing two Windows jobs partition `test_live_validation_script.py` using
+`-k preflight` and `-k "not preflight"`. Preflight-only test names include
+`preflight`; plan, refusal, report and safety harness tests do not. Both groups
+use the child-process VISA blocker; the default preflight retains Windows
+PowerShell 5.1 on Windows. A missing PowerShell executable fails CI.
+Keep individual mode plans for selection-specific behavior, one mixed refusal
+for a shared authorization gate, USB/ASRL default Full plan equivalence, a
+combined Full LiveExtensions plan on USB, and focused ASRL LiveExtensions
+plans and refusal. Avoid repeating an identical plan or a whole transport/mode
+cross-product just to assert the same report fields. Preserve distinct safety
+and error paths. Python Core/CLI/Worker tests own command, sequencing and
 failure behavior; CI does not duplicate these as Linux pseudo-terminal operator
 simulations. Unrelated changes skip the PowerShell checks; packaging changes
 retain the wheel/sdist installation smoke. Skipping a CI job does not imply
