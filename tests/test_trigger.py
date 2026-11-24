@@ -45,7 +45,7 @@ def physical(command, **arguments):
 
 @pytest.mark.parametrize("scenario", [
     "recall_works", "recall_ignored", "unrestorable", "stale_slot", "unknown_slot", "lost_after_recall",
-    "second_save_ignored", "unknown_stale_slot", "transient_enabled", "fixed_cv", "selected_list", "long_buffer",
+    "second_save_ignored", "unknown_stale_slot", "transient_enabled", "fixed_cv", "selected_list", "long_buffer", "medium_buffer",
 ])
 def test_contributor_list_requires_independent_recall_then_restores_working_buffer(
     monkeypatch, capsys, scenario,
@@ -72,9 +72,10 @@ def test_contributor_list_requires_independent_recall_then_restores_working_buff
                     self.response_errors["FUNC:MODE?"] = TimeoutError()
 
     fake = SettingsList()
-    if scenario == "long_buffer":
-        fake.values["LIST:STEP"] = "84"
-        fake.list_steps = {f"LIST:{key}? {index}": value for index in range(1, 85)
+    if scenario in {"long_buffer", "medium_buffer"}:
+        count = 84 if scenario == "long_buffer" else 25
+        fake.values["LIST:STEP"] = str(count)
+        fake.list_steps = {f"LIST:{key}? {index}": value for index in range(1, count + 1)
                            for key, value in (("LEV", ".2"), ("SLEW", ".1"), ("WID", "0.3"))}
     fake.range = 6
     fake.transient = scenario == "transient_enabled"
@@ -85,6 +86,16 @@ def test_contributor_list_requires_independent_recall_then_restores_working_buff
     if scenario == "unrestorable":
         fake.values["LIST:RANG"] = "0.1"  # Readable number without a restorable LIST range mapping.
     start = fake.list_steps.copy()
+    now = 1_000_000_000
+    query = fake.query
+
+    def timed_query(command):
+        nonlocal now
+        now += 150_000_000
+        return query(command)
+
+    monkeypatch.setattr(fake, "query", timed_query)
+    monkeypatch.setattr(contributor_settings, "monotonic_ns", lambda: now)
     session(fake, monkeypatch)
     args = ["contributor-settings", "--trial", "list-cc", "--slot", "1", "--resource", RESOURCE, "--json"]
     if scenario not in {"unknown_slot", "unknown_stale_slot"}:
@@ -124,7 +135,7 @@ def test_contributor_list_requires_independent_recall_then_restores_working_buff
         assert fake.calls[-2:] == ["LIST:RCL 1", "FUNC:MODE?"]
         return
 
-    if scenario in {"recall_works", "unknown_slot"}:
+    if scenario in {"recall_works", "unknown_slot", "medium_buffer"}:
         assert status == 0
         details = result["result"]
         assert details["recall_confirmed"] and details["restored"]
@@ -136,19 +147,23 @@ def test_contributor_list_requires_independent_recall_then_restores_working_buff
         assert status == 3
         assert result["error"]["code"] == "readback_mismatch" and result["error"]["details"]["restored"]
     assert fake.list_steps == start and fake.mode == "FIX" and not fake.input
+    assert now < 301_000_000_000
     writes = [command for command in fake.calls if "?" not in command]
     assert "INP ON" not in writes
-    if scenario in {"recall_works", "unknown_slot"}:
+    if scenario in {"recall_works", "unknown_slot", "medium_buffer"}:
         assert writes.count("LIST:SAV 1") == writes.count("LIST:RCL 1") == 2
 
 
 
-@pytest.mark.parametrize("ignored_width,count,origin,remaining_s", [
-    (False, 2, "CURR", 30), (True, 2, "CURR", 30),
-    (False, 2, "VOLT", 30), (False, 2, "RES", 30), (False, 2, "POW", 30),
-    (False, 25, "CURR", 30), (False, 84, "CURR", 30), (False, 2, "CURR", 6),
+@pytest.mark.parametrize("ignored_width,count,origin,remaining_s,delay_case", [
+    (False, 2, "CURR", 30, None), (True, 2, "CURR", 30, None),
+    (False, 2, "VOLT", 30, None), (False, 2, "RES", 30, None), (False, 2, "POW", 30, None),
+    (False, 25, "CURR", 30, None), (False, 84, "CURR", 30, None), (False, 2, "CURR", 6, None),
+    (False, 2, "CURR", 30, "slow_baseline"), (False, 2, "CURR", 30, "after_write"),
 ])
-def test_readback_list_buffer_without_slot_or_trigger(monkeypatch, capsys, ignored_width, count, origin, remaining_s):
+def test_readback_list_buffer_without_slot_or_trigger(
+    monkeypatch, capsys, ignored_width, count, origin, remaining_s, delay_case,
+):
     fake = TriggerFake()
     fake.range = 6
     fake.function = origin
@@ -163,10 +178,19 @@ def test_readback_list_buffer_without_slot_or_trigger(monkeypatch, capsys, ignor
     def timed_query(command):
         nonlocal now
         response = query(command)
-        now += 150_000_000
+        now += 500_000_000 if delay_case == "slow_baseline" and command.startswith("LIST:") else 150_000_000
         return response
 
+    write = fake.write
+
+    def timed_write(command):
+        nonlocal now
+        write(command)
+        if delay_case == "after_write" and command == "LIST:WID 1,1":
+            now = 26_000_000_000
+
     monkeypatch.setattr(fake, "query", timed_query)
+    monkeypatch.setattr(fake, "write", timed_write)
     monkeypatch.setattr(contributor_settings, "monotonic_ns", lambda: now)
     if ignored_width:
         fake.ignore = "LIST:WID 1,1"
@@ -175,13 +199,19 @@ def test_readback_list_buffer_without_slot_or_trigger(monkeypatch, capsys, ignor
             "--deadline-ns", str(now + remaining_s * 10**9)]
     status = cli.main(args)
     outcome = json.loads(capsys.readouterr().out)
-    if count > 2 or remaining_s < 30:
+    if count > 2 or remaining_s < 30 or delay_case == "slow_baseline":
         assert status == 3 and outcome["error"]["code"] == "settings_budget_insufficient"
         assert outcome["error"]["details"]["no_settings_written"]
         assert all("?" in command for command in fake.calls)
         assert fake.list_steps == original and fake.mode == "FIX" and fake.function == origin and not fake.input
         return
     assert now < 31_000_000_000
+    if delay_case == "after_write":
+        assert status == 3 and outcome["error"]["code"] == "settings_budget_insufficient"
+        assert outcome["error"]["details"]["restored"]
+        assert fake.list_steps == original and fake.mode == "FIX" and not fake.input
+        assert "FUNC:MODE LIST" not in fake.calls
+        return
     if ignored_width:
         assert status == 3 and outcome["error"]["code"] == "readback_mismatch"
         assert outcome["error"]["details"]["restored"]
