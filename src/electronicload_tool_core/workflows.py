@@ -427,6 +427,23 @@ def _timed_current_samples(session, stop, result, start):
     while (remaining := deadline - monotonic()) > 0:
         _wait(stop, remaining)
     _check_stop(stop)
+    # Take the final pair at the target boundary, not before it. Do not
+    # wait for another dwell; OFF cleanup follows immediately. Reserve
+    # the remaining independent ten-second envelope for cleanup.
+    session.sample_deadline = deadline + CURRENT_SAMPLE_GAP_S
+    try:
+        boundary_started = monotonic()
+        current = _sample(session, ("current",))["current_a"]
+        state = read_measurement(session, "input-state")["input_state"]
+        observed = monotonic()
+        if (boundary_started < deadline or observed > session.sample_deadline
+                or boundary_started - (start + samples[-1]["elapsed_s"]) > CURRENT_SAMPLE_GAP_S
+                or state != "ON" or abs(Decimal(str(current)) - CONTRIBUTOR_CURRENT) > CURRENT_TOLERANCE):
+            raise LoadError("workflow_load_unconfirmed", "Timed Load boundary evidence is insufficient.", 3)
+        samples.append({"started_elapsed_s": boundary_started - start, "elapsed_s": observed - start,
+                        "current_a": current, "input_state": state})
+    finally:
+        session.sample_deadline = None
     return "duration_elapsed"
 
 
@@ -447,8 +464,10 @@ def _run(session, command, settings, stop, result, quantities, record_row, *, re
         _run_cc(session, settings, stop, result, run_load, on_write_started=on_write_started)
         if require_input_off and command == "cc-timed-load":
             elapsed = (result["off_write_started_ns"] - result["on_write_started_ns"]) / 1e9
-            if (elapsed < CONTRIBUTOR_TIMED_SECONDS
-                    or elapsed - result["current_samples"][-1]["elapsed_s"] > CURRENT_SAMPLE_GAP_S):
+            final_sample = result["current_samples"][-1]
+            if (final_sample.get("started_elapsed_s", 0) < CONTRIBUTOR_TIMED_SECONDS
+                    or elapsed < final_sample["elapsed_s"]
+                    or elapsed - final_sample["elapsed_s"] > CURRENT_SAMPLE_GAP_S):
                 raise LoadError("workflow_load_unconfirmed", "OFF schedule or final sample coverage is insufficient.", 3)
             result["load_duration_confirmed"] = True
             result["measured_current_a"] = result["current_samples"][-1]["current_a"]

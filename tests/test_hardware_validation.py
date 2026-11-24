@@ -137,13 +137,15 @@ def test_isolated_auxiliary_trial_restores_or_stops_without_input_on(monkeypatch
 
 
 
-@pytest.mark.parametrize("trial,function", [
-    ("fixed-cc", "VOLT"), ("fixed-cv", "CURR"), ("fixed-cr", "CURR"),
-    ("fixed-cw", "CURR"), ("transient", "VOLT"), ("average", "CURR"),
+@pytest.mark.parametrize("trial,function,enabled", [
+    ("fixed-cc", "VOLT", False), ("fixed-cv", "CURR", False), ("fixed-cr", "CURR", False),
+    ("fixed-cw", "CURR", False), ("transient", "VOLT", False), ("average", "CURR", False),
+    ("fixed-cc", "CURR", True), ("transient", "CURR", True),
 ])
-def test_automatic_readback_trials_restore_original_mode_and_settings(monkeypatch, capsys, trial, function):
+def test_automatic_readback_trials_restore_original_mode_and_settings(monkeypatch, capsys, trial, function, enabled):
     fake = ValidationFake()
     fake.function = function
+    fake.transient = enabled
     fake.range = 6
     fake.values.update({"INP:TIM": "0", "TRIG:TIM": "5", "SENS:AVER:COUN": "14"})
     initial = dict(fake.values)
@@ -157,7 +159,7 @@ def test_automatic_readback_trials_restore_original_mode_and_settings(monkeypatc
     result = json.loads(output.out)["result"]
     assert result["restored"] and result["input_state"] == "OFF"
     assert fake.function == function and fake.mode == "FIX"
-    assert not fake.input and not fake.transient
+    assert not fake.input and fake.transient == enabled
     assert fake.current == current
     assert "INP ON" not in fake.calls
     for key, value in initial.items():

@@ -756,11 +756,11 @@ transition Core rechecks physical OFF, CC settings, Short/Transient OFF and Time
 readback. Core signals the SCPI ON write start before waiting for the instrument,
 so the same six-second deadline covers the ON subprocess and subsequent polls.
 Once ON is confirmed, polling can begin as early as one second before the
-earliest possible expiry. The script requires a recent ON observation, no more
-than one second before expected expiry, and an OFF query that started at least
-five seconds after the SCPI Input ON write began and returned within six seconds
-of that write start. An OFF reply
-completed before five seconds fails the trial. Each poll respects the remaining
+earliest possible expiry. The script requires an ON observation whose query
+started at or after the five-second boundary, followed by the first OFF
+observation within six seconds of the write start. An earlier OFF fails;
+a bracket that includes time before five seconds is insufficient evidence
+and fails even if later queries would still report OFF. Each poll respects the remaining
 observation window. When the window closes without a valid observation, the
 script fails and begins OFF cleanup. If the CLI process is still running at
 the deadline, the script prompts you to use the independent hardware cutoff
@@ -784,9 +784,9 @@ confirmed OFF.
 在 Timer Input ON 提示確認上述條件，10 秒上限僅適用這組核准條件。
 Core 在等待儀器回覆前通知 Script SCPI ON 的寫入起點，因此 ON 子程序與
 後續查詢共用 6 秒期限。ON 確認後，最早從可能到期前 1 秒開始查詢。
-須有距預期到期不超過 1 秒的近期 ON 證據；OFF 查詢必須在寫入開始後至少
-5 秒才啟動，且在第 6 秒前收到結果。
-若在第 5 秒前讀到 OFF 即失敗。第 6 秒仍無有效觀察則判定失敗並開始 OFF
+須有查詢起點不早於第 5 秒的 ON 證據，再於第 6 秒前取得首次 OFF。
+提前 OFF 或首次 OFF 的時間區間無法排除提前關閉均失敗，不得以後續 OFF
+查詢覆蓋。第 6 秒仍無有效觀察則判定失敗並開始 OFF
 清理。若 CLI 子程序在截止時仍在執行，Script 會先提示立即使用獨立硬體
 停損，再等待子程序退出。子程序已退出且既有通訊規則允許時，才執行
 VISA 清理。混選含 Trigger 且通訊失信時，由現場獨立處理。
@@ -1376,10 +1376,10 @@ to pass. If pytest deselects any of those cases, the script stops the group
 before running it. The report records `NOT RUN` when no test ran and `SKIP`
 when tests were skipped. Either result leaves the run incomplete.
 
-By default, Readback uses the isolated settings batch to automatically select
+With `-LiveExtensions` and no Expected parameters, Readback uses the isolated settings batch to automatically select
 functions, exercise known settings, compare independent readbacks and verify
 restoration. No panel values or repeated manual function selection are required.
-For legacy read-only diagnostics with known panel settings, explicitly use `-ExpectedRiseSlew` and
+Without `-LiveExtensions` Readback is read-only. For legacy diagnostics with known panel settings, use `-ExpectedRiseSlew` and
 `-ExpectedFallSlew` together (A/µs), `-ExpectedVonThreshold` (V) and
 `-ExpectedVonLatch` (`on` or `off`) together, `-ExpectedShort` (`on` or
 `off`), and `-ExpectedAverageCount` (2–16). Incomplete baselines leave the case
@@ -1388,7 +1388,7 @@ Fixed, Transient, Trigger and TRACE also keep their own post-setup comparisons.
 
 ### Contributor extension selection
 
-Select `-LiveExtensions` with one or more extension modes or `-Modes full`
+Select `-LiveExtensions` with Readback, one or more extension modes or `-Modes full`
 to request the contributor hardware cases. Provide an explicit `-Resource`
 and matching `-Connection`. Use `-PlanOnly` to review CLI operations and
 the extension SCPI previews without opening VISA. Execution requires the
@@ -1398,7 +1398,7 @@ The hardware case results carry `execution: live`.
 With Input OFF, `workflow` verifies two scheduled measurement samples and
 completion of a voltage condition at 1 V or above. The two CC cases establish
 Fixed CC Low with a dedicated 5 V source limited to 0.8 A and use a 0.1 A
-setpoint. Timed Load requests OFF at 5 seconds. Discharge samples every
+setpoint. At the five-second boundary, Timed Load takes a final bounded current/Input sample pair and immediately begins OFF cleanup; there is no extra dwell. Discharge samples every
 0.5 seconds and must reach 0.00010 Ah. It stops on a voltage of 4.5 V or lower
 or after 6 seconds if capacity is still below the target. Timing starts at
 the SCPI `INP ON` write. For each case, arm an independent hardware cutoff
@@ -1406,7 +1406,7 @@ before confirming the trial so that load time, including OFF confirmation,
 cannot exceed 10 seconds from the write. If communication is lost, use that
 cutoff immediately. Skip physical execution if the site cannot enforce this
 limit. Timed Load automatically samples instrument current and Input state
-during the 5-second window and checks the current band (0.09–0.11 A), sample
+during the 5-second window and at its boundary and checks the current band (0.09–0.11 A), sample
 coverage and OFF timestamps. Discharge checks current during capacity
 sampling. This is sampled instrument evidence, not an independent continuous
 waveform. Missing evidence or early loss of current fails the trial.
@@ -1444,11 +1444,14 @@ instrument.
 The script runs source-connected trials (including Trigger and Protection)
 before the isolated settings batch. Full or mixed selections prompt once
 at the transition to physical isolation; the operator must disconnect both
-source and DUT before authorizing the batch. Readback needs no panel values
+source and DUT before authorizing the batch. Automatic Readback needs no panel values
 or manual function selection. With Input OFF it exercises known values and
 restores the original settings and function, including LIST without saving a
-slot. Explicit legacy Expected parameters select the original read-only
-diagnostic comparisons, not automatic acceptance.
+slot. An enabled Transient starting state is supported when its original
+settings and HOLD source can be verified and restored; other unsafe or
+unrestorable states are refused before writing. Without LiveExtensions or
+with explicit legacy Expected parameters, Readback remains a read-only
+diagnostic, not automatic acceptance.
 
 使用 `-LiveExtensions` 搭配單選、多選或 `-Modes full`，明確選擇
 Contributor 實機項目。指定與 `-Connection` 相符的 `-Resource`，
@@ -1457,11 +1460,11 @@ Contributor 實機項目。指定與 `-Connection` 相符的 `-Resource`，
 
 Input OFF 時，`workflow` 驗證定時取樣兩次及電壓達到 1 V 的條件。兩個
 CC 案例自動設定 Fixed CC Low，使用專用的 5 V、限流 0.8 A 電源，負載
-設定為 0.1 A。Timed Load 在第 5 秒要求 OFF。放電每 0.5 秒取樣，須達到
+設定為 0.1 A。Timed Load 在第 5 秒界線取得最後一組有界電流及 Input 取樣，隨即開始 OFF 清理，不增加額外停留時間。放電每 0.5 秒取樣，須達到
 0.00010 Ah 才通過，電壓降至 4.5 V 以下（含）或第 6 秒容量仍未達標時即停止。
 兩項都從 SCPI `INP ON` 寫入起算。每次確認前先備妥獨立硬體停損，確保從
 寫入至 OFF 確認不超過 10 秒。通訊失信時立即使用停損。現場無法確保期限時，
-不執行實機測試。Timed Load 在 5 秒期間自動取樣儀器電流及 Input 狀態，
+不執行實機測試。Timed Load 在 5 秒期間及時間界線自動取樣儀器電流及 Input 狀態，
 核對 0.09 至 0.11 A、取樣涵蓋程度及 OFF 時間。放電在容量取樣時核對電流。
 這是儀器自身的取樣證據，而非獨立連續波形；證據不足或提前掉載即失敗。
 除安全需要外，不得人工介入或讓獨立停損在預定觀察期間動作。CC 案例結束後，Fixed CC
@@ -1488,9 +1491,11 @@ CC 案例自動設定 Fixed CC Low，使用專用的 5 V、限流 0.8 A 電源�
 
 需接電源的試驗（含 Trigger 與 Protection）先執行，再進入隔離設定批次。
 Full 或混選在切換至隔離批次時只提示一次；操作者須實體斷開來源及待測物。
-Readback 不需提供面板值或手動選擇功能；Input OFF 時自動測試已知設定並還原原始
-設定及功能，LIST 讀回不需儲存槽位。明確提供舊有 Expected 參數時才執行原唯讀診斷
-比對，不代表自動驗收。
+Readback 加上 `-LiveExtensions` 且未提供 Expected 參數時，不需提供面板值或手動選擇功能；
+Input OFF 時自動測試已知設定並還原原始設定及功能，LIST 讀回不需儲存槽位。
+已啟用 Transient 的起始狀態須可確認並還原原設定及 HOLD 來源；不安全或不可還原的
+狀態在寫入前拒絕。未加 LiveExtensions 或明確提供舊有 Expected 參數時為唯讀診斷，
+不代表自動驗收。
 
 ### Script parameters
 
@@ -1757,7 +1762,7 @@ independent operator action; the run stays FAIL.
 | `-TriggerExternalSetup` | Optional explanatory note; the console still requires physical equipment and wiring confirmation. |
 
 The Contributor CLI samples instrument current in one session, dispatching the
-software Trigger only for HOLD or BUS after the baseline is observed. It checks
+software Trigger only for HOLD or BUS after the baseline is observed and Input ON is rechecked. Plans with pulse or dwell too short for configured VISA query delays are rejected. It checks
 ordered current plateaus and bounded time brackets; insufficient sample
 resolution, missing pulses or wrong order fail the trial. This is sampled
 functional evidence, not independent pulse-width or amplitude calibration.
@@ -1788,7 +1793,7 @@ skips further VISA commands in that situation. Treat TIMER observation as a
 functional test.
 
 The standalone contributor scope `--hardware-validation trigger` is limited to
-IT8812C USB/System VISA. In that scope, Enable, Input ON and software Trigger
+IT8812C USB/ASRL System VISA. In that scope, Enable, Input ON and software Trigger
 compare the expected function, full dynamic configuration and Trigger Setup
 with physical readback. Input ON also requires `--confirm`. When restoring a
 snapshot, contributor `trigger-configure` can supply both Source and interval

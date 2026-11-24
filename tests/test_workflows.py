@@ -466,7 +466,7 @@ def test_workflow_contributor_cli_uses_one_readonly_visa_session(fake_visa, caps
     assert fake_visa.calls.count("open_resource") == fake_visa.calls.count("session_close") == 1
 
 
-@pytest.mark.parametrize("scenario", ["timed", "early_wake", "early_drop", "capacity", "stop", "lost", "late_off", "voltage"])
+@pytest.mark.parametrize("scenario", ["timed", "early_wake", "early_drop", "late_drop", "capacity", "stop", "lost", "late_off", "voltage"])
 def test_contributor_cc_owns_bounded_on_and_cleanup(clock, monkeypatch, capsys, scenario):
     class PhysicalLoad(ValidationFake):
         query_delay = 0.15
@@ -513,11 +513,12 @@ def test_contributor_cc_owns_bounded_on_and_cleanup(clock, monkeypatch, capsys, 
             return wait(timeout - 0.0005 if timeout > 1 else timeout)
 
         monkeypatch.setattr(clock, "wait", wake_early)
-    if scenario == "early_drop":
+    if scenario in {"early_drop", "late_drop"}:
         wait = clock.wait
+        drop_at = 2 if scenario == "early_drop" else 4.9
 
         def drop_early(timeout):
-            if fake.input and clock.now < fake.dispatched + 2 <= clock.now + timeout:
+            if fake.input and clock.now < fake.dispatched + drop_at <= clock.now + timeout:
                 fake.input = False
             return wait(timeout)
 
@@ -548,11 +549,11 @@ def test_contributor_cc_owns_bounded_on_and_cleanup(clock, monkeypatch, capsys, 
         assert outcome["error"]["details"]["manual_action_required"]
         return
     assert not fake.input
-    if scenario in {"stop", "voltage", "early_drop"}:
+    if scenario in {"stop", "voltage", "early_drop", "late_drop"}:
         assert status == 3
         error = outcome["error"]
         expected = {"stop": "stopping", "voltage": "capacity_cutoff_unconfirmed",
-                    "early_drop": "workflow_load_unconfirmed"}
+                    "early_drop": "workflow_load_unconfirmed", "late_drop": "workflow_load_unconfirmed"}
         assert error["code"] == expected[scenario]
         assert error["details"]["cleanup"]["off_confirmed"]
         return
@@ -567,6 +568,7 @@ def test_contributor_cc_owns_bounded_on_and_cleanup(clock, monkeypatch, capsys, 
         assert result["load_duration_confirmed"] is True
         assert result["load_evidence_source"] == "instrument_current_samples"
         assert len(result["current_samples"]) >= 2
+        assert result["current_samples"][-1]["started_elapsed_s"] >= 5
         assert all(sample["input_state"] == "ON" and sample["current_a"] == 0.1
                    for sample in result["current_samples"])
     else:

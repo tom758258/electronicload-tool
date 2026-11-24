@@ -451,7 +451,7 @@ def test_default_usb_and_explicit_asrl_full_plan_share_the_matrix(run_script):
                  'trigger-hold-on', 'trigger-external-on', 'trigger-restore'):
         assert name in names
     assert names.index('trigger-snapshot') < names.index('scpi-version') < names.index('readback')
-    assert names.index('trigger-restore') < names.index('average-status')
+    assert names.index('average-status') < names.index('protection-start-state')
     assert names.index('protection-prepare-cc-readback') < names.index('protection-software-current-original')
     assert names.index('protection-default-hardware-power-final') < names.index('sequence-cc')
     assert names.index('sequence-cw') < names.index('set-cc-high')
@@ -653,7 +653,8 @@ def test_input_timer_is_also_selectable_with_modes(run_script):
 
 
 @pytest.mark.parametrize('scenario,checks,status,code', [
-    ('off-after-late-write', 3, 'PASS', None),
+    ('off-after-late-write', 4, 'PASS', None),
+    ('crossing-off', 2, 'FAIL', 'timer_automatic_off_unconfirmed'),
     ('unbracketed-off', 1, 'FAIL', 'timer_automatic_off_unconfirmed'),
     ('stays-on', 4, 'FAIL', 'timer_expiry_unconfirmed'),
     ('invalid', 1, 'FAIL', 'readback_mismatch'),
@@ -688,9 +689,16 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName, [string[]]$Extr
     $script:report.results[0]['observed_at_ms'] = $script:watch.ElapsedMilliseconds
     $script:report.results[0]['observed_at_ns'] = Get-TimerMonotonicNs
     $off = $Scenario -in @('late-off','early-off','unbracketed-off') -or
-        ($Scenario -eq 'off-after-late-write' -and $script:checks -eq 3)
+        ($Scenario -eq 'off-after-late-write' -and $script:checks -eq 4) -or
+        ($Scenario -eq 'crossing-off' -and $script:checks -eq 2)
     $timing = if ($Scenario -ne 'unconfirmed-timing') {
-        @{query_started_ns=$queryStarted;query_completed_ns=($queryStarted + 10000000L)}
+        $completed = if ($Scenario -eq 'crossing-off' -and $script:checks -eq 2) {
+            $script:watch.ElapsedMilliseconds += 200
+            $script:report.results[0]['observed_at_ms'] = $script:watch.ElapsedMilliseconds
+            $script:report.results[0]['observed_at_ns'] = Get-TimerMonotonicNs
+            Get-TimerMonotonicNs
+        } else { $queryStarted + 10000000L }
+        @{query_started_ns=$queryStarted;query_completed_ns=$completed}
     }
     return @{result=@{seconds=5;enabled=(-not $off);timer_timing=$timing;input_state=$(
         if ($off) { 'OFF' } elseif ($Scenario -eq 'invalid') { 'UNKNOWN' } else { 'ON' }
@@ -1149,6 +1157,9 @@ def test_trigger_validation_script_plan_preflight_and_noninteractive_refusal(run
         assert (f'trigger-{source}-dispatch' in cases) == software
         capture = cases[f'trigger-{source}-dispatch' if software else f'trigger-{source}-observed']
         assert capture['command'] == 'trigger-observe'
+        names = list(cases)
+        capture_name = f'trigger-{source}-dispatch' if software else f'trigger-{source}-observed'
+        assert names.index(f'trigger-{source}-on') < names.index(capture_name) < names.index(f'trigger-{source}-off')
         assert 'MEAS:CURR?' in capture['queries']
         assert capture['planned_writes'] == (
             ['SYST:REM', 'TRIG:IMM' if source == 'hold' else '*TRG'] if software else [])
@@ -1193,7 +1204,7 @@ def test_configuration_readback_script_plan_preflight_and_noninteractive_refusal
     settings = {'fixed-slew-status': {'rise_slew_a_per_us': 0.1, 'fall_slew_a_per_us': 0.2},
                 'von-status': {'threshold_v': 0, 'latch': 'off'}, 'short-status': {'short_state': 'ON'},
                 'average-status': {'average_count': 8}}
-    auto = run_script(['-Modes', 'readback', '-PlanOnly'])
+    auto = run_script(['-Modes', 'readback', '-LiveExtensions', '-PlanOnly'])
     assert auto.returncode == 0, auto.stdout + auto.stderr
     auto_path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', auto.stdout)[-1])
     auto_report = json.loads(auto_path.read_text(encoding='utf-8-sig'))
@@ -1203,6 +1214,7 @@ def test_configuration_readback_script_plan_preflight_and_noninteractive_refusal
     assert all(case['status'] == 'NOT RUN' for case in auto_report['cases'])
     assert not auto_report['hardware_touched']
     for options, status in [(['-PlanOnly', *baseline], 'PLAN ONLY'),
+                            (['-PlanOnly'], 'PLAN ONLY'),
                             (['-ExpectedRiseSlew', '0.1'], 'BLOCKED')]:
         result = run_script(['-Modes', 'readback', *options])
         assert result.returncode == (0 if status == 'PLAN ONLY' else 2), result.stdout + result.stderr
@@ -1217,7 +1229,7 @@ def test_configuration_readback_script_plan_preflight_and_noninteractive_refusal
         assert all(case['status'] == 'NOT RUN' for case in report['cases'])
         for case in report['cases'][-4:]:
             assert case['readback_comparison'] == 'NOT RUN'
-            if status == 'PLAN ONLY':
+            if options == ['-PlanOnly', *baseline]:
                 assert case['expected_readback'] == settings[case['name']]
             else:
                 assert 'expected_readback' not in case and case['condition']

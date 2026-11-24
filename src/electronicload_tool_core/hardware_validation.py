@@ -16,7 +16,7 @@ from .errors import LoadError
 from .identity import MODEL_ID, parse_identity
 from .readback import TRANSIENT_LEVEL_QUERIES, fixed_slew_status, transient_mode, transient_values
 from .simulator import ControlSimulator
-from .visa import open_request_session, require_trusted_session, validate_request_connection
+from .visa import QUERY_DELAY_S, open_request_session, require_trusted_session, validate_request_connection
 from .trigger import (SOURCE_TOKENS, TRIGGER_COMMANDS, TRIGGER_INTERVAL_QUERY,
                       TRIGGER_SOURCE_QUERY, read_source, sampled_waveform_evidence,
                       software_trigger, validate_interval, validate_setup)
@@ -658,6 +658,11 @@ def execute_trigger_observation(*, mode, resource, backend, model_id, expected, 
         Decimal(0) <= levels[key] <= Decimal(2) for key in ("level_a", "level_b")
     ):
         raise LoadError("unsupported_live_scope", "Observation requires Low range and levels within 2 A.")
+    widths = [levels["width_a"]] + ([levels["width_b"]] if is_list else [])
+    # Even consecutive queries consume two configured query delays plus
+    # the existing 50 ms sampling wait. Reject impossible plans before VISA.
+    if min(0.5, float(min(widths)) / 4) <= 2 * QUERY_DELAY_S + 0.05:
+        raise LoadError("argument_error", "Trigger dwell or pulse is too short for automatic current sampling.")
     if levels["level_a"] == levels["level_b"] or needed > seconds:
         raise LoadError("argument_error", "Trigger observation needs distinct levels and a sufficient window.")
     if not confirmed:
@@ -731,6 +736,7 @@ def execute_trigger_observation(*, mode, resource, backend, model_id, expected, 
             if abs(baseline - wanted) > tolerance:
                 raise LoadError("trigger_observation_unconfirmed", "Pre-trigger current baseline was not observed.", 3)
         if software:
+            _require_trigger_input_on(session, None, "Trigger observation")
             if monotonic_ns() >= deadline_ns:
                 raise LoadError("trigger_observation_unconfirmed", "No time remains for software Trigger.", 3)
             c._write(session, software_trigger(source))

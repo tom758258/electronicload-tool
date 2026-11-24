@@ -232,11 +232,12 @@ def _list_trial(session, slot, previous_slot_width):
 
 
 
-def _selection_guard(session):
+def _selection_guard(session, *, allow_transient=False):
     """Only switch a known, unloaded mode with all relevant interlocks OFF."""
     c._input_off(session)
     original = readback._selection(session)
-    if (original["active_mode"] not in {"fixed", "list"} or original["transient_enabled"]
+    modes = {"fixed", "list", "transient"} if allow_transient else {"fixed", "list"}
+    if (original["active_mode"] not in modes or (original["transient_enabled"] and not allow_transient)
             or c._flag(session, readback.SHORT_QUERY) != "OFF"
             or c._flag(session, "INP:TIM?") != "OFF"
             or c._flag(session, c.SLOW_RISE_QUERY) != "OFF"
@@ -248,9 +249,12 @@ def _selection_guard(session):
 
 
 def _select_fixed(session, function, write):
-    state = _selection_guard(session)
+    state = _selection_guard(session, allow_transient=True)
     if function == "CR" and c._flag(session, c.LED_QUERY) != "OFF":
         raise LoadError("unsafe_mode", "Plain CR settings require LED OFF.")
+    if state["transient_enabled"]:
+        write("TRAN OFF")
+        state = _selection_guard(session)
     if state["active_mode"] == "list":
         write("FUNC:MODE FIX")
         state = _selection_guard(session)
@@ -263,9 +267,20 @@ def _select_fixed(session, function, write):
 
 def _with_selection(session, original, function, exercise, restore, baseline):
     entered = False
+    original_transient = None
+    original_trigger = None
+    if original["transient_enabled"]:
+        original_transient = readback._transient(session, original)["configuration"]
+        original_trigger = _trigger_snapshot(session)
+        if original_trigger["source"] != "HOLD":
+            raise LoadError("unsafe_mode", "An enabled Transient baseline requires HOLD for safe isolated restoration.")
 
     def run(write):
         nonlocal entered
+        if original_transient is not None:
+            if (readback._transient(session, original)["configuration"] != original_transient
+                    or _trigger_snapshot(session) != original_trigger):
+                raise _mismatch("Original Transient or Trigger changed before testing.")
         _select_fixed(session, function, write)
         entered = True
         return exercise(write)
@@ -280,10 +295,18 @@ def _with_selection(session, original, function, exercise, restore, baseline):
         _select_fixed(session, original["function"], write)
         if original["active_mode"] == "list":
             write("FUNC:MODE LIST")
+        if original_transient is not None:
+            if (readback._transient(session, original)["configuration"] != original_transient
+                    or _trigger_snapshot(session) != original_trigger):
+                raise _mismatch("Original Transient or Trigger was not restored before enabling.")
+            _selection_guard(session)
+            write("TRAN ON")
         if readback._selection(session) != original:
             raise _mismatch("Original mode selection was not restored.")
 
-    return run, cleanup, {"selection": original, **baseline}
+    return run, cleanup, {"selection": original, **baseline,
+                          **({"original_transient": original_transient, "original_trigger": original_trigger}
+                             if original_transient is not None else {})}
 
 
 def _fixed_readback_trial(session, function):
@@ -460,7 +483,7 @@ def _prepare_trial(session, trial, slot, previous_slot_width):
     target = trial[-2:].upper() if trial.startswith("fixed-") else "CC"
     needs_selection = selection["active_mode"] != "fixed" or selection["function"] != target
     if needs_selection:
-        selection = _selection_guard(session)
+        selection = _selection_guard(session, allow_transient=True)
     elif trial not in READBACK_TRIALS:
         _guard(session)
     else:
@@ -559,10 +582,12 @@ def execute(trial, *, mode, resource, backend, model_id, confirmed, slot=None, p
                        "writes": ["FUNC:MODE FIX", f"FUNC {c.TRANSIENT_FUNCTIONS[target]}",
                                   "FUNC <original>", "FUNC:MODE <original FIX/LIST>"]}
         conditional.setdefault(trial, []).append(mode_change)
+        conditional[trial].append({"condition": "Original Transient enabled, HOLD and restorable settings confirmed with Input OFF",
+                                   "writes": ["TRAN OFF", "TRAN ON"]})
         if trial == "transient":
             conditional[trial].append({"condition": "Original Trigger Source differs from HOLD",
                                        "writes": ["TRIG:SOUR HOLD", "TRIG:TIM <original>", "TRIG:SOUR <original>"]})
-        queries[trial] += [c.SLOW_RISE_QUERY, c.LED_QUERY]
+        queries[trial] += [c.SLOW_RISE_QUERY, c.LED_QUERY, "TRIG:SOUR?", "TRIG:TIM?"]
         return {**marker, "hardware_access": False, "planned_writes": ["SYST:REM", *writes[trial]],
                 **({"conditional_writes": conditional[trial]} if trial in conditional else {}),
                 "queries": ["*IDN?", "INP:STAT?", "FUNC:MODE?", "FUNC?", "TRAN?", "INP:TIM?",
@@ -583,7 +608,7 @@ def execute(trial, *, mode, resource, backend, model_id, confirmed, slot=None, p
         c._write(session, "SYST:REM")
         c._input_off(session)
         if "selection" in original:
-            if _selection_guard(session) != original["selection"]:
+            if _selection_guard(session, allow_transient=True) != original["selection"]:
                 raise _mismatch("Original selection changed before the settings trial.")
         elif trial in READBACK_TRIALS:
             _selection_guard(session)

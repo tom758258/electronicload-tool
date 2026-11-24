@@ -2,6 +2,7 @@
 
 import json
 from threading import Event
+from time import monotonic_ns
 
 import pytest
 
@@ -198,6 +199,43 @@ def test_contributor_trigger_observation_plan_and_refusal_before_visa(monkeypatc
     assert not plan["hardware_access"] and plan["planned_writes"] == ["SYST:REM", "TRIG:IMM"]
     assert "MEAS:CURR?" in plan["queries"] and not fake.calls
     assert cli.main([*args, "--confirm"]) == 2 and not fake.calls
+    expected["configuration"]["pulse_width"] = "0.001"
+    args[args.index("--validation-settings-json") + 1] = json.dumps(expected)
+    assert cli.main([*args, "--confirm", "--dry-run"]) == 2 and not fake.calls
+
+
+def test_automatic_bus_does_not_dispatch_after_input_drops(monkeypatch, capsys):
+    fake = TriggerFake()
+    fake.range = 6
+    fake.mode = "LIST"
+    fake.input = True
+    fake.values["TRIG:SOUR"] = "BUS"
+    fake.values["LIST:COUN"] = "1"
+    fake.values["MEAS:CURR"] = "0"
+    steps = [{"current_a": 0.1, "slew_a_per_us": 0.1, "width_s": 2},
+             {"current_a": 0.2, "slew_a_per_us": 0.1, "width_s": 2}]
+    fake.list_steps = {f"LIST:{stem}? {index}": str(step[key])
+                       for index, step in enumerate(steps, 1)
+                       for stem, key in (("LEV", "current_a"), ("SLEW", "slew_a_per_us"), ("WID", "width_s"))}
+    query = fake.query
+
+    def drop_after_readback(command):
+        response = query(command)
+        if fake.remote and command == "LIST:WID? 2":
+            fake.input = False
+        return response
+
+    monkeypatch.setattr(fake, "query", drop_after_readback)
+    session(fake, monkeypatch)
+    expected = {"function": "LIST", "trigger": {"source": "BUS"},
+                "configuration": {"range": "low", "repeat_count": 1, "steps": steps}}
+    args = ["trigger-observe", "--hardware-validation", "trigger",
+            "--validation-settings-json", json.dumps(expected), "--observation-seconds", "15",
+            "--deadline-ns", str(monotonic_ns() + 14_000_000_000), "--confirm",
+            "--resource", RESOURCE, "--json"]
+    assert cli.main(args) != 0
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "input_not_on"
+    assert "MEAS:CURR?" in fake.calls and "*TRG" not in fake.calls
 
 
 @pytest.mark.parametrize("function,sources", [

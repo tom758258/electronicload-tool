@@ -5,7 +5,7 @@ Default: the established validation modes, with common read-only safety precheck
 trigger and input-timer. Omitted -Modes selects all default modes.
 -Modes protection selects the separate Protection validation procedure.
 -Modes sequence selects four bounded Fixed Software Sequence trials.
--Modes readback automatically exercises settings with Input OFF and isolated terminals.
+-Modes readback -LiveExtensions exercises settings with Input OFF and isolated terminals.
 -Modes full (default) selects all trials. USB and ASRL use the same matrix.
 -Modes workflow runs only dry-run and simulation, without an instrument.
 -Modes measurement-extensions,auxiliary-controls,list-cc selects offline checks.
@@ -313,7 +313,7 @@ function Save-Report {
                 foreach ($field in @('input_state','cleanup','on_write_started_ns','off_write_started_ns','off_confirmed_ns','duration_s',
                                      'current_a','measured_current_a','capacity_ah','trial','restored','short_state',
                                      'short_on_confirmed','saved_slot','a_width_s','b_width_s','save_confirmed','recall_confirmed','exited_list',
-                                     'load_evidence_source','current_samples','observed','expected_setpoint',
+                                     'load_evidence_source','current_samples','expected_setpoint',
                                      'expected_level_a','expected_width_s','expected_average_count')) {
                     if ($null -ne $entry.response.result.$field) { $case[$field] = $entry.response.result.$field }
                 }
@@ -1111,13 +1111,14 @@ function Invoke-TimerExpiry($Step) {
                 if ($query.query_completed_ns -lt $earliestExpiryNs) {
                     Fail-Case $Step.name 'timer_expiry_early' 'Input was observed OFF before the earliest possible Timer expiry.'
                 }
-                if ($query.query_started_ns -ge $earliestExpiryNs) {
-                    if ($lastOnNs -lt ($earliestExpiryNs - 1000000000L) -or $lastOnNs -gt $query.query_started_ns) {
-                        Fail-Case $Step.name 'timer_automatic_off_unconfirmed' 'No timely ON observation brackets the Timer expiry.'
-                    }
-                    $entry['automatic_off_observed'] = $true
-                    return
+                # Never discard the first OFF. A bracket that includes time
+                # before expiry cannot exclude an early OFF.
+                if ($query.query_started_ns -lt $earliestExpiryNs -or
+                    $lastOnNs -lt $earliestExpiryNs -or $lastOnNs -gt $query.query_started_ns) {
+                    Fail-Case $Step.name 'timer_automatic_off_unconfirmed' 'The first OFF bracket does not exclude early OFF.'
                 }
+                $entry['automatic_off_observed'] = $true
+                return
             } else {
                 if (-not $status.enabled) {
                     Fail-Case $Step.name 'readback_mismatch' 'Timer was disabled while Input was ON.'
@@ -1252,8 +1253,13 @@ function New-TriggerPlan {
             $observation = @{name="$prefix-observed";command='trigger-observe';args=$captureArgs;execution='live';
                 condition='Sample current within the observation window; EXTERNAL requires only the physical pulse at capture readiness.'}
         }
-        $script:triggerPlans += @{name="$prefix-off";command='input-off';args=$triggerScope}
-        $script:triggerPlans += $observation
+        if ($source -in @('HOLD','BUS')) {
+            $script:triggerPlans += @{name="$prefix-off";command='input-off';args=$triggerScope}
+            $script:triggerPlans += $observation
+        } else {
+            $script:triggerPlans += $observation
+            $script:triggerPlans += @{name="$prefix-off";command='input-off';args=$triggerScope}
+        }
         $release = if ($isList) { 'list-exit' } else { 'transient-disable' }
         $script:triggerPlans += @{name="$prefix-release";command=$release;args=$triggerScope}
     }
@@ -1934,8 +1940,8 @@ try {
             throw 'Contributor Workflow load trials require a dedicated 5 V / 0.8 A source.'
         }
     }
-    if ($LiveExtensions -and -not @($selectedModes | Where-Object { $_ -in $extensionModes }).Count) {
-        throw '-LiveExtensions requires a selection including an extension or Workflow mode.'
+    if ($LiveExtensions -and -not @($selectedModes | Where-Object { $_ -in ($extensionModes + 'readback') }).Count) {
+        throw '-LiveExtensions requires a selection including Readback, an extension or Workflow mode.'
     }
     if (-not $Target -or (-not $Resource -and -not $offlineOnly)) {
         Write-Host 'BLOCKED: explicit -Target and, for hardware cases, -Resource are required.'
@@ -2004,7 +2010,7 @@ try {
         }
     }
     $isolated = @()
-    $legacyReadback = @(@('ExpectedRiseSlew','ExpectedFallSlew','ExpectedVonThreshold','ExpectedVonLatch',
+    $legacyReadback = -not $LiveExtensions -or @(@('ExpectedRiseSlew','ExpectedFallSlew','ExpectedVonThreshold','ExpectedVonLatch',
         'ExpectedShort','ExpectedAverageCount') | Where-Object { $PSBoundParameters.ContainsKey($_) }).Count -gt 0
     if ($readbackSelected -and $legacyReadback) {
         $baselineParameters = @{
@@ -2486,7 +2492,7 @@ try {
     if ($systemQuerySelected) { Write-Host 'System Query: read version, display mode and one Error Queue entry.' }
     if ($readbackSelected) {
         if ($legacyReadback) {
-            Write-Host 'Explicit Expected parameters select the legacy read-only diagnostic comparisons.'
+            Write-Host 'Read-only diagnostics: use -LiveExtensions without Expected parameters for automatic isolated Readback.'
         } else {
             Write-Host 'Readback automatically sets known values, compares independent readbacks, and restores settings in the isolated batch.'
         }
@@ -2817,7 +2823,12 @@ try {
                 Assert-ReadbackFields $result.result $step.expected $step.name
             }
         }
-        if ($step.workflow_load) { Confirm-WorkflowLoad $step.name }
+        if ($step.workflow_load) {
+            Confirm-WorkflowLoad $step.name
+            # The Workflow changed Fixed selection; Protection must read
+            # its current state instead of reusing the pre-Workflow snapshot.
+            $readbackSelection = $null
+        }
         if ($step.name -ceq 'list-cc-settings' -and $result.result.save_confirmed -ne $true) {
             Write-Host 'NOT RUN list-cc-settings: Save confirmation evidence was missing.'
             continue
