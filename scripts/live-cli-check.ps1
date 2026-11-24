@@ -265,7 +265,7 @@ function Save-Report {
         if ($entry.Contains('origin_function')) { $case.origin_function = $entry.origin_function }
         foreach ($field in @('trace_source','trace_points','trace_interval_s','trace_sample_count',
                              'trace_csv_complete','operator_observed','load_duration_confirmed','trigger_observation','trigger_source','trigger_interval_s',
-                             'trigger_source_restore','trigger_interval_restore','list_selected','automatic_off_observed','reuse_from')) {
+                             'trigger_source_restore','trigger_interval_restore','list_selected','automatic_off_observed','timer_expiry_bracket','reuse_from')) {
             if ($entry.Contains($field)) { $case[$field] = $entry[$field] }
         }
         if ($entry.Contains('confirmed_input_state')) { $case.input_state = $entry.confirmed_input_state }
@@ -313,7 +313,7 @@ function Save-Report {
                 foreach ($field in @('input_state','cleanup','on_write_started_ns','off_write_started_ns','off_confirmed_ns','duration_s',
                                      'current_a','measured_current_a','capacity_ah','trial','restored','short_state',
                                      'short_on_confirmed','saved_slot','a_width_s','b_width_s','save_confirmed','recall_confirmed','exited_list',
-                                     'load_evidence_source','current_samples','expected_setpoint',
+                                     'load_evidence_source','load_evidence_tail_ns','load_evidence_resolution_ns','current_samples','expected_setpoint',
                                      'expected_level_a','expected_width_s','expected_average_count')) {
                     if ($null -ne $entry.response.result.$field) { $case[$field] = $entry.response.result.$field }
                 }
@@ -928,6 +928,10 @@ raise SystemExit(main(contributor_stop=stop, settings_on_baseline=handoff))
                 $entry['response'] = $result
                 if ($result.result.load_duration_confirmed -ne $true -or
                     $result.result.load_evidence_source -cne 'instrument_current_samples' -or
+                    $null -eq $result.result.load_evidence_tail_ns -or
+                    $result.result.load_evidence_tail_ns -lt 0 -or
+                    $result.result.load_evidence_tail_ns -gt 1000000000L -or
+                    $result.result.load_evidence_resolution_ns -ne 1000000000L -or
                     @($result.result.current_samples).Count -lt 2) {
                     Fail-Case $CaseName 'workflow_load_unconfirmed' 'Automatic sampled current evidence is insufficient.'
                 }
@@ -1008,6 +1012,10 @@ function Confirm-WorkflowLoad([string]$CaseName) {
         ($CaseName -ceq 'workflow-cc-timed-load' -and
             ($result.load_duration_confirmed -ne $true -or
              $result.load_evidence_source -cne 'instrument_current_samples' -or
+             $null -eq $result.load_evidence_tail_ns -or
+             $result.load_evidence_tail_ns -lt 0 -or
+             $result.load_evidence_tail_ns -gt 1000000000L -or
+             $result.load_evidence_resolution_ns -ne 1000000000L -or
              @($result.current_samples).Count -lt 2)) -or
         ($CaseName -ceq 'workflow-cc-discharge' -and
             ($result.stop_reason -cne 'capacity_cutoff' -or $result.capacity_ah -lt 0.00010))) {
@@ -1075,9 +1083,10 @@ function Invoke-TimerExpiry($Step) {
         }
         $earliestExpiryNs = $on.on_write_started_ns + [long][int]$TimerSeconds * 1000000000L
         $deadlineNs = Get-TimerObservationDeadlineNs $on.on_write_started_ns
-        # ON confirmation is a completion timestamp, not a query-start
-        # lower bound. Only a timed Input query can exclude early OFF.
+        # ON confirmation is not a query-start lower bound. Use a real
+        # timed ON query and retain the first OFF observation interval.
         $lastOnNs = 0L
+        $lastOnCompletedNs = 0L
         # Start one second before expiry so a definite early OFF can be rejected.
         $delay = [Math]::Floor(($earliestExpiryNs - 1000000000L - $nowNs) / 1000000)
         if ($delay -gt 0) { Start-Sleep -Milliseconds $delay }
@@ -1115,11 +1124,21 @@ function Invoke-TimerExpiry($Step) {
                 if ($query.query_completed_ns -lt $earliestExpiryNs) {
                     Fail-Case $Step.name 'timer_expiry_early' 'Input was observed OFF before the earliest possible Timer expiry.'
                 }
-                # Never discard the first OFF. A bracket that includes time
-                # before expiry cannot exclude an early OFF.
-                if ($query.query_started_ns -lt $earliestExpiryNs -or
-                    $lastOnNs -lt $earliestExpiryNs -or $lastOnNs -gt $query.query_started_ns) {
-                    Fail-Case $Step.name 'timer_automatic_off_unconfirmed' 'The first OFF bracket does not exclude early OFF.'
+                # Functional evidence may straddle expiry, but it may not
+                # exceed the approved one-second observation uncertainty.
+                $widthNs = $query.query_completed_ns - $lastOnNs
+                $entry['timer_expiry_bracket'] = [ordered]@{
+                    last_on_started_ns = $lastOnNs
+                    last_on_completed_ns = $lastOnCompletedNs
+                    first_off_started_ns = $query.query_started_ns
+                    first_off_completed_ns = $query.query_completed_ns
+                    expected_expiry_ns = $earliestExpiryNs
+                    uncertainty_ns = $widthNs
+                    resolution_ns = 1000000000L
+                }
+                if ($lastOnNs -le 0 -or $lastOnCompletedNs -gt $query.query_started_ns -or
+                    $widthNs -lt 0 -or $widthNs -gt 1000000000L) {
+                    Fail-Case $Step.name 'timer_automatic_off_unconfirmed' 'The first OFF bracket exceeds the approved observation uncertainty or lacks ON evidence.'
                 }
                 $entry['automatic_off_observed'] = $true
                 return
@@ -1128,6 +1147,7 @@ function Invoke-TimerExpiry($Step) {
                     Fail-Case $Step.name 'readback_mismatch' 'Timer was disabled while Input was ON.'
                 }
                 $lastOnNs = $query.query_started_ns
+                $lastOnCompletedNs = $query.query_completed_ns
             }
             $delay = [Math]::Min(150, [Math]::Floor(($deadlineNs - (Get-TimerMonotonicNs)) / 1000000))
             if ($delay -gt 0) { Start-Sleep -Milliseconds $delay }
@@ -2099,7 +2119,7 @@ try {
             $planned += @(
                 @{name='workflow-cc-timed-load';command='cc-timed-load';args=$ccArgs + @('--duration-s','5');
                   execution='live';workflow_load=$true;expected=@{stop_reason='duration_elapsed';input_state='OFF'};
-                  condition='5 V / 0.8 A source, Fixed CC Low, 5 s at 0.1 A with bounded current/Input sampling before scheduled OFF; insufficient boundary evidence fails; independent cutoff within 10 s of SCPI Input ON including OFF confirmation'},
+                  condition='5 V / 0.8 A source, Fixed CC Low, 5 s at 0.1 A with bounded current/Input sampling before scheduled OFF; at most 1 s sample uncertainty; independent cutoff within 10 s of SCPI Input ON including OFF confirmation'},
                 @{name='workflow-cc-discharge';command='cc-discharge';args=$ccArgs + @('--interval-s','0.5',
                   '--cutoff-capacity-ah','0.00010','--cutoff-voltage','4.5','--timeout-s','6');
                   execution='live';workflow_load=$true;expected=@{stop_reason='capacity_cutoff';input_state='OFF'};
@@ -2176,7 +2196,7 @@ try {
             @{name='timer-on';command='input-on';args=($timerScope + @('--confirm', '--validation-settings-json', $timerExpected));
               condition='LIVE requires the 5 s Timer and an independent 10 s cutoff armed no later than the SCPI ON write'},
             @{name='timer-expiry';command='input-timer-status';args=$timerScope;
-              condition='Require an ON query starting at or after the Timer expiry boundary, followed by first OFF within Timer seconds plus one second from SCPI ON write start; ambiguous timing fails. Authorize a cutoff that cannot intervene during observation'},
+              condition='Require timed ON and first OFF within Timer seconds plus one second from SCPI ON write start, with at most 1 s observation uncertainty; definite early OFF fails. Authorize a cutoff that cannot intervene during observation'},
             @{name='timer-off';command='input-off';args=@()},
             @{name='timer-disable';command='input-timer-disable';args=$timerScope},
             @{name='timer-status-disabled';command='input-timer-status';args=$timerScope},

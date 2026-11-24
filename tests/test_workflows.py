@@ -466,7 +466,8 @@ def test_workflow_contributor_cli_uses_one_readonly_visa_session(fake_visa, caps
     assert fake_visa.calls.count("open_resource") == fake_visa.calls.count("session_close") == 1
 
 
-@pytest.mark.parametrize("scenario", ["timed", "timed_latency", "timed_fractional_clock", "early_wake", "early_drop", "late_drop", "capacity", "stop", "lost", "late_off", "voltage"])
+@pytest.mark.parametrize("scenario", ["timed", "timed_latency", "timed_fractional_clock", "early_wake", "early_drop", "late_drop",
+                                       "sample_gap", "capacity", "stop", "lost", "late_off", "voltage"])
 def test_contributor_cc_owns_bounded_on_and_cleanup(clock, monkeypatch, capsys, scenario):
     class PhysicalLoad(ValidationFake):
         query_delay = 0.15
@@ -487,12 +488,12 @@ def test_contributor_cc_owns_bounded_on_and_cleanup(clock, monkeypatch, capsys, 
                     clock.now = self.dispatched + 10.01  # Native backend did not meet the configured timeout.
 
         def query(self, command):
-            if (scenario in {"timed_latency", "timed_fractional_clock", "late_drop"}
+            if (scenario in {"timed_latency", "timed_fractional_clock", "late_drop", "sample_gap"}
                     and hasattr(self, "dispatched")):
                 # Return the value sampled at query start; the reply takes
                 # the real configured delay even if Input drops in between.
                 response = super().query(command)
-                clock.wait(self.query_delay)
+                clock.wait(0.25 if scenario == "sample_gap" else self.query_delay)
                 return response
             if command == "MEAS:CURR?" and scenario == "lost":
                 self.calls.append(command)
@@ -556,11 +557,12 @@ def test_contributor_cc_owns_bounded_on_and_cleanup(clock, monkeypatch, capsys, 
         assert outcome["error"]["details"]["manual_action_required"]
         return
     assert not fake.input
-    if scenario in {"stop", "voltage", "early_drop"} or (scenario == "late_drop" and status != 0):
+    if scenario in {"stop", "voltage", "early_drop", "sample_gap"} or (scenario == "late_drop" and status != 0):
         assert status == 3
         error = outcome["error"]
         expected = {"stop": "stopping", "voltage": "capacity_cutoff_unconfirmed",
-                    "early_drop": "workflow_load_unconfirmed", "late_drop": "workflow_load_unconfirmed"}
+                    "early_drop": "workflow_load_unconfirmed", "late_drop": "workflow_load_unconfirmed",
+                    "sample_gap": "workflow_load_unconfirmed"}
         assert error["code"] == expected[scenario]
         assert error["details"]["cleanup"]["off_confirmed"]
         return
@@ -569,11 +571,15 @@ def test_contributor_cc_owns_bounded_on_and_cleanup(clock, monkeypatch, capsys, 
     assert result["input_state"] == "OFF" and result["cleanup"]["off_confirmed"]
     assert result["off_confirmed_ns"] - result["on_write_started_ns"] <= 10**10
     if not discharge:
-        assert fake.loaded_before_off == (scenario != "late_drop")
-        assert result["off_write_started_ns"] - result["on_write_started_ns"] == 5 * 10**9
-        # The authorized OFF schedule is independent of the unobserved tail.
-        # Sampled current alone must not be reported as continuous loading.
-        assert result["load_duration_confirmed"] is False
+        if scenario != "late_drop":
+            assert fake.loaded_before_off
+        assert 5 * 10**9 <= result["off_write_started_ns"] - result["on_write_started_ns"] <= 5 * 10**9 + 1
+        # The bounded functional verdict does not imply continuous loading.
+        assert result["load_duration_confirmed"] is True
+        assert result["load_evidence_resolution_ns"] == 10**9
+        assert result["load_evidence_tail_ns"] == (
+            result["off_write_started_ns"] - result["current_samples"][-1]["sample_started_ns"])
+        assert 0 <= result["load_evidence_tail_ns"] <= 10**9
         assert result["load_evidence_source"] == "instrument_current_samples"
         assert len(result["current_samples"]) >= 2
         assert result["current_samples"][-1]["sample_completed_ns"] <= result["off_write_started_ns"]

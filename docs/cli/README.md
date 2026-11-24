@@ -756,11 +756,13 @@ transition Core rechecks physical OFF, CC settings, Short/Transient OFF and Time
 readback. Core signals the SCPI ON write start before waiting for the instrument,
 so the same six-second deadline covers the ON subprocess and subsequent polls.
 Once ON is confirmed, polling can begin as early as one second before the
-earliest possible expiry. The script requires an ON observation whose query
-started at or after the five-second boundary, followed by the first OFF
-observation within six seconds of the write start. An earlier OFF fails;
-a bracket that includes time before five seconds is insufficient evidence
-and fails even if later queries would still report OFF. Each poll respects the remaining
+earliest possible expiry. The script requires a timed ON observation followed
+by the first OFF within six seconds of the write start. The conservative
+bracket from the ON query start to the OFF query completion must be at most
+one second and must not end before the five-second boundary. A definite
+early OFF, absent ON evidence or a wider bracket fails; later OFF queries
+cannot replace the first OFF. This is bounded functional acceptance, not
+exact timing calibration. Each poll respects the remaining
 observation window. When the window closes without a valid observation, the
 script fails and begins OFF cleanup. If the CLI process is still running at
 the deadline, the script prompts you to use the independent hardware cutoff
@@ -784,9 +786,10 @@ confirmed OFF.
 在 Timer Input ON 提示確認上述條件，10 秒上限僅適用這組核准條件。
 Core 在等待儀器回覆前通知 Script SCPI ON 的寫入起點，因此 ON 子程序與
 後續查詢共用 6 秒期限。ON 確認後，最早從可能到期前 1 秒開始查詢。
-須有查詢起點不早於第 5 秒的 ON 證據，再於第 6 秒前取得首次 OFF。
-提前 OFF 或首次 OFF 的時間區間無法排除提前關閉均失敗，不得以後續 OFF
-查詢覆蓋。第 6 秒仍無有效觀察則判定失敗並開始 OFF
+須有具時間證據的 ON 查詢，再於第 6 秒前取得首次 OFF。從 ON 查詢起點至
+OFF 查詢完成的保守區間最多 1 秒，且不得在第 5 秒前結束。明確提前 OFF、
+缺乏 ON 證據或區間過寬均失敗，不得以後續 OFF 查詢覆蓋。此為有界功能驗收，
+不是精確時間校正。第 6 秒仍無有效觀察則判定失敗並開始 OFF
 清理。若 CLI 子程序在截止時仍在執行，Script 會先提示立即使用獨立硬體
 停損，再等待子程序退出。子程序已退出且既有通訊規則允許時，才執行
 VISA 清理。混選含 Trigger 且通訊失信時，由現場獨立處理。
@@ -1408,9 +1411,12 @@ cutoff immediately. Skip physical execution if the site cannot enforce this
 limit. Timed Load automatically samples instrument current and Input state
 before the five-second OFF schedule and checks the current band (0.09–0.11 A),
 sample coverage and integer-nanosecond OFF timestamps. Discharge checks current
-during capacity sampling. Instrument samples do not establish uninterrupted
-loading after the last sample. Insufficient boundary evidence or observed
-early loss of current fails validation; no manual observation is requested.
+during capacity sampling. Timed Load uses bounded functional evidence: consecutive current
+and Input observations and the final current query start to OFF write must
+span at most one second each, retaining the existing initial ON confirmation
+allowance. A valid schedule and bounded samples pass functional validation,
+not continuous loading calibration. Observed early loss or insufficient
+coverage fails; no manual observation is requested.
 Do not manually intervene or allow the independent cutoff to fire during
 the expected observation except for safety. The CC trials leave Fixed CC at 0.1 A with
 Input OFF.
@@ -1470,7 +1476,9 @@ CC 案例自動設定 Fixed CC Low，使用專用的 5 V、限流 0.8 A 電源�
 寫入至 OFF 確認不超過 10 秒。通訊失信時立即使用停損。現場無法確保期限時，
 不執行實機測試。Timed Load 在 5 秒 OFF 排程前自動取樣儀器電流及 Input 狀態，
 核對 0.09 至 0.11 A、取樣涵蓋程度及整數奈秒 OFF 時間。放電在容量取樣時核對電流。
-儀器取樣無法證明最後取樣後持續帶載；時間界線證據不足或觀察到提前掉載即判驗收失敗，
+Timed Load 採有界功能驗收：相鄰電流及 Input 觀察區間、最後電流查詢起點至 OFF
+寫入均最多 1 秒，保留既有初始 ON 確認時間。有效排程及有界取樣可通過功能驗收，
+不代表最後未取樣區間持續帶載或精確校正；觀察到提前掉載或涵蓋不足即失敗，
 不要求人工判讀。
 除安全需要外，不得人工介入或讓獨立停損在預定觀察期間動作。CC 案例結束後，Fixed CC
 設定保留 0.1 A，Input 為 OFF。
