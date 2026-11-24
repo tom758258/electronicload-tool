@@ -385,17 +385,14 @@ def test_cr_led_slow_rise_offline_preflight(run_script):
     assert 'PASS: CR-LED and Current Slow Rise preflight' in result.stdout
 
 
-@pytest.mark.parametrize('modes,plan_only', [
-    (('cr-led',), True), (('current-slow-rise',), True),
-    (('cr-led', 'current-slow-rise'), False),
-])
-def test_cr_led_slow_rise_script_plans_and_refuses_unattended(run_script, modes, plan_only):
-    # Individual selection owns plan isolation; one mixed request covers the shared LIVE refusal.
-    result = run_script(['-Modes', ','.join(modes), *(['-PlanOnly'] if plan_only else [])])
-    report = assert_report(result, 'PLAN ONLY' if plan_only else 'BLOCKED', modes)
-    assert all(case['command'] != 'input-on' for case in report['cases'])
-    if not plan_only:
-        assert 'requires an interactive console' in result.stdout
+@pytest.mark.parametrize('modes', [('cr-led',), ('current-slow-rise',), ('cr-led', 'current-slow-rise')])
+def test_cr_led_slow_rise_script_plans_and_refuses_unattended(run_script, modes):
+    selection = ['-Modes', ','.join(modes)]
+    for args, expected in [(selection + ['-PlanOnly'], 'PLAN ONLY'), (selection, 'BLOCKED')]:
+        result = run_script(args)
+        report = assert_report(result, expected, modes)
+        assert all(case['command'] != 'input-on' for case in report['cases'])
+    assert 'requires an interactive console' in result.stdout
 
 
 def test_fixed_slew_von_short_offline_preflight(run_script):
@@ -1307,8 +1304,9 @@ def test_trigger_validation_script_plan_and_noninteractive_refusal(run_script):
     assert mixed_names.index('trigger-snapshot') < mixed_names.index('transient-continuous-auto-setup')
 
 
-def test_trigger_offline_preflight(run_script):
-    preflight = run_script(['-TriggerOnly'], preflight=True)
+@pytest.mark.parametrize('windows_powershell', [False, True] if os.name == 'nt' else [False])
+def test_trigger_offline_preflight(run_script, windows_powershell):
+    preflight = run_script(['-TriggerOnly'], preflight=True, windows_powershell=windows_powershell)
     assert preflight.returncode == 0, preflight.stdout + preflight.stderr
 
 
@@ -1446,10 +1444,8 @@ def test_system_query_focused_plan(run_script):
     assert all(case['arguments'] == ['--hardware-validation', 'system-query'] for case in cases)
 
 
-@pytest.mark.parametrize('plan_only,connection,resource', [
-    (True, 'usb', None), (True, 'asrl', ASRL),
-    (False, 'usb', None), (False, 'usb', RESOURCE), (False, 'asrl', ASRL),
-])
+@pytest.mark.parametrize('plan_only', [True, False])
+@pytest.mark.parametrize('connection,resource', [('usb', None), ('usb', RESOURCE), ('asrl', ASRL)])
 def test_workflow_only_stays_offline_with_optional_connection(run_script, plan_only, connection, resource):
     result = run_script(['-Connection', connection, '-Modes', 'workflow',
                          *(['-PlanOnly'] if plan_only else [])], resource=resource)
@@ -1485,9 +1481,8 @@ def test_workflow_only_stays_offline_with_optional_connection(run_script, plan_o
     ('transient-cw,readback,list-cc', 'usb', RESOURCE, True),
     ('list-cc,auxiliary-controls', 'asrl', ASRL, True),
     ('workflow,auxiliary-controls,list-cc,measurement-extensions', 'asrl', ASRL, False),
-    # Full USB covers the combined LiveExtensions order; the default Full test compares
-    # USB/ASRL, and the explicit ASRL selections above exercise LiveExtensions separately.
     ('full', 'usb', RESOURCE, True),
+    ('full', 'asrl', ASRL, True),
 ])
 def test_explicit_live_extensions_never_use_simulation(run_script, mode, connection, resource, plan_only):
     flags = ['-Modes', mode, '-LiveExtensions', '-Connection', connection]

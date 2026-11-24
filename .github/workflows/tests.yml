@@ -52,8 +52,72 @@ jobs:
         run: uv sync --python ${{ matrix.python-version }} --all-extras --locked --link-mode=copy
       - name: Prepare ignored test directory
         run: python -c "from pathlib import Path; Path('.tmp_tests').mkdir(exist_ok=True)"
-      - name: Run offline Core, CLI and Worker contracts
+      - name: Run primary offline Core, CLI and Worker suite
+        if: matrix.python-version == '3.13'
         run: uv run --no-sync python -m pytest -q tests --ignore=tests/test_live_validation_script.py
+      - name: Run Python compatibility and critical safety contracts
+        if: matrix.python-version != '3.13'
+        run: >-
+          uv run --no-sync python -m pytest -q -rs
+          tests/test_foundation.py
+          tests/test_readonly_core.py
+          tests/test_readonly_cli.py
+          tests/test_asrl.py
+          tests/test_discovery.py::test_all_resources_do_not_open_or_query
+          tests/test_discovery.py::test_list_failure_retains_cleanup_failure
+          tests/test_discovery_cli.py::test_list_resources_json
+          tests/test_discovery_cli.py::test_discovery_manager_failure_json
+          tests/test_control_core.py::test_fixed_auto_matches_explicit_range
+          tests/test_control_core.py::test_live_control_product_scope_preserves_safety_and_input_confirmation
+          tests/test_control_core.py::test_product_live_rejects_unregistered_connection_scopes
+          tests/test_control_core.py::test_input_on_requires_fresh_safe_state_and_explicit_confirmation
+          tests/test_control_core.py::test_input_on_rechecks_changed_state_after_remote
+          tests/test_control_core.py::test_input_off_no_safety_and_verified
+          tests/test_control_core.py::test_input_off_query_failure_does_not_assume_off
+          tests/test_control_core.py::test_worker_stop_after_remote_blocks_input_on
+          tests/test_control_cli.py::test_fixed_cc_cli_preserves_original_decimal
+          tests/test_control_cli.py::test_fixed_range_still_required_and_help_lists_auto
+          tests/test_control_cli.py::test_manifest_static
+          tests/test_control_cli.py::test_refusal_and_no_hardware
+          tests/test_control_cli.py::test_sequence_file_preserves_original_decimal
+          tests/test_hardware_validation.py::test_validation_scope_keeps_identity_transport_and_model_guards
+          tests/test_hardware_validation.py::test_input_on_checks_every_condition_before_and_after_remote
+          tests/test_hardware_validation.py::test_uncertain_writes_never_retry_or_implicitly_cleanup
+          tests/test_hardware_validation.py::test_worker_cannot_select_hardware_validation
+          tests/test_worker.py::test_worker_multi_job_terminal_without_files
+          tests/test_worker.py::test_worker_invalid_request_does_not_create_job
+          tests/test_worker.py::test_local_lifecycle_client
+          tests/test_worker.py::test_stop_waits_for_http_reply_when_active_job_finishes
+          tests/test_worker.py::test_live_worker_model_range_admission_and_authorization
+          tests/test_worker.py::test_offline_live_jobs_fail_before_visa
+          tests/test_worker.py::test_list_worker_preserves_nested_numbers_through_cli_http_jsonl
+          tests/test_worker.py::test_list_worker_raw_json_rejects_duplicates_nonfinite_and_fractional_schema
+          tests/test_worker.py::test_list_worker_stop_is_io_free_and_blocks_trigger_without_changing_input
+          tests/test_worker.py::test_sequence_worker_cli_forwarding_preserves_nested_decimal
+          tests/test_worker.py::test_workflow_worker_stop_waits_for_off_confirmation
+          tests/test_worker.py::test_worker_summary_keeps_workflow_cleanup_failure_after_later_success
+          tests/test_list_cli.py
+          tests/test_list_core.py::test_list_setup_requires_confirmed_off
+          tests/test_list_core.py::test_physical_list_input_on_is_refused_before_any_write
+          tests/test_sequence.py::test_each_loop_verifies_off_before_running_the_next
+          tests/test_sequence.py::test_simulator_preserves_interlocks_that_change_on_remote
+          tests/test_transient_core.py::test_transient_preserves_slew_precision_in_setup_and_status
+          tests/test_transient_core.py::test_transient_live_refused_before_visa
+          tests/test_transient_cli.py::test_transient_cli_refusals
+          tests/test_trigger.py::test_contributor_trigger_observation_plan_and_refusal_before_visa
+          tests/test_trigger.py::test_native_trigger_rechecks_input_after_settings_readback
+          tests/test_protection.py::test_protection_clear_observes_input_and_issues_at_most_one_bounded_off
+          tests/test_protection.py::test_protection_cli_json_confirmation_and_live_refusal
+          tests/test_input_timer.py::test_input_timer_product_live_refused_before_visa
+          tests/test_input_timer.py::test_input_timer_validation_uncertain_on_never_retries_or_hides_off
+          tests/test_input_timer.py::test_input_timer_cli_json_and_manifest
+          tests/test_trace.py::test_trace_csv_exclusive_creation_and_write_failure
+          tests/test_trace.py::test_trace_host_deadline_keeps_long_polling_bounded_and_cleans_feed
+          tests/test_trace.py::test_trace_hardware_validation_refuses_ordinary_live_before_open
+          tests/test_workflows.py::test_measure_log_cadence_and_csv_never_change_existing_input
+          tests/test_workflows.py::test_contributor_cc_owns_bounded_on_and_cleanup
+          tests/test_workflows.py::test_discharge_failure_reports_safe_state_and_retains_csv
+          tests/test_workflows.py::test_cli_workflows_use_json_with_simulator_and_refuse_live
 
   pytest-windows:
     name: Windows Python ${{ matrix.python-version }}
@@ -76,8 +140,68 @@ jobs:
         run: uv sync --python ${{ matrix.python-version }} --all-extras --locked --link-mode=copy
       - name: Prepare ignored test directory
         run: python -c "from pathlib import Path; Path('.tmp_tests').mkdir(exist_ok=True)"
-      - name: Run offline Core, CLI and Worker contracts
-        run: uv run --no-sync python -m pytest -q tests --ignore=tests/test_live_validation_script.py
+      - name: Run Windows platform, compatibility and critical safety contracts
+        run: >-
+          uv run --no-sync python -m pytest -q -rs
+          tests/test_foundation.py
+          tests/test_readonly_core.py
+          tests/test_readonly_cli.py
+          tests/test_asrl.py
+          tests/test_discovery.py::test_all_resources_do_not_open_or_query
+          tests/test_discovery.py::test_list_failure_retains_cleanup_failure
+          tests/test_discovery_cli.py::test_list_resources_json
+          tests/test_discovery_cli.py::test_discovery_manager_failure_json
+          tests/test_control_core.py::test_fixed_auto_matches_explicit_range
+          tests/test_control_core.py::test_live_control_product_scope_preserves_safety_and_input_confirmation
+          tests/test_control_core.py::test_product_live_rejects_unregistered_connection_scopes
+          tests/test_control_core.py::test_input_on_requires_fresh_safe_state_and_explicit_confirmation
+          tests/test_control_core.py::test_input_on_rechecks_changed_state_after_remote
+          tests/test_control_core.py::test_input_off_no_safety_and_verified
+          tests/test_control_core.py::test_input_off_query_failure_does_not_assume_off
+          tests/test_control_core.py::test_worker_stop_after_remote_blocks_input_on
+          tests/test_control_cli.py::test_fixed_cc_cli_preserves_original_decimal
+          tests/test_control_cli.py::test_fixed_range_still_required_and_help_lists_auto
+          tests/test_control_cli.py::test_manifest_static
+          tests/test_control_cli.py::test_refusal_and_no_hardware
+          tests/test_control_cli.py::test_sequence_file_preserves_original_decimal
+          tests/test_hardware_validation.py::test_validation_scope_keeps_identity_transport_and_model_guards
+          tests/test_hardware_validation.py::test_input_on_checks_every_condition_before_and_after_remote
+          tests/test_hardware_validation.py::test_uncertain_writes_never_retry_or_implicitly_cleanup
+          tests/test_hardware_validation.py::test_worker_cannot_select_hardware_validation
+          tests/test_worker.py::test_worker_multi_job_terminal_without_files
+          tests/test_worker.py::test_worker_invalid_request_does_not_create_job
+          tests/test_worker.py::test_local_lifecycle_client
+          tests/test_worker.py::test_stop_waits_for_http_reply_when_active_job_finishes
+          tests/test_worker.py::test_live_worker_model_range_admission_and_authorization
+          tests/test_worker.py::test_offline_live_jobs_fail_before_visa
+          tests/test_worker.py::test_list_worker_preserves_nested_numbers_through_cli_http_jsonl
+          tests/test_worker.py::test_list_worker_raw_json_rejects_duplicates_nonfinite_and_fractional_schema
+          tests/test_worker.py::test_list_worker_stop_is_io_free_and_blocks_trigger_without_changing_input
+          tests/test_worker.py::test_sequence_worker_cli_forwarding_preserves_nested_decimal
+          tests/test_worker.py::test_workflow_worker_stop_waits_for_off_confirmation
+          tests/test_worker.py::test_worker_summary_keeps_workflow_cleanup_failure_after_later_success
+          tests/test_list_cli.py
+          tests/test_list_core.py::test_list_setup_requires_confirmed_off
+          tests/test_list_core.py::test_physical_list_input_on_is_refused_before_any_write
+          tests/test_sequence.py::test_each_loop_verifies_off_before_running_the_next
+          tests/test_sequence.py::test_simulator_preserves_interlocks_that_change_on_remote
+          tests/test_transient_core.py::test_transient_preserves_slew_precision_in_setup_and_status
+          tests/test_transient_core.py::test_transient_live_refused_before_visa
+          tests/test_transient_cli.py::test_transient_cli_refusals
+          tests/test_trigger.py::test_contributor_trigger_observation_plan_and_refusal_before_visa
+          tests/test_trigger.py::test_native_trigger_rechecks_input_after_settings_readback
+          tests/test_protection.py::test_protection_clear_observes_input_and_issues_at_most_one_bounded_off
+          tests/test_protection.py::test_protection_cli_json_confirmation_and_live_refusal
+          tests/test_input_timer.py::test_input_timer_product_live_refused_before_visa
+          tests/test_input_timer.py::test_input_timer_validation_uncertain_on_never_retries_or_hides_off
+          tests/test_input_timer.py::test_input_timer_cli_json_and_manifest
+          tests/test_trace.py::test_trace_csv_exclusive_creation_and_write_failure
+          tests/test_trace.py::test_trace_host_deadline_keeps_long_polling_bounded_and_cleans_feed
+          tests/test_trace.py::test_trace_hardware_validation_refuses_ordinary_live_before_open
+          tests/test_workflows.py::test_measure_log_cadence_and_csv_never_change_existing_input
+          tests/test_workflows.py::test_contributor_cc_owns_bounded_on_and_cleanup
+          tests/test_workflows.py::test_discharge_failure_reports_safe_state_and_retains_csv
+          tests/test_workflows.py::test_cli_workflows_use_json_with_simulator_and_refuse_live
 
   detect-validation-changes:
     name: Detect Windows validation and packaging changes
@@ -106,8 +230,25 @@ jobs:
               - 'scripts/preflight-cli.ps1'
               - 'scripts/live-cli-check.ps1'
               - 'tests/test_live_validation_script.py'
-              - 'src/electronicload_tool_core/**'
-              - 'src/electronicload_tool_cli/**'
+              - 'src/electronicload_tool_core/control.py'
+              - 'src/electronicload_tool_core/hardware_validation.py'
+              - 'src/electronicload_tool_core/trace.py'
+              - 'src/electronicload_tool_core/visa.py'
+              - 'src/electronicload_tool_core/contributor_settings.py'
+              - 'src/electronicload_tool_core/discovery.py'
+              - 'src/electronicload_tool_core/errors.py'
+              - 'src/electronicload_tool_core/identity.py'
+              - 'src/electronicload_tool_core/protection.py'
+              - 'src/electronicload_tool_core/readback.py'
+              - 'src/electronicload_tool_core/readonly.py'
+              - 'src/electronicload_tool_core/sequence.py'
+              - 'src/electronicload_tool_core/simulator.py'
+              - 'src/electronicload_tool_core/trigger.py'
+              - 'src/electronicload_tool_core/workflows.py'
+              - 'src/electronicload_tool_cli/cli.py'
+              - 'src/electronicload_tool_cli/json_input.py'
+              # Preflight calls the manifest command implemented in worker.py.
+              - 'src/electronicload_tool_cli/worker.py'
               - 'tests/conftest.py'
               - 'tests/test_readonly_cli.py'
               - 'tests/test_readonly_core.py'

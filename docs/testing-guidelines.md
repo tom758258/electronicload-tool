@@ -20,23 +20,28 @@ do not duplicate those checks in a second permanent test suite.
 ## CI test boundaries
 
 CI uses the same Linux/Windows Python-version names as the other Tool projects.
-The fast no-hardware matrix runs Core, CLI, Worker and Fake VISA contracts on
-Linux Python 3.10–3.13 and Windows Python 3.10, 3.12 and 3.13. It excludes
-`tests/test_live_validation_script.py`, which exercises real PowerShell
-processes and is not part of routine Python-version compatibility testing.
+Linux Python 3.13 runs the complete no-hardware Core, CLI, Worker and Fake VISA
+suite, excluding the PowerShell script tests. Linux Python 3.10–3.12 and
+Windows Python 3.10, 3.12 and 3.13 run the same selected compatibility and
+critical safety contracts, including Windows-relevant subprocess, HTTP/JSONL,
+UTF-8 input, file and CSV behavior. The workflow lists existing files or pytest
+node IDs explicitly; the complete suite retains all other cases.
 
-Changes to validation scripts, CLI/Core, the shared test fixture or the tests
-invoked by the script run the PowerShell contracts once on Windows Python 3.13.
+Changes to validation scripts, their direct CLI/Core command dependencies,
+the shared test fixture or the tests invoked by the script run the PowerShell
+contracts on Windows Python 3.13. The validation filter lists these dependencies
+explicitly, including the module owning the manifest command; unrelated Worker
+client changes do not trigger PowerShell validation.
 The existing two Windows jobs partition `test_live_validation_script.py` using
 `-k preflight` and `-k "not preflight"`. Preflight-only test names include
 `preflight`; plan, refusal, report and safety harness tests do not. Both groups
-use the child-process VISA blocker; the default preflight retains Windows
-PowerShell 5.1 on Windows. A missing PowerShell executable fails CI.
-Keep individual mode plans for selection-specific behavior, one mixed refusal
-for a shared authorization gate, USB/ASRL default Full plan equivalence, a
-combined Full LiveExtensions plan on USB, and focused ASRL LiveExtensions
-plans and refusal. Avoid repeating an identical plan or a whole transport/mode
-cross-product just to assert the same report fields. Preserve distinct safety
+use the child-process VISA blocker. Default and Trigger preflight retain the
+Windows PowerShell 5.1 boundary; Trigger also retains the existing pwsh check.
+A missing required PowerShell executable fails CI.
+Keep individual and mixed mode selection and refusal contracts, default Full
+USB/ASRL plan equivalence, both full LiveExtensions transport plans, and
+focused LiveExtensions combinations. Consolidate assertions that repeat the
+same invocation without changing the test conditions. Preserve distinct safety
 and error paths. Python Core/CLI/Worker tests own command, sequencing and
 failure behavior; CI does not duplicate these as Linux pseudo-terminal operator
 simulations. Unrelated changes skip the PowerShell checks; packaging changes
