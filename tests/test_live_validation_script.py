@@ -654,7 +654,7 @@ def test_input_timer_is_also_selectable_with_modes(run_script):
 
 @pytest.mark.parametrize('scenario,checks,status,code', [
     ('off-after-late-write', 3, 'PASS', None),
-    ('external-off', 3, 'FAIL', 'timer_automatic_off_unconfirmed'),
+    ('unbracketed-off', 1, 'FAIL', 'timer_automatic_off_unconfirmed'),
     ('stays-on', 4, 'FAIL', 'timer_expiry_unconfirmed'),
     ('invalid', 1, 'FAIL', 'readback_mismatch'),
     ('late-off', 1, 'FAIL', 'timer_expiry_unconfirmed'),
@@ -677,19 +677,18 @@ $script:report = @{results=@([ordered]@{name='timer-expiry';status='NOT RUN'})}
 function Get-TimerMonotonicNs { 1000000000L + $script:watch.ElapsedMilliseconds * 1000000L }
 function Start-Sleep([int]$Milliseconds) { $script:watch.ElapsedMilliseconds += $Milliseconds }
 function Assert-Runtime($Result, [string]$Name) {}
-function Read-ValidationAnswer {
-    if ($Scenario -eq 'external-off') { 'EXTERNAL' } else { 'AUTO' }
-}
+function Read-ValidationAnswer { throw 'Timer result must not ask the operator.' }
 function Invoke-LiveCommand([string]$Command, [string]$CaseName, [string[]]$ExtraArgs,
                             [int]$DeadlineMs, [long]$TimerObservationDeadlineNs) {
     if ($TimerObservationDeadlineNs -ne 10800000000L) { throw 'Unexpected observation deadline.' }
     $script:checks++
+    if ($Scenario -eq 'unbracketed-off') { $script:watch.ElapsedMilliseconds = 9000 }
     $queryStarted = Get-TimerMonotonicNs
     $script:watch.ElapsedMilliseconds += $(if ($Scenario -eq 'late-off') { 2001 } else { 350 })
     $script:report.results[0]['observed_at_ms'] = $script:watch.ElapsedMilliseconds
     $script:report.results[0]['observed_at_ns'] = Get-TimerMonotonicNs
-    $off = $Scenario -in @('late-off','early-off') -or
-        ($Scenario -in @('off-after-late-write','external-off') -and $script:checks -eq 3)
+    $off = $Scenario -in @('late-off','early-off','unbracketed-off') -or
+        ($Scenario -eq 'off-after-late-write' -and $script:checks -eq 3)
     $timing = if ($Scenario -ne 'unconfirmed-timing') {
         @{query_started_ns=$queryStarted;query_completed_ns=($queryStarted + 10000000L)}
     }
@@ -699,7 +698,7 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName, [string[]]$Extr
 }
 try {
     Invoke-TimerExpiry @{name='timer-expiry';command='input-timer-status';args=@()}
-    if ($script:report.results[0].status -ne 'NOT RUN') { throw 'Expiry was marked before operator confirmation.' }
+    if ($script:report.results[0].status -ne 'NOT RUN') { throw 'Expiry was marked before cleanup.' }
     Confirm-TimerExpiry
 }
 catch { if ($script:report.results[0].status -ne 'FAIL') { throw } }
@@ -994,29 +993,22 @@ $response = Invoke-LiveCommand -Command 'cc-timed-load' -CaseName 'workflow-cc-t
     '--hardware-validation', 'workflow', '--current', '0.1', '--range', 'low', '--duration-s', '5', '--confirm')
 $entry = $script:report.results[0]
 $statusBeforeObservation = $entry.status
-$script:observation = ''
-function Read-ValidationAnswer($Prompt, $CaseName, [switch]$DiscardPendingKeys) {
-    $script:prompt = $Prompt
-    return $script:observation
-}
-try { Confirm-WorkflowLoad 'workflow-cc-timed-load' } catch { }
-$unconfirmed = $entry.error_code
-$script:observation = 'TRACE CONFIRMED'
+function Read-ValidationAnswer { throw 'Workflow result must not ask the operator.' }
 Confirm-WorkflowLoad 'workflow-cc-timed-load'
-@{result=$response.result;status=$statusBeforeObservation;unconfirmed=$unconfirmed;
-  prompt=$script:prompt;operator_confirmed=$entry.load_duration_confirmed} | ConvertTo-Json -Depth 6 -Compress
+@{result=$response.result;status=$statusBeforeObservation;final_status=$entry.status;
+  load_confirmed=$entry.load_duration_confirmed} | ConvertTo-Json -Depth 6 -Compress
 """)
     assert result.returncode == 0, result.stdout + result.stderr
     evidence = json.loads(result.stdout.splitlines()[-1])
-    assert evidence['status'] == 'NOT RUN'  # The live script still requires the operator's observation.
+    assert evidence['status'] == 'NOT RUN'  # Final status follows the evidence checks.
+    assert evidence['final_status'] == 'PASS'
     workflow = evidence['result']
     assert workflow['stop_reason'] == 'duration_elapsed' and workflow['input_state'] == 'OFF'
-    assert workflow['cleanup']['off_confirmed'] and workflow['load_duration_confirmed'] is False
+    assert workflow['cleanup']['off_confirmed'] and workflow['load_duration_confirmed'] is True
     assert 5 <= (workflow['off_write_started_ns'] - workflow['on_write_started_ns']) / 1e9 <= 10
     assert (workflow['off_confirmed_ns'] - workflow['on_write_started_ns']) / 1e9 <= 10
-    assert evidence['unconfirmed'] == 'workflow_load_unconfirmed'
-    assert 'without an early drop' in evidence['prompt']
-    assert evidence['operator_confirmed'] is True
+    assert evidence['load_confirmed'] is True
+    assert workflow['load_evidence_source'] == 'instrument_current_samples'
 
 
 def test_contributor_settings_displays_private_baseline_before_write_and_keeps_it_out_of_report(run_script, tmp_path):

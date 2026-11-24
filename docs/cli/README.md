@@ -1401,14 +1401,13 @@ the SCPI `INP ON` write. For each case, arm an independent hardware cutoff
 before confirming the trial so that load time, including OFF confirmation,
 cannot exceed 10 seconds from the write. If communication is lost, use that
 cutoff immediately. Skip physical execution if the site cannot enforce this
-limit. For Timed Load, start an independent current recording before Input ON
-and keep it through OFF. After OFF is confirmed, use that run's recording
-to verify current stayed between 0.09 and 0.11 A while loaded through the
-scheduled 5-second boundary, without early dropout or external intervention.
-Keep the recording privately. The standalone CLI reports SCPI write times
-and `load_duration_confirmed: false`. The script records confirmation of the
-current trace after the operator reviews it. For Discharge, confirm that the
-source remained on until cleanup. The CC trials leave Fixed CC at 0.1 A with
+limit. Timed Load automatically samples instrument current and Input state
+during the 5-second window and checks the current band (0.09–0.11 A), sample
+coverage and OFF timestamps. Discharge checks current during capacity
+sampling. This is sampled instrument evidence, not an independent continuous
+waveform. Missing evidence or early loss of current fails the trial.
+Do not manually intervene or allow the independent cutoff to fire during
+the expected observation except for safety. The CC trials leave Fixed CC at 0.1 A with
 Input OFF.
 
 `measurement-extensions` queries native Min/Max and Discharge values and
@@ -1453,11 +1452,10 @@ CC 案例從 Fixed CC Low 開始，使用專用的 5 V、限流 0.8 A 電源，�
 0.00010 Ah 才通過，電壓降至 4.5 V 以下（含）或第 6 秒容量仍未達標時即停止。
 兩項都從 SCPI `INP ON` 寫入起算。每次確認前先備妥獨立硬體停損，確保從
 寫入至 OFF 確認不超過 10 秒。通訊失信時立即使用停損。現場無法確保期限時，
-不執行實機測試。Timed Load 須在 Input ON 前開始獨立記錄電流，持續記錄至
-OFF。確認 OFF 後，核對本次記錄顯示帶載電流維持在 0.09 至 0.11 A，直到第 5
-秒預定 OFF，期間沒有提前掉載或外部介入。請私下保留記錄。單獨執行 CLI 會提供
-SCPI 寫入時間及 `load_duration_confirmed: false`。操作者核對電流記錄後，腳本
-才記錄確認結果。放電案例須確認電源持續供電至清理。CC 案例結束後，Fixed CC
+不執行實機測試。Timed Load 在 5 秒期間自動取樣儀器電流及 Input 狀態，
+核對 0.09 至 0.11 A、取樣涵蓋程度及 OFF 時間。放電在容量取樣時核對電流。
+這是儀器自身的取樣證據，而非獨立連續波形；證據不足或提前掉載即失敗。
+除安全需要外，不得人工介入或讓獨立停損在預定觀察期間動作。CC 案例結束後，Fixed CC
 設定保留 0.1 A，Input 為 OFF。
 
 `measurement-extensions` 查詢原生 Min/Max 與放電讀值，經操作者確認後

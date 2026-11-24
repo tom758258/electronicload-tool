@@ -913,7 +913,12 @@ raise SystemExit(main(contributor_stop=stop, settings_on_baseline=handoff))
                 if ($null -eq $offWrite -or $offWrite -lt ($timerWriteStartedNs + 5000000000L) -or $offWrite -gt $finished) {
                     Fail-Case $CaseName 'workflow_load_unconfirmed' 'The SCPI Input OFF time does not confirm the 5 s load schedule.'
                 }
-                $entry['load_duration_confirmed'] = $false
+                if ($result.result.load_duration_confirmed -ne $true -or
+                    $result.result.load_evidence_source -cne 'instrument_current_samples' -or
+                    @($result.result.current_samples).Count -lt 2) {
+                    Fail-Case $CaseName 'workflow_load_unconfirmed' 'Automatic sampled current evidence is insufficient.'
+                }
+                $entry['load_duration_confirmed'] = $true
             }
         }
         if ($script:traceSelected -and $Command -eq 'trace-start') {
@@ -980,19 +985,18 @@ raise SystemExit(main(contributor_stop=stop, settings_on_baseline=handoff))
 }
 
 function Confirm-WorkflowLoad([string]$CaseName) {
-    $timedLoad = $CaseName -ceq 'workflow-cc-timed-load'
-    $prompt = if ($timedLoad) {
-        'Verify Input is OFF and review the current record for this run. It must show 0.09 to 0.11 A throughout loading until the scheduled OFF at 5 s, without an early drop, manual action or independent cutoff. Type TRACE CONFIRMED only if verified'
-    } else { 'Verify Input is OFF and the source remained on throughout the trial without manual or independent cutoff. Press Enter to confirm' }
-    $expected = if ($timedLoad) { 'TRACE CONFIRMED' } else { '' }
-    $answer = Read-ValidationAnswer $prompt $CaseName -DiscardPendingKeys
-    if ($null -eq $answer -or $answer -cne $expected) {
-        Fail-Case $CaseName 'workflow_load_unconfirmed' 'The operator did not confirm uninterrupted loading.'
-    }
     $entry = $script:report.results | Where-Object { $_.name -ceq $CaseName }
+    $result = $entry.response.result
+    if ($result.input_state -cne 'OFF' -or $result.cleanup.off_confirmed -ne $true -or
+        ($CaseName -ceq 'workflow-cc-timed-load' -and
+            ($result.load_duration_confirmed -ne $true -or
+             $result.load_evidence_source -cne 'instrument_current_samples' -or
+             @($result.current_samples).Count -lt 2)) -or
+        ($CaseName -ceq 'workflow-cc-discharge' -and
+            ($result.stop_reason -cne 'capacity_cutoff' -or $result.capacity_ah -lt 0.00010))) {
+        Fail-Case $CaseName 'workflow_load_unconfirmed' 'Automatic Workflow evidence is insufficient.'
+    }
     $entry.status = 'PASS'
-    $entry['operator_observed'] = $true
-    if ($timedLoad) { $entry['load_duration_confirmed'] = $true }
 }
 
 function Fail-Case([string]$Name, [string]$Code, [string]$Message) {
@@ -1054,6 +1058,7 @@ function Invoke-TimerExpiry($Step) {
         }
         $earliestExpiryNs = $on.on_write_started_ns + [long][int]$TimerSeconds * 1000000000L
         $deadlineNs = Get-TimerObservationDeadlineNs $on.on_write_started_ns
+        $lastOnNs = $on.on_confirmed_ns
         # Start one second before expiry so a definite early OFF can be rejected.
         $delay = [Math]::Floor(($earliestExpiryNs - 1000000000L - $nowNs) / 1000000)
         if ($delay -gt 0) { Start-Sleep -Milliseconds $delay }
@@ -1092,8 +1097,17 @@ function Invoke-TimerExpiry($Step) {
                     Fail-Case $Step.name 'timer_expiry_early' 'Input was observed OFF before the earliest possible Timer expiry.'
                 }
                 if ($query.query_started_ns -ge $earliestExpiryNs) {
+                    if ($lastOnNs -lt ($earliestExpiryNs - 1000000000L) -or $lastOnNs -gt $query.query_started_ns) {
+                        Fail-Case $Step.name 'timer_automatic_off_unconfirmed' 'No timely ON observation brackets the Timer expiry.'
+                    }
+                    $entry['automatic_off_observed'] = $true
                     return
                 }
+            } else {
+                if (-not $status.enabled) {
+                    Fail-Case $Step.name 'readback_mismatch' 'Timer was disabled while Input was ON.'
+                }
+                $lastOnNs = $query.query_started_ns
             }
             $delay = [Math]::Min(150, [Math]::Floor(($deadlineNs - (Get-TimerMonotonicNs)) / 1000000))
             if ($delay -gt 0) { Start-Sleep -Milliseconds $delay }
@@ -1111,11 +1125,10 @@ function Invoke-TimerExpiry($Step) {
 }
 
 function Confirm-TimerExpiry {
-    $answer = Read-ValidationAnswer 'After explicit OFF, type AUTO and press Enter only if Timer switched Input OFF without manual or external intervention during the observation. Otherwise press Enter to fail the trial' 'timer-expiry' -DiscardPendingKeys
-    if ($answer -cne 'AUTO') {
-        Fail-Case 'timer-expiry' 'timer_automatic_off_unconfirmed' 'Automatic OFF without intervention was not confirmed.'
-    }
     $entry = $script:report.results | Where-Object { $_.name -ceq 'timer-expiry' }
+    if ($entry.automatic_off_observed -ne $true) {
+        Fail-Case 'timer-expiry' 'timer_automatic_off_unconfirmed' 'Automatic OFF timing evidence was not confirmed.'
+    }
     $entry.status = 'PASS'
     Write-Host 'PASS timer-expiry'
 }
@@ -2029,7 +2042,7 @@ try {
             $planned += @(
                 @{name='workflow-cc-timed-load';command='cc-timed-load';args=$ccArgs + @('--duration-s','5');
                   execution='live';workflow_load=$true;expected=@{stop_reason='duration_elapsed';input_state='OFF'};
-                  condition='5 V / 0.8 A source, Fixed CC Low, 5 s at 0.1 A verified by an independent current record; independent cutoff within 10 s of SCPI Input ON including OFF confirmation'},
+                  condition='5 V / 0.8 A source, Fixed CC Low, 5 s at 0.1 A checked by automatic instrument current samples; independent cutoff within 10 s of SCPI Input ON including OFF confirmation'},
                 @{name='workflow-cc-discharge';command='cc-discharge';args=$ccArgs + @('--interval-s','0.5',
                   '--cutoff-capacity-ah','0.00010','--cutoff-voltage','4.5','--timeout-s','6');
                   execution='live';workflow_load=$true;expected=@{stop_reason='capacity_cutoff';input_state='OFF'};
@@ -2107,7 +2120,7 @@ try {
             @{name='timer-on';command='input-on';args=($timerScope + @('--confirm', '--validation-settings-json', $timerExpected));
               condition='LIVE requires the 5 s Timer and an independent 10 s cutoff armed no later than the SCPI ON write'},
             @{name='timer-expiry';command='input-timer-status';args=$timerScope;
-              condition='Observe Input OFF by Timer seconds plus one second from the SCPI ON write start; after explicit OFF, confirm no manual or external intervention'},
+              condition='Observe ON near expiry then OFF by Timer seconds plus one second from the SCPI ON write start; authorize a cutoff that cannot intervene during the observation'},
             @{name='timer-off';command='input-off';args=@()},
             @{name='timer-disable';command='input-timer-disable';args=$timerScope},
             @{name='timer-status-disabled';command='input-timer-status';args=$timerScope},
@@ -2657,7 +2670,7 @@ try {
         }
         Write-Host "Running $($step.name)..."
         if ($step.name -ceq 'timer-on') {
-            $answer = Read-ValidationAnswer 'Verify the approved current-limited source and arm the independent 10 s hardware cutoff before SCPI Input ON. Never start the cutoff clock after the ON write. Press Enter only when ready' $step.name -DiscardPendingKeys
+            $answer = Read-ValidationAnswer 'Verify the approved current-limited source and arm the independent 10 s hardware cutoff before SCPI Input ON. The cutoff must not intervene during the 6 s observation; if this cannot be assured, cancel. Do not intervene except for safety. Press Enter only when ready' $step.name -DiscardPendingKeys
             if ($null -eq $answer -or $answer -cne '') {
                 Fail-Case $step.name 'operator_confirmation_required' 'The Timer hardware cutoff was not confirmed.'
             }
@@ -2666,7 +2679,7 @@ try {
         }
         if ($step.workflow_load) {
             $prompt = 'Confirm a controlled 5 V source limited to 0.8 A. Arm the independent cutoff so Input cannot remain ON beyond 10 s from the start of the SCPI ON write, including cleanup.'
-            if ($step.command -ceq 'cc-timed-load') { $prompt += ' Start recording load current before applying Input.' }
+            $prompt += ' Ensure the cutoff cannot intervene during the expected trial and do not manually change the source or load except for safety.'
             $answer = Read-ValidationAnswer "$prompt Press Enter only when ready" $step.name -DiscardPendingKeys
             if ($null -eq $answer -or $answer -cne '') {
                 Fail-Case $step.name 'operator_confirmation_required' 'The independent Workflow cutoff was not confirmed.'

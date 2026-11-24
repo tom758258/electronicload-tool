@@ -43,6 +43,10 @@ CONTRIBUTOR_TIMED_SECONDS = 5
 CONTRIBUTOR_DISCHARGE_SECONDS = 6
 CONTRIBUTOR_MAX_ON_SECONDS = 10
 CONTRIBUTOR_IO_TIMEOUT_MS = 500
+# The contributor accepts sampled current evidence, not a continuous external trace.
+CURRENT_TOLERANCE = Decimal("0.01")
+CURRENT_SAMPLE_GAP_S = 1.0
+CURRENT_FIRST_SAMPLE_S = 2.0
 
 
 class _BoundedCCSession:
@@ -54,6 +58,7 @@ class _BoundedCCSession:
         self.on_dispatch = None
         self.off_write_started_ns = None
         self.timeout_ms = None
+        self.sample_deadline = None
 
     def arm(self, on_dispatch):
         self.session.timeout = self.timeout_ms = CONTRIBUTOR_IO_TIMEOUT_MS
@@ -62,7 +67,8 @@ class _BoundedCCSession:
     def _budget(self, *, query=False):
         if self.deadline is None:
             return
-        remaining = self.deadline - monotonic()
+        deadline = min(self.deadline, self.sample_deadline) if self.sample_deadline is not None else self.deadline
+        remaining = deadline - monotonic()
         # A VISA query can include a write, the configured delay and a read.
         travel = ((remaining - self.session.query_delay) / 2 if query else remaining)
         if travel < 0.001:
@@ -222,6 +228,12 @@ def _measure(session, command, settings, quantities, stop, result, record_row, *
                     break
                 if quantity == "current":
                     current = Decimal(str(values["current_a"]))
+                    if load_started is not None:
+                        if (abs(current - CONTRIBUTOR_CURRENT) > CURRENT_TOLERANCE
+                                or read_measurement(session, "input-state")["input_state"] != "ON"):
+                            raise LoadError("workflow_load_unconfirmed", "Discharge current or Input ON was lost.", 3)
+                        if monotonic() >= deadline:
+                            raise LoadError("workflow_timeout", "Discharge sample exceeded its deadline.", 3)
                     if previous_time is not None:
                         elapsed = Decimal(str(observed - previous_time))
                         ampere_seconds += (previous_current + current) * elapsed / 2
@@ -382,6 +394,41 @@ def _wait_load(stop, duration_s):
     return "duration_elapsed"
 
 
+def _timed_current_samples(session, stop, result, start):
+    deadline = start + CONTRIBUTOR_TIMED_SECONDS
+    samples = result["current_samples"]
+    session.sample_deadline = deadline
+    try:
+        # Do not start another pair of queries when the remaining time is too
+        # short even for the configured query delays. The OFF schedule is unchanged.
+        while deadline - monotonic() > max(0.05, 2 * session.session.query_delay + 0.05):
+            _check_stop(stop)
+            current = _sample(session, ("current",))["current_a"]
+            state = read_measurement(session, "input-state")["input_state"]
+            observed = monotonic()
+            elapsed = observed - start
+            samples.append({"elapsed_s": elapsed, "current_a": current, "input_state": state})
+            if (observed >= deadline or state != "ON"
+                    or abs(Decimal(str(current)) - CONTRIBUTOR_CURRENT) > CURRENT_TOLERANCE):
+                raise LoadError("workflow_load_unconfirmed", "Timed Load lost current or Input ON.", 3)
+            if (len(samples) == 1 and elapsed > CURRENT_FIRST_SAMPLE_S
+                    or len(samples) > 1 and elapsed - samples[-2]["elapsed_s"] > CURRENT_SAMPLE_GAP_S):
+                raise LoadError("workflow_load_unconfirmed", "Timed Load sample coverage is insufficient.", 3)
+            remaining = deadline - monotonic()
+            if remaining <= float(CONTRIBUTOR_INTERVAL):
+                break
+            _wait(stop, float(CONTRIBUTOR_INTERVAL))
+        if (len(samples) < 2 or deadline - (start + samples[-1]["elapsed_s"]) > CURRENT_SAMPLE_GAP_S):
+            raise LoadError("workflow_load_unconfirmed", "Timed Load final sample is too far from scheduled OFF.", 3)
+    finally:
+        # Do not constrain cleanup to the observation window.
+        session.sample_deadline = None
+    while (remaining := deadline - monotonic()) > 0:
+        _wait(stop, remaining)
+    _check_stop(stop)
+    return "duration_elapsed"
+
+
 def _run(session, command, settings, stop, result, quantities, record_row, *, require_input_off=False,
          on_write_started=None):
     if command in CC_COMMANDS:
@@ -392,22 +439,18 @@ def _run(session, command, settings, stop, result, quantities, record_row, *, re
             start = result["on_write_started_ns"] / 1e9 if require_input_off else None
             if command == "cc-timed-load":
                 if start is not None:
-                    deadline = start + CONTRIBUTOR_TIMED_SECONDS
-                    current = _sample(session, ("current",))["current_a"]
-                    result["measured_current_a"] = current
-                    if monotonic() > deadline:
-                        raise LoadError("workflow_timeout", "Current readback arrived after the 5 s load window.", 3)
-                    if abs(Decimal(str(current)) - CONTRIBUTOR_CURRENT) > Decimal("0.01"):
-                        raise LoadError("readback_mismatch", "Measured load current differs from 0.1 A.", 3)
-                    # Event waits can return slightly early on Windows.
-                    while (remaining := deadline - monotonic()) > 0:
-                        _wait(stop, remaining)
-                    _check_stop(stop)
-                    return "duration_elapsed"
+                    return _timed_current_samples(session, stop, result, start)
                 return _wait_load(stop, settings["duration_s"])
             return _measure(session, command, settings, quantities, stop, result, record_row, load_started=start)
 
         _run_cc(session, settings, stop, result, run_load, on_write_started=on_write_started)
+        if require_input_off and command == "cc-timed-load":
+            elapsed = (result["off_write_started_ns"] - result["on_write_started_ns"]) / 1e9
+            if (elapsed < CONTRIBUTOR_TIMED_SECONDS
+                    or elapsed - result["current_samples"][-1]["elapsed_s"] > CURRENT_SAMPLE_GAP_S):
+                raise LoadError("workflow_load_unconfirmed", "OFF schedule or final sample coverage is insufficient.", 3)
+            result["load_duration_confirmed"] = True
+            result["measured_current_a"] = result["current_samples"][-1]["current_a"]
         if require_input_off and command == "cc-discharge" and result["stop_reason"] != "capacity_cutoff":
             raise LoadError("capacity_cutoff_unconfirmed", "Contributor discharge did not reach the capacity cutoff.", 3)
     else:
@@ -457,7 +500,9 @@ def execute(command, *, mode="live", arguments, model_id=MODEL_ID, backend="syst
                 **({"planned_writes": ["SYST:REM", "FUNC:MODE FIX", "FUNC CURR", "CURR:RANG 0.1", "CURR 0.1",
                                        "SYST:REM", "INP ON", "SYST:REM", "INP OFF"],
                     "max_input_on_s": CONTRIBUTOR_MAX_ON_SECONDS} if contributor_cc else {}),
-                **({"operator_current_trace_required": True}
+                **({"operator_current_trace_required": False,
+                    "load_evidence_source": "instrument_current_samples",
+                    "sample_interval_s": float(CONTRIBUTOR_INTERVAL)}
                    if contributor_cc and command == "cc-timed-load" else {})}
 
     if simulator is not None and not isinstance(simulator, ControlSimulator):
@@ -470,9 +515,8 @@ def execute(command, *, mode="live", arguments, model_id=MODEL_ID, backend="syst
     if command == "cc-timed-load":
         result["duration_s"] = float(settings["duration_s"])
         if contributor_cc:
-            # The timed command verifies the schedule and one current reading.
-            # Only an independent trace can verify loading throughout the interval.
-            result["load_duration_confirmed"] = False
+            result.update(load_duration_confirmed=False, current_samples=[],
+                          load_evidence_source="instrument_current_samples")
     else:
         result.update(sample_count=0, last_measurement=None)
     if command == "cc-discharge":

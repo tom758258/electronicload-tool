@@ -548,10 +548,12 @@ def test_contributor_cc_owns_bounded_on_and_cleanup(clock, monkeypatch, capsys, 
         assert outcome["error"]["details"]["manual_action_required"]
         return
     assert not fake.input
-    if scenario in {"stop", "voltage"}:
+    if scenario in {"stop", "voltage", "early_drop"}:
         assert status == 3
         error = outcome["error"]
-        assert error["code"] == ("stopping" if scenario == "stop" else "capacity_cutoff_unconfirmed")
+        expected = {"stop": "stopping", "voltage": "capacity_cutoff_unconfirmed",
+                    "early_drop": "workflow_load_unconfirmed"}
+        assert error["code"] == expected[scenario]
         assert error["details"]["cleanup"]["off_confirmed"]
         return
     assert status == 0
@@ -562,7 +564,11 @@ def test_contributor_cc_owns_bounded_on_and_cleanup(clock, monkeypatch, capsys, 
         assert fake.loaded_before_off == (scenario != "early_drop")
         assert fake.off_at - fake.dispatched == 5
         assert result["off_write_started_ns"] - result["on_write_started_ns"] == 5 * 10**9
-        assert result["load_duration_confirmed"] is False
+        assert result["load_duration_confirmed"] is True
+        assert result["load_evidence_source"] == "instrument_current_samples"
+        assert len(result["current_samples"]) >= 2
+        assert all(sample["input_state"] == "ON" and sample["current_a"] == 0.1
+                   for sample in result["current_samples"])
     else:
         assert result["stop_reason"] == "capacity_cutoff" and result["capacity_ah"] >= 0.00010
 
