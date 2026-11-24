@@ -2,14 +2,14 @@
 
 Electronic Load Tool provides read-only identification and measurements,
 plus fixed-CC configuration, offline CV/CR/CW/Transient/LIST CC and deliberate Input ON/OFF through a shared Core,
-Standalone CLI and bundled Common v3 Worker. The initial registered model is
+Standalone CLI and bundled Common v3 Worker. The initial supported model is
 ITECH IT8812C (`itech-it8812c`).
 
-Product LIVE supports `identify`, `input-state`, `measure`, `set-cc`,
-`input-on` and `input-off` only for the exact IT8812C identity with an
-operator-supplied USB INSTR Resource and System VISA (target: Keysight IO
-Libraries Suite). Core enforces model/range limits without any optional Safety Config. Input ON still requires
-deliberate confirmation. Simulation and dry-run never grant hardware authorization.
+Product LIVE is limited to the IT8812C scope listed in
+[Product LIVE Support](docs/core/supported-models.md#product-live-support--product-live-支援範圍).
+Core enforces model and range
+limits without optional Safety Config. Input ON requires deliberate confirmation.
+Simulation and dry-run never grant hardware authorization.
 
 ## Features
 
@@ -37,55 +37,12 @@ Core owns model limits, identity, support policy, queries, parsing, VISA lifetim
 and simulation. CLI handles arguments and presentation. Core must not import
 CLI. WebUI is not implemented. The bundled Worker is part of the CLI package and uses the same Core.
 
-### Adding instrument models / 擴充儀器型號
+Core currently implements one model, ITECH IT8812C. The multi-model design
+applies when a second physical model is selected. See
+[Supported Models](docs/core/supported-models.md).
 
-Introduce the Vendor Registry, Model Registry, Driver Families and Capability
-Profiles in Core when a second actual model is selected. Base the design on its
-`*IDN?` reply, programming guide and specifications.
-
-- **Identity** — Match both manufacturer and model. The Vendor Registry maps
-  manufacturer aliases to a canonical manufacturer and stable vendor ID. Each
-  Model Registry entry links a stable model ID and vendor ID to the canonical
-  model token, model aliases, Driver Family and Capability Profile. Keep the
-  detected values distinct from the canonical tokens and IDs.
-- **Driver Family** — Group models by compatible SCPI and instrument behavior.
-  The driver owns command formatting, parameter conversion, reply parsing and
-  instrument-specific operations. Handle small differences within a family and
-  use a separate driver when syntax or behavior differs substantially.
-- **Capability Profile** — Describe each model's electrical limits, supported
-  modes and features, and parameter limits. Models can share a profile when
-  these match.
-- **LIVE policy** — Require an explicit authorization for the exact model ID,
-  command or workflow, transport, VISA backend, execution scope and any required
-  feature. Product, Worker and Contributor authorizations are distinct. Deny LIVE
-  for new models by default and reject unidentified or mismatched instruments
-  and unlisted combinations. Core policy evaluates authorization independently
-  of driver or profile reuse. Keep validation evidence separate from authorization.
-
-Keep hardware differences in Core. CLI uses Core results, the Worker retains
-Common v3, and the Orchestrator uses the existing interfaces. See the current
-[LIVE support policy](docs/visa-connections.md#live-support-policy--live-支援規則).
-
-選定第二個實際型號後，再於 Core 導入品牌登錄、型號登錄、Driver Family 與
-Capability Profile。以該型號的 `*IDN?` 回應、程式設計手冊及規格為設計依據。
-
-- **身分識別** — 同時核對品牌與型號。品牌登錄將製造商別名對應至標準製造商名稱
-  與穩定的品牌 ID。每筆型號登錄記錄穩定的型號 ID、品牌 ID、標準型號名稱、
-  型號別名、Driver Family 和 Capability Profile。儀器實際回傳值、標準名稱與 ID
-  各自保留。
-- **Driver Family** — 依 SCPI 語法與儀器行為的相容性分組。Driver 負責命令格式、
-  參數轉換、回應解析與儀器特有的操作。小幅差異在同一家族內處理，語法或行為
-  差異大時使用獨立的 Driver。
-- **Capability Profile** — 描述各型號的電氣規格、支援的模式與功能，以及參數限制。
-  這些條件一致的型號可以共用 Profile。
-- **LIVE 授權** — 依確切的型號 ID、命令或工作流程、傳輸、VISA 後端、執行範圍與
-  必要功能逐項授權。Product、Worker 和 Contributor 各有自己的授權範圍。新型號
-  預設拒絕 LIVE，無法識別或身分不符的儀器，以及未列出的組合一律拒絕。共用
-  Driver 或 Profile 時，仍須由 Core 的授權政策各自判定。驗證證據與授權分開記錄。
-
-硬體差異由 Core 處理。CLI 使用 Core 的結果，Worker 維持 Common v3，Orchestrator
-使用既有介面。
-現行範圍見 [LIVE 支援規則](docs/visa-connections.md#live-support-policy--live-支援規則)。
+Core 目前採 ITECH IT8812C 單型號實作。選定第二個實際型號後，才導入多型號設計。
+詳見[支援型號](docs/core/supported-models.md)。
 
 ## Key Dependencies
 
@@ -171,6 +128,7 @@ is implied by a documentation change.
 ## Documentation
 
 - [CLI README — detailed commands and validation](docs/cli/README.md)
+- [Supported Models and Multi-Model Architecture / 支援型號與多型號架構](docs/core/supported-models.md)
 - [Core VISA transport and LIVE support policy](docs/visa-connections.md)
 - [Electronic Load Worker Contract](docs/contracts/electronicload-worker-contract.md)
 - [Common Worker Protocol](docs/contracts/common-worker-protocol.md)
