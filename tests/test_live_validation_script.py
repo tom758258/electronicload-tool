@@ -1144,8 +1144,14 @@ def test_trigger_validation_script_plan_preflight_and_noninteractive_refusal(run
         assert cases[f'trigger-{source}-source-status']['command'] == 'trigger-status'
         assert '--confirm' in cases[f'trigger-{source}-on']['arguments']
         assert cases[f'trigger-{source}-off']['command'] == 'input-off'
-        assert cases[f'trigger-{source}-observed']['command'] == 'operator-observation'
-        assert (f'trigger-{source}-dispatch' in cases) == (source in ('hold', 'bus'))
+        software = source in ('hold', 'bus')
+        assert cases[f'trigger-{source}-observed']['command'] == ('automatic-observation' if software else 'trigger-observe')
+        assert (f'trigger-{source}-dispatch' in cases) == software
+        capture = cases[f'trigger-{source}-dispatch' if software else f'trigger-{source}-observed']
+        assert capture['command'] == 'trigger-observe'
+        assert 'MEAS:CURR?' in capture['queries']
+        assert capture['planned_writes'] == (
+            ['SYST:REM', 'TRIG:IMM' if source == 'hold' else '*TRG'] if software else [])
     assert cases['trigger-bus-setup']['command'] == 'set-list-cc'
     for source in ('bus', 'external'):
         assert cases[f'trigger-{source}-readback']['command'] == 'list-status'

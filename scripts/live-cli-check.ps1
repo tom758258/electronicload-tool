@@ -264,7 +264,7 @@ function Save-Report {
         }
         if ($entry.Contains('origin_function')) { $case.origin_function = $entry.origin_function }
         foreach ($field in @('trace_source','trace_points','trace_interval_s','trace_sample_count',
-                             'trace_csv_complete','operator_observed','load_duration_confirmed','trigger_source','trigger_interval_s',
+                             'trace_csv_complete','operator_observed','load_duration_confirmed','trigger_observation','trigger_source','trigger_interval_s',
                              'trigger_source_restore','trigger_interval_restore','list_selected')) {
             if ($entry.Contains($field)) { $case[$field] = $entry[$field] }
         }
@@ -615,6 +615,8 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
     $timerOn = $CaseName -ceq 'timer-on'
     $workflowLoad = $Command -cin @('cc-timed-load', 'cc-discharge')
     $isolatedSettings = $Command -ceq 'contributor-settings'
+    $externalCapture = $Command -ceq 'trigger-observe' -and $CaseName -ceq 'trigger-external-observed'
+    $captureReady = $false
     if ($workflowLoad -and $remaining -lt 10000) { throw 'Insufficient time remains for a bounded Workflow load trial.' }
     $observeOn = $timerOn -or $workflowLoad
     $notification = if ($timerOn) { 'Timer' } else { 'Workflow' }
@@ -671,7 +673,7 @@ raise SystemExit(main(contributor_stop=stop, settings_on_baseline=handoff))
         $entry.status = 'FAIL'
         $stdout = $process.StandardOutput.ReadToEndAsync()
         $stderr = $null
-        if ($observeOn -or $isolatedSettings) {
+        if ($observeOn -or $isolatedSettings -or $externalCapture) {
             # Read live notifications before waiting for the child to exit.
             $notificationStartNs = if ($observeOn) { $dispatchNs } else { Get-TimerMonotonicNs }
             $commandDeadlineNs = $notificationStartNs + [long]$remaining * 1000000L
@@ -689,6 +691,12 @@ raise SystemExit(main(contributor_stop=stop, settings_on_baseline=handoff))
                     if ((Get-TimerMonotonicNs) -ge $commandDeadlineNs) { break }
                     $process.StandardInput.BaseStream.WriteByte(65)
                     $process.StandardInput.BaseStream.Flush()
+                    $stderr = $process.StandardError.ReadToEndAsync()
+                    break
+                }
+                if ($externalCapture -and $line -ceq 'Trigger capture ready: apply external pulse now.') {
+                    Write-Host $line
+                    $captureReady = $true
                     $stderr = $process.StandardError.ReadToEndAsync()
                     break
                 }
@@ -847,7 +855,8 @@ raise SystemExit(main(contributor_stop=stop, settings_on_baseline=handoff))
             }
             if ($CaseName.StartsWith('trigger-') -and $result.ok -eq $false -and
                 $null -eq $details.cleanup_errors -and $code -in @('readback_mismatch','unsafe_mode',
-                    'input_not_off','input_not_on','input_timer_enabled','unsafe_trigger_source')) {
+                    'input_not_off','input_not_on','input_timer_enabled','unsafe_trigger_source',
+                    'trigger_observation_unconfirmed')) {
                 $entry['trigger_exchange_confirmed'] = $true
                 if ($code -eq 'input_not_off') {
                     $script:triggerOffConfirmed = $false
@@ -932,7 +941,11 @@ raise SystemExit(main(contributor_stop=stop, settings_on_baseline=handoff))
             $result.result | Add-Member -MemberType NoteProperty -Name read_timestamp_utc_plus_8 `
                 -Value $stampMatch.Groups[1].Value -Force
         }
-        $entry.status = if ($workflowLoad -or $entry.Contains('readback_comparison') -or $CaseName -ceq 'timer-expiry') {
+        if ($externalCapture -and -not $captureReady) {
+            Fail-Case $CaseName 'trigger_observation_unconfirmed' 'External capture readiness was not confirmed.'
+        }
+        $entry.status = if ($workflowLoad -or $entry.Contains('readback_comparison') -or $CaseName -ceq 'timer-expiry' -or
+            ($Command -ceq 'trigger-observe' -and $CaseName.EndsWith('-observed'))) {
             'NOT RUN'
         } else { 'PASS' }
         if ($CaseName -ceq 'list-cc-settings' -and $result.result.save_confirmed -ne $true) {
@@ -1227,12 +1240,18 @@ function New-TriggerPlan {
             $script:triggerPlans += @{name="$prefix-enable";command='transient-enable';args=($triggerScope + $expected)}
         }
         $script:triggerPlans += @{name="$prefix-on";command='input-on';args=($triggerScope + $expected + @('--confirm'))}
+        $captureArgs = $triggerScope + $expected + @('--observation-seconds',[string]$TriggerObservationSeconds,'--confirm')
         if ($source -in @('HOLD','BUS')) {
-            $cmd = if ($isList) { 'list-trigger' } else { 'transient-trigger' }
-            $script:triggerPlans += @{name="$prefix-dispatch";command=$cmd;args=($triggerScope + $expected)}
+            $script:triggerPlans += @{name="$prefix-dispatch";command='trigger-observe';args=$captureArgs;execution='live';
+                condition='Single-session software Trigger and sampled current waveform; live deadline supplied by the bounded trial.'}
+            $observation = @{name="$prefix-observed";command='automatic-observation';args=@();
+                condition='Use sampled waveform evidence and confirmed OFF from this trial.'}
+        } else {
+            $observation = @{name="$prefix-observed";command='trigger-observe';args=$captureArgs;execution='live';
+                condition='Sample current within the observation window; EXTERNAL requires only the physical pulse at capture readiness.'}
         }
         $script:triggerPlans += @{name="$prefix-off";command='input-off';args=$triggerScope}
-        $script:triggerPlans += @{name="$prefix-observed";command='operator-observation';args=@()}
+        $script:triggerPlans += $observation
         $release = if ($isList) { 'list-exit' } else { 'transient-disable' }
         $script:triggerPlans += @{name="$prefix-release";command=$release;args=$triggerScope}
     }
@@ -1241,12 +1260,17 @@ function New-TriggerPlan {
         condition='Plan uses example settings. LIVE requires original Source and Timer readback, trusted communication and confirmed Input OFF.'}
 }
 
-function Invoke-TriggerStep([string]$Name, [int]$DeadlineMs = 30000, [int]$TerminationMs = 5000, [switch]$Cleanup) {
+function Invoke-TriggerStep([string]$Name, [int]$DeadlineMs = 30000, [int]$TerminationMs = 5000,
+                            [long]$ObservationDeadlineNs = 0, [switch]$Cleanup) {
     $step = $script:triggerPlans | Where-Object { $_.name -ceq $Name }
     $entry = $script:report.results | Where-Object { $_.name -ceq $Name }
     $exchangeConfirmed = $false
     try {
-        $request = @{Command=$step.command; CaseName=$Name; ExtraArgs=$step.args;
+        $extra = $step.args
+        if ($step.command -ceq 'trigger-observe') {
+            $extra += @('--deadline-ns',[string]$ObservationDeadlineNs)
+        }
+        $request = @{Command=$step.command; CaseName=$Name; ExtraArgs=$extra;
                      DeadlineMs=[Math]::Min($DeadlineMs, $script:perCommandDeadlineMs)
                      TerminationMs=$TerminationMs; Cleanup=$Cleanup}
         $response = Invoke-LiveCommand @request
@@ -1653,7 +1677,7 @@ function Invoke-TriggerTrial($Trial) {
             $armed = $true
             Assert-TriggerOff (Invoke-TriggerStep "$prefix-enable") "$prefix-enable"
         }
-        Write-Host "Trigger $($Trial.source), CLI readback confirmed. Observe the IT8812C panel current, or an approved capture instrument if needed."
+        Write-Host "Trigger $($Trial.source), CLI readback confirmed. The script will sample the instrument current automatically."
         if ($Trial.isList) {
             Write-Host "Expect LIST CC levels $LevelA A then $LevelB A for $TriggerListWidthA s / $TriggerListWidthB s, repeated $TriggerListRepeat time(s)."
         } else {
@@ -1661,17 +1685,18 @@ function Invoke-TriggerTrial($Trial) {
         }
         switch ($Trial.source) {
             'EXTERNAL' {
-                Write-Host 'Keep the source inactive until the observation starts. Apply one TTL low pulse (>10 us) to rear TRIG and its shared negative terminal.'
+                Write-Host 'Keep the trigger signal inactive until the capture-ready message. Then apply one TTL low pulse (>10 us) to rear TRIG and its shared negative terminal.'
                 Write-Host "Confirm the reviewed equipment and wiring: $TriggerExternalSetup"
             }
-            'TIMER' { Write-Host "Watch for at least two Timer pulses at $($Trial.interval) s intervals. No operator pulse is required." }
+            'TIMER' { Write-Host "The script will check at least two Timer pulses at $($Trial.interval) s intervals." }
             default { Write-Host 'The script will send one software trigger after Input ON is confirmed.' }
         }
         $awaitingObservation = $true
-        $entry['operator_observed'] = 'Unconfirmed'
-        $ack = Read-ValidationAnswer 'With Input OFF and capture ready, press Enter to start the bounded observation (Ctrl+C to cancel)' "$prefix-observed"
-        if ($null -eq $ack -or $ack -cne '') {
-            Fail-Case "$prefix-observed" 'operator_cancelled' 'Operator did not confirm readiness.'
+        if ($Trial.source -ceq 'EXTERNAL') {
+            $ack = Read-ValidationAnswer 'With Input OFF, confirm the reviewed external trigger equipment is ready. Press Enter to begin' "$prefix-observed"
+            if ($null -eq $ack -or $ack -cne '') {
+                Fail-Case "$prefix-observed" 'operator_cancelled' 'External trigger equipment was not confirmed.'
+            }
         }
         $hardStop = $script:watch.ElapsedMilliseconds + $TriggerMaxOnSeconds * 1000
         if ($hardStop -gt $totalDeadlineMs) { throw 'Insufficient total time for a bounded Trigger trial.' }
@@ -1693,15 +1718,12 @@ function Invoke-TriggerTrial($Trial) {
             $observeUntil = $script:watch.ElapsedMilliseconds + $TriggerObservationSeconds * 1000
             if ($observeUntil -gt $startOffBy) { throw 'Insufficient time remains to observe before Input OFF.' }
             Write-Host "Observation started for $($Trial.source)."
-            if ($Trial.source -in @('HOLD','BUS')) {
-                $dispatchBudget = $observeUntil - $script:watch.ElapsedMilliseconds
-                $eventDuration = if ($Trial.isList) {
-                    ([decimal]$TriggerListWidthA + [decimal]$TriggerListWidthB) * $TriggerListRepeat
-                } else { [decimal]$script:triggerPulseWidth }
-                $dispatchBudget -= [Math]::Ceiling($eventDuration * 1000)
-                if ($dispatchBudget -le 0) { throw 'Software trigger observation deadline expired.' }
-                $null = Invoke-TriggerStep "$prefix-dispatch" -DeadlineMs $dispatchBudget -TerminationMs $terminationMs
-            }
+            $captureName = if ($Trial.source -in @('HOLD','BUS')) { "$prefix-dispatch" } else { "$prefix-observed" }
+            $captureBudget = [Math]::Min($script:perCommandDeadlineMs, $observeUntil - $script:watch.ElapsedMilliseconds)
+            if ($captureBudget -le 500) { throw 'Insufficient time remains for automatic Trigger observation.' }
+            $captureDeadline = (Get-TimerMonotonicNs) + ([long]$captureBudget - 500) * 1000000L
+            $capture = Invoke-TriggerStep $captureName -DeadlineMs $captureBudget -TerminationMs $terminationMs `
+                -ObservationDeadlineNs $captureDeadline
             $remaining = $observeUntil - $script:watch.ElapsedMilliseconds
             if ($remaining -gt 0) { Start-Sleep -Milliseconds $remaining }
         } finally {
@@ -1731,12 +1753,16 @@ function Invoke-TriggerTrial($Trial) {
                 Save-Report
             }
         }
-        $answer = Read-ValidationAnswer "Input OFF confirmed. Did you observe the expected $($Trial.source) result? (Yes/No)" `
-            "$prefix-observed" -DiscardPendingKeys
-        $entry['operator_observed'] = if ($answer -ieq 'Yes') { 'Yes' } elseif ($answer -ieq 'No') { 'No' } else { 'Unconfirmed' }
-        if ($answer -ine 'Yes') {
-            Fail-Case "$prefix-observed" 'observation_unconfirmed' 'Operator did not confirm the expected physical trigger result.'
+        $evidence = $capture.result.observation
+        $requiredEvents = if ($Trial.source -ceq 'TIMER') { 2 } elseif ($Trial.isList) { $TriggerListRepeat } else { 1 }
+        if ($capture.result.validation_only -ne $true -or $capture.result.validation_scope -cne 'trigger' -or
+            $capture.result.trigger_source -cne $Trial.source -or $capture.result.waveform_completion_known -ne $true -or
+            $evidence.source -cne 'instrument_current_samples' -or $evidence.sample_count -lt 3 -or
+            $evidence.events_confirmed -lt $requiredEvents -or -not $script:triggerOffConfirmed) {
+            Fail-Case "$prefix-observed" 'trigger_observation_unconfirmed' 'Automatic Trigger waveform or OFF evidence was insufficient.'
         }
+        $entry['trigger_observation'] = $evidence
+        $entry.response = $capture
         if ($script:watch.ElapsedMilliseconds -ge $totalDeadlineMs) {
             Fail-Case "$prefix-observed" 'deadline_expired' 'The total CLI validation deadline expired.'
         }
@@ -2411,7 +2437,7 @@ try {
     $plannedRanges = @{}
     $offlinePlans = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
     foreach ($step in $allSteps) {
-        if ($step.command -in @('operator-observation','pytest') -or
+        if ($step.command -in @('operator-observation','automatic-observation','pytest') -or
             ($step -in $pendingLive -and -not $step.ContainsKey('args'))) { continue }
         $extras = @($step.args)
         $noConnection = $step.execution -in @('dry-run','simulate') -or

@@ -573,3 +573,14 @@ PlanOnly 核對安全查詢及條件式清理。混選先執行需接電源的�
 ON 回覆，驗證 ON 子程序尚在執行時已受 SCPI 寫入起點的期限約束。用收到
 終止要求後仍在執行的程序替身，確認提示在觀察期限到達時發出，且清理時
 未另開 VISA Session。實機到期驗證仍需另行授權及獨立的硬體停損。
+
+For automatic Contributor Trigger observation, exercise the affected
+`test_trigger.py` waveform cases and `test_live_validation_script.py` plan,
+refusal, deadline and cleanup cases. Check level order, timing brackets,
+missing or sparse samples, and source-specific dispatch (no extra software
+trigger for TIMER or EXTERNAL). Only EXTERNAL retains physical signal
+preparation; sampled instrument evidence is not independent calibration.
+
+Contributor Trigger 自動驗收僅測試直接受影響的取樣、電平順序、時間區間、
+資料不足、觸發派送、PlanOnly、安全拒絕及清理。TIMER／EXTERNAL 不額外
+送出軟體觸發，僅 EXTERNAL 保留實體訊號準備；取樣不等於獨立波形校正。

@@ -1750,10 +1750,11 @@ independent operator action; the run stays FAIL.
 | `-TriggerListWidthA`, `-TriggerListWidthB`, `-TriggerListRepeat` | LIST CC dwell times in seconds and a finite repeat count. The LIST must fit the observation window. |
 | `-TriggerExternalSetup` | Optional explanatory note; the console still requires physical equipment and wiring confirmation. |
 
-Use a current observation method that can resolve the chosen levels and pulse
-or dwell times. The IT8812C panel display may suffice for qualitative 2-second
-changes; if no change can be reliably observed, answer No rather than inferring
-PASS from command acceptance. This is not a pulse-width or amplitude calibration.
+The Contributor CLI samples instrument current in one session, dispatching the
+software Trigger only for HOLD or BUS after the baseline is observed. It checks
+ordered current plateaus and bounded time brackets; insufficient sample
+resolution, missing pulses or wrong order fail the trial. This is sampled
+functional evidence, not independent pulse-width or amplitude calibration.
 HOLD and TIMER use Transient CC Pulse (baseline B, pulse at A for the
 configured width, then back to B). BUS and EXTERNAL use a two-step LIST CC,
 with a zero fixed-current baseline before LIST selection. The test replaces
@@ -1767,16 +1768,13 @@ against the instrument and signal equipment before use. Confirm external On/Off 
 disabled. [IT8800 User’s Manual V2.7, §§3.1, 3.4, 3.19.2](https://mm.digikey.com/Volume0/opasdata/d220001/medias/docus/5562/IT8800%20User%20Manual.pdf)
 
 The script saves the original Trigger Source and interval while Input is OFF.
-Press Enter before each trial to confirm the setup and then perform any
-requested physical trigger during the bounded observation. The script
-explicitly attempts and verifies Input OFF before requesting a Yes/No answer.
-The readiness and observation prompts count toward the existing 900 s
-limit, including default all-mode runs. If the complete selection cannot
-finish within that deadline, the run fails rather than silently skipping
-a mode or removing the bound. A missed
-trial or run deadline fails validation even if bounded emergency cleanup is
-still possible. Yes confirms the expected observable effect. Insufficient
-observation, cancellation and unsuccessful restoration fail validation.
+After the initial batch safety authorization, HOLD, BUS and TIMER run without
+operator observation prompts. EXTERNAL retains equipment readiness and the
+physical pulse, requested only after the capture-ready message. The script
+attempts and verifies Input OFF before marking waveform acceptance. The
+existing 900 s total limit and per-trial ON/OFF budget remain. Missing
+evidence, cancellation, deadlines or unsuccessful restoration fail validation;
+there is no manual Yes/No override.
 The script restores and reports readback for each original Trigger setting
 after confirmed OFF and with trusted communication. If communication becomes
 untrusted, use the independent manual OFF procedure immediately. The script
@@ -1789,6 +1787,14 @@ compare the expected function, full dynamic configuration and Trigger Setup
 with physical readback. Input ON also requires `--confirm`. When restoring a
 snapshot, contributor `trigger-configure` can supply both Source and interval
 for any source. The Product and Worker LIVE paths reject Trigger Setup.
+The CLI-only `trigger-observe` command accepts the exact validation
+configuration and a bounded observation deadline. It does not enable Input.
+
+HOLD／BUS／TIMER 在初始安全授權後自動取得儀器電流取樣、核對電平順序及
+時間區間，不需人工觀察或回答 Yes／No；EXTERNAL 只保留設備準備及收到擷取
+就緒提示後提供實體訊號。程式在確認 OFF 後才完成波形驗收。取樣不足、期限超過
+或還原失敗均不得 PASS。這是儀器自身取樣的功能證據，不是獨立波形校正。
+既有 ON／OFF 期限及 Product／Worker LIVE 權限不變。
 
 ### Reports
 
