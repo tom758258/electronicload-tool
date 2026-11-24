@@ -445,6 +445,12 @@ function New-CliProcessInfo([string[]]$Arguments) {
     return $start
 }
 
+function New-LiveCliProcess([string[]]$Arguments) {
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = New-CliProcessInfo $Arguments
+    return $process
+}
+
 function Invoke-OfflineProcess([string[]]$Arguments) {
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = New-CliProcessInfo $arguments
@@ -602,9 +608,7 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
     }
     $arguments = @('-c', $launcher,
         $Command, '--json') + $script:connectionArgs + $ExtraArgs
-    $start = New-CliProcessInfo $arguments
-    $process = [Diagnostics.Process]::new()
-    $process.StartInfo = $start
+    $process = New-LiveCliProcess $arguments
     $script:commandIndex++
     $sequence = $script:commandIndex
     $entry = $script:report.results | Where-Object { $_.name -eq $CaseName } | Select-Object -First 1
@@ -666,16 +670,21 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
         if (-not $process.WaitForExit([int]$remaining)) {
             if ($traceCase) { $script:traceCommunicationUntrusted = $true }
             if ($script:triggerSelected) { $script:triggerTrusted = $false }
+            $entry['error_code'] = if ($timerLimited) { 'timer_expiry_unconfirmed' } else { 'deadline_expired' }
+            $exitStatus = 'TIMEOUT; session/input state unconfirmed'
+            if ($TimerObservationDeadlineNs) {
+                # A stuck child may outlast the independent cutoff. Notify the operator before waiting for exit.
+                $script:report.status = 'FAIL'
+                Write-Host "FAIL ${CaseName}: physical Input OFF is unconfirmed. Use the independent hardware cutoff now. Do not wait for the CLI process to exit."
+            }
             $terminationAttempted = $true
             $process.Kill()
-            $exitStatus = 'TIMEOUT; session/input state unconfirmed'
             if ($process.WaitForExit($TerminationMs)) {
                 if (-not $script:timerPowered -or $stdout.IsCompleted) { $output = $stdout.GetAwaiter().GetResult() }
                 if ($null -ne $stderr -and (-not $script:timerPowered -or $stderr.IsCompleted)) {
                     $diagnostic = $stderr.GetAwaiter().GetResult()
                 }
             }
-            $entry['error_code'] = if ($timerLimited) { 'timer_expiry_unconfirmed' } else { 'deadline_expired' }
             throw "$CaseName exceeded its deadline; physical Input state is unconfirmed."
         }
         $exitStatus = [string]$process.ExitCode

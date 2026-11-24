@@ -543,7 +543,9 @@ in PlanOnly and the separate LIST readback required when a mode-changing trial
 is selected. For Timer expiry, use a controlled clock for early OFF refusal and
 operator confirmation after cleanup. Use a delayed Fake VISA ON reply to verify
 that the SCPI write-start deadline already applies while the ON subprocess is
-still running and that the existing communication rules govern OFF cleanup.
+still running. With a process substitute that stays running after termination is
+requested, verify that the operator gets the cutoff prompt at the observation
+deadline and that the script opens no new VISA session during cleanup.
 Select affected Fake VISA cases in `tests/test_input_timer.py`. Physical expiry
 remains a separately authorized check with an independent hardware cutoff.
 
@@ -551,5 +553,6 @@ remains a separately authorized check with an independent hardware cutoff.
 和 Average 的 Input OFF 前置，並核對 PlanOnly 的 VON、Short 及 LIST 索引
 查詢。混選含會切換模式的試驗時，LIST 讀回須分開執行。Timer 使用可控制的
 時鐘驗證過早 OFF 拒絕與清理完畢後由操作者確認。以 Fake VISA 模擬延遲的
-ON 回覆，驗證 ON 子程序尚在執行時已受 SCPI 寫入起點的期限約束，以及
-OFF 清理依既有通訊規則處理。實機到期驗證仍需另行授權及獨立的硬體停損。
+ON 回覆，驗證 ON 子程序尚在執行時已受 SCPI 寫入起點的期限約束。用收到
+終止要求後仍在執行的程序替身，確認提示在觀察期限到達時發出，且清理時
+未另開 VISA Session。實機到期驗證仍需另行授權及獨立的硬體停損。

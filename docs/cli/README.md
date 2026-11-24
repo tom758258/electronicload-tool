@@ -746,12 +746,16 @@ so the same six-second deadline covers the ON subprocess and subsequent polls.
 Once ON is confirmed, polling can begin as early as one second before the
 earliest possible expiry. The script accepts an OFF observation if the Input
 state query started at least five seconds after the SCPI Input ON write began
-and the response arrived within six seconds of that write start. An OFF reply completed before five
-seconds fails the trial. Each poll also respects the remaining observation
-window. When the window closes without a valid observation, the script fails
-and enters the existing OFF cleanup immediately. A communication failure in
-a run that includes Trigger requires independent operator action. The CLI
-records the write, ON confirmation and Input query times. `-DebugArtifacts`
+and the response arrived within six seconds of that write start. An OFF reply
+completed before five seconds fails the trial. Each poll respects the remaining
+observation window. When the window closes without a valid observation, the
+script fails and begins OFF cleanup. If the CLI process is still running at
+the deadline, the script prompts you to use the independent hardware cutoff
+immediately, before it waits for the process to exit. VISA cleanup requires that
+the process has exited and the existing communication rules permit it. A
+communication failure in a run that includes Trigger requires independent
+operator action. The CLI records the write, ON confirmation and Input query
+times. `-DebugArtifacts`
 saves these observations privately. The script sends and verifies explicit
 OFF, disables Timer separately and reads the final state. At that point type
 `AUTO` only if Timer switched Input OFF without manual or external intervention
@@ -766,8 +770,10 @@ confirmed OFF.
 Core 在等待儀器回覆前通知 Script SCPI ON 的寫入起點，因此 ON 子程序與
 後續查詢共用 6 秒期限。ON 確認後，最早從可能到期前 1 秒開始查詢。
 OFF 查詢必須在寫入開始後至少 5 秒才啟動，且在第 6 秒前收到結果。
-若在第 5 秒前讀到 OFF 即失敗。第 6 秒
-仍無有效觀察則立即進入既有 OFF 清理。通訊失信時依既有規則處理。
+若在第 5 秒前讀到 OFF 即失敗。第 6 秒仍無有效觀察則判定失敗並開始 OFF
+清理。若 CLI 子程序在截止時仍在執行，Script 會先提示立即使用獨立硬體
+停損，再等待子程序退出。子程序已退出且既有通訊規則允許時，才執行
+VISA 清理。混選含 Trigger 且通訊失信時，由現場獨立處理。
 CLI 記錄 SCPI 寫入、ON 確認及 Input 查詢起訖，`-DebugArtifacts` 將觀察
 資料存於私有目錄。明確確認 OFF、獨立停用 Timer 並讀回最終狀態後，
 只有確認觀察期間由 Timer 自動關閉且未經人工或外部介入，才輸入 `AUTO`。

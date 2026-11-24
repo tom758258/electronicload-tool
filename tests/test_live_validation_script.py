@@ -60,7 +60,8 @@ def run_script(tmp_path):
                 "'Get-ProtectionWriteProgress','Assert-InputOff',"
                 "'Assert-ReadbackFields','Fail-Case','Invoke-TimerExpiry','Invoke-LiveCommand',"
                 "'Get-TimerMonotonicNs','Get-TimerRemainingMs','Get-TimerObservationDeadlineNs',"
-                "'Confirm-TimerExpiry','Assert-Runtime','Save-Report','New-CliProcessInfo')) {\n"
+                "'Confirm-TimerExpiry','Assert-Runtime','Save-Report',"
+                "'New-CliProcessInfo','New-LiveCliProcess')) {\n"
                 "        Invoke-Expression $node.Extent.Text\n"
                 "    }\n}\n" + harness, encoding='utf-8')
             args = [str(harness_path)]
@@ -881,6 +882,71 @@ try {
         # Allow process scheduling overhead while distinguishing a launch-relative timeout
         # and the late reply from the approved six seconds after the write starts.
         assert 5.75 <= (handled_ns - write_ns) / 1e9 <= 7.5
+
+
+def test_input_timer_deadline_notifies_operator_before_waiting_for_stuck_process(run_script):
+    result = run_script([], harness="""
+$script:nowNs = 1000000000L
+$script:report = @{status='NOT RUN';results=@([ordered]@{name='timer-on';status='NOT RUN'})}
+$script:perCommandDeadlineMs = 30000
+$script:totalDeadlineMs = 900000
+$script:watch = [Diagnostics.Stopwatch]::StartNew()
+$script:timerPowered = $true
+$inputOnAttempted = $true
+$timerEnableAttempted = $true
+$TimerSeconds = '5'
+$script:calls = @()
+function Get-TimerMonotonicNs { $script:nowNs }
+function New-LiveCliProcess([string[]]$Arguments) {
+    $script:calls += $Arguments[2]
+    $signal = [Text.Encoding]::UTF8.GetBytes("Timer INP ON write started: 1000000000`n")
+    $process = [pscustomobject]@{
+        HasExited = $false
+        StandardOutput = [IO.StreamReader]::new([IO.MemoryStream]::new())
+        StandardError = [IO.StreamReader]::new([IO.MemoryStream]::new($signal))
+    }
+    $process | Add-Member ScriptMethod Start { $true }
+    $process | Add-Member ScriptMethod Kill { $script:killNs = Get-TimerMonotonicNs }
+    $process | Add-Member ScriptMethod WaitForExit {
+        param([int]$Milliseconds)
+        $script:nowNs += [long]$Milliseconds * 1000000L
+        $false
+    }
+    $process | Add-Member ScriptMethod Dispose {
+        $this.StandardOutput.Dispose()
+        $this.StandardError.Dispose()
+    }
+    return $process
+}
+function Write-Host([string]$Message) {
+    if ($Message -like '*independent*' -and -not $script:notice) {
+        $script:notice = @{at_ns=(Get-TimerMonotonicNs);status=$script:report.status;
+                           error_code=$script:report.results[0].error_code}
+    }
+    Microsoft.PowerShell.Utility\\Write-Host $Message
+}
+$main = $ast.EndBlock.Statements | Where-Object { $null -ne $_.Finally } | Select-Object -Last 1
+$cleanup = $main.Finally.Extent.Text
+try { Invoke-LiveCommand -Command 'input-on' -CaseName 'timer-on' }
+catch {
+    if ($script:report.results[0].error_code -cne 'timer_expiry_unconfirmed') { throw }
+    $script:report.status = 'FAIL'
+} finally {
+    . ([scriptblock]::Create($cleanup.Substring(1, $cleanup.Length - 2)))
+}
+@{notice=$script:notice;kill_ns=$script:killNs;completed_ns=(Get-TimerMonotonicNs);
+  calls=@($script:calls);statuses=@($script:report.results | ForEach-Object { $_.status })} |
+    ConvertTo-Json -Compress
+""")
+    assert result.returncode == 0, result.stdout + result.stderr
+    evidence = json.loads(result.stdout.splitlines()[-1])
+    assert evidence['notice'] == {
+        'at_ns': 7_000_000_000, 'status': 'FAIL', 'error_code': 'timer_expiry_unconfirmed',
+    }
+    assert evidence['kill_ns'] == 7_000_000_000
+    assert evidence['completed_ns'] == 12_000_000_000
+    assert evidence['calls'] == ['input-on']
+    assert evidence['statuses'] == ['FAIL', 'NOT RUN', 'NOT RUN', 'NOT RUN']
 
 
 def test_input_timer_script_uses_default_source_limits(run_script):
