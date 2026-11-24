@@ -29,6 +29,12 @@ entries. Keep detected values, canonical tokens, aliases and stable IDs distinct
 - Introduce the multi-model components in Core when a second physical model is
   selected. Keep hardware differences in Core. CLI uses Core results, the Worker
   retains Common v3, and the Orchestrator uses the existing interfaces.
+- For future multi-model LIVE execution, resolve the Driver Family from
+  the manufacturer and model actually detected through `*IDN?`. An expected
+  model ID is a safety mismatch guard only; it must never override the detected
+  identity or select a different driver. Offline dry-run and simulation may
+  use an explicitly selected registered planning model profile without
+  opening physical hardware.
 - Handle small driver differences within a family. Use a separate family for
   substantial SCPI or behavior differences. Share a Capability Profile when the
   models' limits, modes and features match.
