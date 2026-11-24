@@ -17,7 +17,13 @@ ASRL = 'ASRL999::INSTR'
 
 @pytest.fixture
 def run_script(tmp_path):
-    powershell = shutil.which('pwsh') or shutil.which('powershell')
+    powershell = shutil.which('pwsh')
+    if os.name == 'nt' and os.environ.get('GITHUB_ACTIONS') == 'true':
+        if powershell is None:
+            pytest.fail('PowerShell 7 (pwsh) is required in the Windows validation jobs.')
+        if shutil.which('powershell.exe') is None:
+            pytest.fail('Windows PowerShell (powershell.exe) is required in the Windows validation jobs.')
+    powershell = powershell or shutil.which('powershell')
     if powershell is None:
         local = ROOT / '.tmp_tests/powershell/pwsh'
         if not local.is_file():
