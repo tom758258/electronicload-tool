@@ -60,7 +60,7 @@ def run_script(tmp_path):
                 "'Get-ProtectionWriteProgress','Assert-InputOff',"
                 "'Assert-ReadbackFields','Fail-Case','Invoke-TimerExpiry','Invoke-LiveCommand',"
                 "'Get-TimerMonotonicNs','Get-TimerRemainingMs','Get-TimerObservationDeadlineNs',"
-                "'Confirm-TimerExpiry','Assert-Runtime','Save-Report',"
+                "'Confirm-TimerExpiry','Confirm-WorkflowLoad','Assert-Runtime','Save-Report',"
                 "'New-CliProcessInfo','New-LiveCliProcess')) {\n"
                 "        Invoke-Expression $node.Extent.Text\n"
                 "    }\n}\n" + harness, encoding='utf-8')
@@ -992,15 +992,96 @@ $script:totalDeadlineMs = 900000
 $watch = [Diagnostics.Stopwatch]::StartNew()
 $response = Invoke-LiveCommand -Command 'cc-timed-load' -CaseName 'workflow-cc-timed-load' -ExtraArgs @(
     '--hardware-validation', 'workflow', '--current', '0.1', '--range', 'low', '--duration-s', '5', '--confirm')
-@{result=$response.result;status=$script:report.results[0].status} | ConvertTo-Json -Depth 6 -Compress
+$entry = $script:report.results[0]
+$statusBeforeObservation = $entry.status
+$script:observation = ''
+function Read-ValidationAnswer($Prompt, $CaseName, [switch]$DiscardPendingKeys) {
+    $script:prompt = $Prompt
+    return $script:observation
+}
+try { Confirm-WorkflowLoad 'workflow-cc-timed-load' } catch { }
+$unconfirmed = $entry.error_code
+$script:observation = 'TRACE CONFIRMED'
+Confirm-WorkflowLoad 'workflow-cc-timed-load'
+@{result=$response.result;status=$statusBeforeObservation;unconfirmed=$unconfirmed;
+  prompt=$script:prompt;operator_confirmed=$entry.load_duration_confirmed} | ConvertTo-Json -Depth 6 -Compress
 """)
     assert result.returncode == 0, result.stdout + result.stderr
     evidence = json.loads(result.stdout.splitlines()[-1])
     assert evidence['status'] == 'NOT RUN'  # The live script still requires the operator's observation.
     workflow = evidence['result']
     assert workflow['stop_reason'] == 'duration_elapsed' and workflow['input_state'] == 'OFF'
-    assert workflow['cleanup']['off_confirmed']
-    assert 5 <= (workflow['off_confirmed_ns'] - workflow['on_write_started_ns']) / 1e9 <= 10
+    assert workflow['cleanup']['off_confirmed'] and workflow['load_duration_confirmed'] is False
+    assert 5 <= (workflow['off_write_started_ns'] - workflow['on_write_started_ns']) / 1e9 <= 10
+    assert (workflow['off_confirmed_ns'] - workflow['on_write_started_ns']) / 1e9 <= 10
+    assert evidence['unconfirmed'] == 'workflow_load_unconfirmed'
+    assert 'without an early drop' in evidence['prompt']
+    assert evidence['operator_confirmed'] is True
+
+
+def test_contributor_settings_displays_private_baseline_before_write_and_keeps_it_out_of_report(run_script, tmp_path):
+    with (tmp_path / 'sitecustomize.py').open('a', encoding='utf-8') as preload:
+        preload.write("""
+import os
+import sys
+from contextlib import contextmanager
+
+sys.path.insert(0, str(Path.cwd() / 'tests'))
+from test_hardware_validation import ValidationFake
+from electronicload_tool_core import control
+
+@contextmanager
+def fake_session(_resource):
+    class SettingsFake(ValidationFake):
+        def write(self, command):
+            assert (Path(os.environ['FAKE_SETTINGS_REPORT']) / 'baseline-visible').is_file()
+            super().write(command)
+
+        def query(self, command):
+            if command == 'VOLT:ON?' and self.values['VOLT:LATC'] == '0':
+                raise TimeoutError()
+            return super().query(command)
+
+    fake = SettingsFake()
+    fake.values.update({'INP:TIM': '0', 'VOLT:ON': '0.536', 'VOLT:LATC': '1'})
+    yield fake, {'library': 'fake', 'manufacturer': 'fake'}
+
+control.open_session = fake_session
+""")
+    report_dir = tmp_path / 'report'
+    report_dir.mkdir()
+    result = run_script([], extra_env={'FAKE_SETTINGS_PYTHON': sys.executable, 'FAKE_SETTINGS_RESOURCE': RESOURCE,
+                                       'FAKE_SETTINGS_REPORT': str(report_dir)}, harness="""
+$python = $env:FAKE_SETTINGS_PYTHON
+$repo = (Get-Location).Path
+$script:reportDirectory = $env:FAKE_SETTINGS_REPORT
+$script:connectionArgs = @('--resource', $env:FAKE_SETTINGS_RESOURCE)
+$script:report = @{status='FAIL';prechecks=@{};artifact_mode='minimal';
+    results=@([ordered]@{name='auxiliary-controls-von';command='contributor-settings';status='NOT RUN'})}
+$script:perCommandDeadlineMs = 30000
+$script:totalDeadlineMs = 900000
+$watch = [Diagnostics.Stopwatch]::StartNew()
+function Write-Host($Text) {
+    if ($Text.StartsWith('Settings recovery baseline (private): ')) {
+        New-Item -Path (Join-Path $script:reportDirectory 'baseline-visible') -ItemType File | Out-Null
+    }
+    Microsoft.PowerShell.Utility\\Write-Host $Text
+}
+try {
+    Invoke-LiveCommand -Command 'contributor-settings' -CaseName 'auxiliary-controls-von' -ExtraArgs @(
+        '--trial', 'von', '--confirm-isolated')
+} catch { Write-Host $_.Exception.Message }
+""")
+    assert result.returncode == 0, result.stdout + result.stderr
+    baseline = next(line for line in result.stdout.splitlines() if line.startswith('Settings recovery baseline'))
+    assert json.loads(baseline.split(': ', 1)[1])['threshold_v'] == '0.536'
+    assert 'keep the terminals isolated' in result.stdout, result.stdout + result.stderr
+    assert result.stdout.index(baseline) < result.stdout.index('keep the terminals isolated')
+    report_text = (report_dir / 'shareable/report.json').read_text(encoding='utf-8-sig')
+    case, = json.loads(report_text)['cases']
+    assert case['status'] == 'FAIL' and case['error_code'] == 'settings_restore_unconfirmed'
+    assert case['manual_action_required']
+    assert '0.536' not in report_text and not (report_dir / 'private').exists()
 
 
 def test_input_timer_script_uses_default_source_limits(run_script):
@@ -1275,20 +1356,30 @@ def test_explicit_live_extensions_never_use_simulation(run_script, mode, connect
         trial = cases['list-cc-settings']
         assert 'LIST:WID? {step}' in trial['queries']
         assert f'LIST:SAV {slot}' in trial['planned_writes'] and f'LIST:RCL {slot}' in trial['planned_writes']
-        assert 'INP ON' not in trial['planned_writes'] and '*TRG' not in trial['planned_writes']
+        assert 'CURR:SLEW:STAT?' in trial['queries']
+        assert ['LIST:WID 1,<original>'] in [branch['writes'] for branch in trial['conditional_writes']]
+        restoration = trial['conditional_writes'][-1]['writes']
+        assert {write.split()[0] for write in restoration} == {
+            'LIST:RANG', 'LIST:COUN', 'LIST:STEP', 'LIST:LEV', 'LIST:SLEW', 'LIST:WID',
+        }
+        assert not {'INP ON', '*TRG'}.intersection(trial['planned_writes'], restoration)
         if mode not in ('list-cc', 'list-cc,auxiliary-controls'):
             assert trial['error_code'] == 'settings_require_isolated_run'
         else:
             assert 'error_code' not in trial
     if 'auxiliary-controls-von' in cases:
         assert {'VOLT:ON?', 'VOLT:LATC?'} <= set(cases['auxiliary-controls-von']['queries'])
-        assert cases['auxiliary-controls-short']['planned_writes'] == ['SYST:REM', 'INP:SHOR 1', 'INP:SHOR 0']
+        short = cases['auxiliary-controls-short']
+        assert short['planned_writes'] == ['SYST:REM', 'INP:SHOR 1', 'INP:SHOR 0']
+        assert short['conditional_writes'][0]['writes'] == ['SYST:REM', 'INP OFF']
         assert not any(write.startswith('CURR:RANG ') for write in cases['auxiliary-controls-slew']['planned_writes'])
     if 'workflow-measure-log' in cases:
         assert cases['workflow-measure-log']['queries'][:2] == ['*IDN?', 'INP:STAT?']
         assert cases['workflow-measure-until']['queries'] == ['*IDN?', 'INP:STAT?', 'MEAS:VOLT?']
         for name in ('workflow-cc-timed-load', 'workflow-cc-discharge'):
             assert {'INP ON', 'INP OFF'} <= set(cases[name]['planned_writes'])
+            assert {'*IDN?', 'INP:STAT?', 'FUNC:MODE?', 'FUNC?', 'CURR:RANG?', 'CURR?', 'TRAN?',
+                    'INP:SHOR:STAT?', 'INP:TIM?'} <= set(cases[name]['queries'])
             assert 'error_code' not in cases[name]
 
 

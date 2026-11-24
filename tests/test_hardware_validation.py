@@ -105,7 +105,17 @@ def test_isolated_auxiliary_trial_restores_or_stops_without_input_on(monkeypatch
         fake.values['CURR:SLEW:POS'] = '.5'
     original = dict(fake.values)
     exit_code = cli.main([*args, '--confirm-isolated'])
-    result = json.loads(capsys.readouterr().out)
+    output = capsys.readouterr()
+    result = json.loads(output.out)
+    if trial in {'von', 'slew'}:
+        baseline = json.loads(output.err.removeprefix('Settings recovery baseline (private): '))
+        assert baseline['trial'] == trial
+        if trial == 'von':
+            assert Decimal(baseline['threshold_v']) == Decimal('.5') and baseline['latch'] == 'on'
+        else:
+            assert baseline['range'] == 'low'
+            assert Decimal(baseline['rise_slew_a_per_us']) == Decimal(original['CURR:SLEW:POS'])
+            assert Decimal(baseline['fall_slew_a_per_us']) == Decimal(original['CURR:SLEW:NEG'])
     assert 'INP ON' not in fake.calls
     if trial == 'slew_unrestorable':
         assert exit_code == 3 and result['error']['details']['no_settings_written']

@@ -130,7 +130,12 @@ def _round_trip(session, trial):
         if read() != baseline:
             raise _mismatch("The restored settings did not match the original readback.")
 
-    return exercise, restore
+    if trial == "von":
+        original = {"threshold_v": baseline[0], "latch": baseline[1]}
+    else:
+        rise, fall = baseline
+        original = {"range": range_name, "rise_slew_a_per_us": rise, "fall_slew_a_per_us": fall}
+    return exercise, restore, original
 
 
 def _short_trial(session):
@@ -152,7 +157,7 @@ def _short_trial(session):
         if c._flag(session, readback.SHORT_QUERY) != "OFF":
             raise _mismatch("Short OFF was not confirmed.")
 
-    return exercise, restore
+    return exercise, restore, {"input_state": "OFF", "short_state": "OFF"}
 
 
 def _list_settings(session):
@@ -162,11 +167,11 @@ def _list_settings(session):
     return c.validate_list_cc({key: raw[key] for key in c.LIST_FIELDS})
 
 
-def _list_trial(session, slot):
+def _list_trial(session, slot, previous_slot_width):
     fixed = readback._fixed(session, "CC")
     baseline = _list_settings(session)
     width = baseline["steps"][0]["width_s"]
-    first = Decimal(1) if width != 1 else Decimal(2)
+    first = next(Decimal(value) for value in (1, 2, 3) if value not in (width, previous_slot_width))
     second = Decimal(2) if first == 1 else Decimal(1)
 
     def with_width(value):
@@ -176,7 +181,8 @@ def _list_trial(session, slot):
     a, b = with_width(first), with_width(second)
 
     def require_list(expected, label):
-        if c._load_mode(session)[0] != "LIST" or _list_settings(session) != expected:
+        mode, function = c._load_mode(session)
+        if mode != "LIST" or function not in _CURRENT or _list_settings(session) != expected:
             raise _mismatch(f"LIST {label} did not match the expected configuration.")
 
     def exercise(write):
@@ -190,8 +196,11 @@ def _list_trial(session, slot):
         require_list(b, "B")
         write(f"LIST:RCL {slot}")
         require_list(a, "Recall")
-        return {"saved_slot": slot, "a_width_s": str(first), "b_width_s": str(second),
-                "recall_confirmed": True, "exited_list": True}
+        # Recall proves this Save only if A differs from the known prior contents.
+        return {"a_width_s": str(first), "b_width_s": str(second),
+                "save_confirmed": previous_slot_width is not None,
+                "recall_confirmed": True, "exited_list": True,
+                **({"saved_slot": slot} if previous_slot_width is not None else {})}
 
     def restore():
         _guard(session, modes=_FIXED | {"LIST"})
@@ -210,18 +219,23 @@ def _list_trial(session, slot):
         if _list_settings(session) != baseline or readback._fixed(session, "CC") != fixed:
             raise _mismatch("The original LIST buffer and Fixed CC settings were not restored.")
 
-    return exercise, restore
+    return exercise, restore, {"mode": "fixed", "function": "CC", "fixed_cc": fixed, "working_list": baseline}
 
 
-def execute(trial, *, mode, resource, backend, model_id, confirmed, slot=None, asrl=None, stop=None):
+def execute(trial, *, mode, resource, backend, model_id, confirmed, slot=None, previous_slot_width=None,
+            asrl=None, stop=None, on_baseline=None):
     if model_id != MODEL_ID:
         raise LoadError("unsupported_model", "The requested model profile is not registered.")
     if trial not in TRIALS or mode not in {"live", "dry-run"}:
         raise LoadError("argument_error", "Choose a Contributor settings trial in live or dry-run mode.")
     if trial == "list-cc":
         slot = c.validate_list_slot(slot)
-    elif slot is not None:
-        raise LoadError("argument_error", "A scratch slot applies only to the LIST trial.")
+        if previous_slot_width is not None:
+            previous_slot_width = c._decimal(previous_slot_width)
+            if not c.LIST_WIDTH_LIMITS[0] <= previous_slot_width <= c.LIST_WIDTH_LIMITS[1]:
+                raise LoadError("width_out_of_range", "The previous slot width must be within LIST width limits.")
+    elif slot is not None or previous_slot_width is not None:
+        raise LoadError("argument_error", "Scratch slot options apply only to the LIST trial.")
     if mode == "live" and not confirmed:
         raise LoadError("confirmation_required", "Confirm terminal isolation and any requested slot overwrite.")
     validate_request_connection(resource, backend, mode=mode, asrl=asrl, allowed=True)
@@ -232,16 +246,29 @@ def execute(trial, *, mode, resource, backend, model_id, confirmed, slot=None, a
             "slew": [f"{stem} <test/original>" for stem in readback.SLEW_QUERIES.values()],
             "short": ["INP:SHOR 1", "INP:SHOR 0"],
             "list-cc": ["LIST:WID 1,<A>", "FUNC:MODE LIST", f"LIST:SAV {slot}", "LIST:WID 1,<B>",
-                        f"LIST:RCL {slot}", "FUNC:MODE FIX", "LIST:WID 1,<original>"],
+                        f"LIST:RCL {slot}", "FUNC:MODE FIX"],
         }
         queries = {
             "von": [readback.VON_THRESHOLD_QUERY, readback.VON_LATCH_QUERY],
             "slew": ["CURR:RANG?", *(stem + "?" for stem in readback.SLEW_QUERIES.values())],
             "short": [],
-            "list-cc": ["CURR:RANG?", "CURR?", *readback.LIST_HEADER_QUERIES,
+            "list-cc": [c.SLOW_RISE_QUERY, "CURR:RANG?", "CURR?", *readback.LIST_HEADER_QUERIES,
                         *(query.format("{step}") for query in readback.LIST_STEP_QUERIES.values())],
         }
+        conditional = {
+            "short": [{"condition": "Trusted cleanup finds Input ON, before clearing Short",
+                       "writes": ["SYST:REM", "INP OFF"]}],
+            "list-cc": [
+                {"condition": "Trusted cleanup finds A or B in the working buffer",
+                 "writes": ["LIST:WID 1,<original>"]},
+                {"condition": "Trusted cleanup finds a different valid working buffer",
+                 "writes": ["LIST:RANG <original range>", "LIST:COUN <original count>", "LIST:STEP <original count>",
+                            "LIST:LEV <step>,<original current>", "LIST:SLEW <step>,<original slew>",
+                            "LIST:WID <step>,<original width>"]},
+            ],
+        }
         return {**marker, "hardware_access": False, "planned_writes": ["SYST:REM", *writes[trial]],
+                **({"conditional_writes": conditional[trial]} if trial in conditional else {}),
                 "queries": ["*IDN?", "INP:STAT?", "FUNC:MODE?", "FUNC?", "TRAN?", "INP:TIM?",
                             readback.SHORT_QUERY, *queries[trial]]}
 
@@ -251,14 +278,16 @@ def execute(trial, *, mode, resource, backend, model_id, confirmed, slot=None, a
         _guard(session)
         try:
             if trial == "short":
-                exercise, restore = _short_trial(session)
+                exercise, restore, original = _short_trial(session)
             elif trial == "list-cc":
-                exercise, restore = _list_trial(session, slot)
+                exercise, restore, original = _list_trial(session, slot, previous_slot_width)
             else:
-                exercise, restore = _round_trip(session, trial)
+                exercise, restore, original = _round_trip(session, trial)
         except LoadError as exc:
             exc.details["no_settings_written"] = True
             raise
+        if on_baseline is not None:
+            on_baseline({"trial": trial, **original})
         _stopping(stop)
         c._input_off(session)
         c._write(session, "SYST:REM")

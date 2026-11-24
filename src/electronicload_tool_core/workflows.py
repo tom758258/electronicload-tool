@@ -52,6 +52,7 @@ class _BoundedCCSession:
         self.session = session
         self.deadline = None
         self.on_dispatch = None
+        self.off_write_started_ns = None
         self.timeout_ms = None
 
     def arm(self, on_dispatch):
@@ -82,6 +83,8 @@ class _BoundedCCSession:
             self.on_dispatch = None
         else:
             self._budget()
+            if command == "INP OFF" and self.deadline is not None:
+                self.off_write_started_ns = monotonic_ns()
         return self.session.write(command)
 
 
@@ -345,7 +348,7 @@ def _run_cc(session, settings, stop, result, run_load, *, on_write_started=None)
                 off_confirmed_ns = monotonic_ns()
                 if off_confirmed_ns - result["on_write_started_ns"] > CONTRIBUTOR_MAX_ON_SECONDS * 10**9:
                     raise LoadError("workflow_timeout", "Input OFF was confirmed after the maximum loading time.", 3)
-                result["off_confirmed_ns"] = off_confirmed_ns
+                result.update(off_write_started_ns=session.off_write_started_ns, off_confirmed_ns=off_confirmed_ns)
         except (Exception, KeyboardInterrupt) as exc:
             observe("UNKNOWN")
             if isinstance(exc, LoadError):
@@ -442,15 +445,20 @@ def execute(command, *, mode="live", arguments, model_id=MODEL_ID, backend="syst
         quantities = ("current",)
     marker = {"validation_only": True, "validation_scope": hardware_validation} if contributor else {}
     if mode == "dry-run":
+        queries = list(QUERIES["input-state"])
+        if contributor_cc:
+            queries += ["FUNC:MODE?", "FUNC?", "CURR:RANG?", "CURR?", "TRAN?", "INP:SHOR:STAT?", "INP:TIM?"]
+        queries += [BASIC_MEASUREMENTS[item][1] for item in quantities]
         return {"arguments": {key: str(value) if isinstance(value, Decimal) else value
                               for key, value in settings.items() if key not in {"confirm_input_on", "csv"}},
                 "csv_requested": "csv" in settings, "hardware_access": False,
                 "input_on_requires_confirmation": command in CC_COMMANDS, **marker,
-                **({"queries": [*QUERIES["input-state"], *(BASIC_MEASUREMENTS[item][1] for item in quantities)]}
-                   if contributor else {}),
+                **({"queries": queries} if contributor else {}),
                 **({"planned_writes": ["SYST:REM", "FUNC:MODE FIX", "FUNC CURR", "CURR:RANG 0.1", "CURR 0.1",
                                        "SYST:REM", "INP ON", "SYST:REM", "INP OFF"],
-                    "max_input_on_s": CONTRIBUTOR_MAX_ON_SECONDS} if contributor_cc else {})}
+                    "max_input_on_s": CONTRIBUTOR_MAX_ON_SECONDS} if contributor_cc else {}),
+                **({"operator_current_trace_required": True}
+                   if contributor_cc and command == "cc-timed-load" else {})}
 
     if simulator is not None and not isinstance(simulator, ControlSimulator):
         raise LoadError("argument_error", "Workflow execution requires a ControlSimulator.")
@@ -461,6 +469,10 @@ def execute(command, *, mode="live", arguments, model_id=MODEL_ID, backend="syst
                       cleanup={"required": False, "attempted": False, "off_confirmed": False})
     if command == "cc-timed-load":
         result["duration_s"] = float(settings["duration_s"])
+        if contributor_cc:
+            # The timed command verifies the schedule and one current reading.
+            # Only an independent trace can verify loading throughout the interval.
+            result["load_duration_confirmed"] = False
     else:
         result.update(sample_count=0, last_measurement=None)
     if command == "cc-discharge":

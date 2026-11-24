@@ -466,12 +466,14 @@ def test_workflow_contributor_cli_uses_one_readonly_visa_session(fake_visa, caps
     assert fake_visa.calls.count("open_resource") == fake_visa.calls.count("session_close") == 1
 
 
-@pytest.mark.parametrize("scenario", ["timed", "early_wake", "capacity", "stop", "lost", "late_off", "voltage"])
+@pytest.mark.parametrize("scenario", ["timed", "early_wake", "early_drop", "capacity", "stop", "lost", "late_off", "voltage"])
 def test_contributor_cc_owns_bounded_on_and_cleanup(clock, monkeypatch, capsys, scenario):
     class PhysicalLoad(ValidationFake):
         query_delay = 0.15
 
         def write(self, command):
+            if command == "INP OFF":
+                self.loaded_before_off = self.input
             super().write(command)
             if command == "INP ON":
                 self.dispatched = clock.now
@@ -511,6 +513,15 @@ def test_contributor_cc_owns_bounded_on_and_cleanup(clock, monkeypatch, capsys, 
             return wait(timeout - 0.0005 if timeout > 1 else timeout)
 
         monkeypatch.setattr(clock, "wait", wake_early)
+    if scenario == "early_drop":
+        wait = clock.wait
+
+        def drop_early(timeout):
+            if fake.input and clock.now < fake.dispatched + 2 <= clock.now + timeout:
+                fake.input = False
+            return wait(timeout)
+
+        monkeypatch.setattr(clock, "wait", drop_early)
     clock.now = 10
     reported_start = []
     discharge = scenario in {"capacity", "voltage"}
@@ -547,8 +558,11 @@ def test_contributor_cc_owns_bounded_on_and_cleanup(clock, monkeypatch, capsys, 
     result = outcome["result"]
     assert result["input_state"] == "OFF" and result["cleanup"]["off_confirmed"]
     assert result["off_confirmed_ns"] - result["on_write_started_ns"] <= 10**10
-    if scenario in {"timed", "early_wake"}:
+    if not discharge:
+        assert fake.loaded_before_off == (scenario != "early_drop")
         assert fake.off_at - fake.dispatched == 5
+        assert result["off_write_started_ns"] - result["on_write_started_ns"] == 5 * 10**9
+        assert result["load_duration_confirmed"] is False
     else:
         assert result["stop_reason"] == "capacity_cutoff" and result["capacity_ah"] >= 0.00010
 

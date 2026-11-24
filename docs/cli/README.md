@@ -1345,7 +1345,7 @@ legacy Transient write and restores them after its trials when safe.
 | `system-query` | SCPI version, display mode and one Error Queue entry |
 | `readback` | Existing Fixed CC/CV/CR/CW, CC Slew, Transient, LIST, VON, Short and Average |
 | `sequence` | Four bounded Fixed CC/CV/CR/CW trials |
-| `workflow` | Four CLI Workflows in dry-run and simulation, with contributor hardware queries for the two measurement commands |
+| `workflow` | Four CLI Workflows in dry-run and simulation, with Contributor live measurement and bounded CC trials |
 | `measurement-extensions` | Native Min/Max, Discharge and Average setting |
 | `auxiliary-controls` | VON setting, Short ON/OFF interlocks and Fixed CC Slew |
 | `list-cc` | LIST CC setup, Save, Recall and Exit |
@@ -1354,7 +1354,7 @@ The System Query case reads one Error Queue entry and records the numeric
 code, including zero for an empty queue. The default Workflow cases run in
 simulation. An offline Workflow-only run needs only `-Target` and `-Modes workflow`.
 
-The three extension modes use CLI dry-runs and focused Simulator or Fake VISA
+By default, the three extension modes use CLI dry-runs and focused Simulator or Fake VISA
 tests from the contributor environment. Run any of them alone or together
 with only `-Target itech-it8812c` and `-Modes`. For example:
 
@@ -1400,8 +1400,14 @@ the SCPI `INP ON` write. For each case, arm an independent hardware cutoff
 before confirming the trial so that load time, including OFF confirmation,
 cannot exceed 10 seconds from the write. If communication is lost, use that
 cutoff immediately. Skip physical execution if the site cannot enforce this
-limit. After OFF is confirmed, verify that the source remained on throughout
-the load interval. The CC trials leave the Fixed CC setpoint at 0.1 A with
+limit. For Timed Load, start an independent current recording before Input ON
+and keep it through OFF. After OFF is confirmed, use that run's recording
+to verify current stayed between 0.09 and 0.11 A while loaded through the
+scheduled 5-second boundary, without early dropout or external intervention.
+Keep the recording privately. The standalone CLI reports SCPI write times
+and `load_duration_confirmed: false`. The script records confirmation of the
+current trace after the operator reviews it. For Discharge, confirm that the
+source remained on until cleanup. The CC trials leave Fixed CC at 0.1 A with
 Input OFF.
 
 `measurement-extensions` queries native Min/Max and Discharge values and
@@ -1412,14 +1418,25 @@ For `auxiliary-controls` and `list-cc`, physically disconnect the source and
 DUT and start in Fixed CC with Input, Short, Transient and Input Timer OFF.
 VON and same-range Slew save the original values, verify test readback, then
 restore and verify the original values. The Short trial checks ON and OFF
-state with isolated terminals and verifies Input OFF. It does not exercise
-load current. LIST reads and records the original working configuration,
-uses different first-step widths for A and B, saves A to `-ListScratchSlot`,
-and checks all steps after recalling A. Enter `OVERWRITE <slot>` only if that
-slot may retain A. The trial returns to Fixed CC and verifies the original
-working buffer. If the baseline cannot be restored, configuration writes are
-refused. If restoration cannot be verified after a write, keep the terminals
-isolated and complete the recovery at the instrument.
+state with isolated terminals and verifies Input OFF. LIST uses different
+first-step widths for A and B, saves A to `-ListScratchSlot`, and checks all
+steps after recalling A. Enter `OVERWRITE <slot>` only if that slot may
+retain A. To verify Save, supply a previously verified first-step width for
+the same instrument and slot, with no intervening change to the slot. The
+standalone CLI takes this value via `--previous-slot-width`. The trial
+chooses an A that differs from the supplied width. With no known prior
+width, Recall and Exit can be verified and Save remains unconfirmed. A
+verified Recall also provides the prior width for a future trial if the slot
+stays unchanged.
+
+Before writing, the trial displays a private recovery baseline, including
+the original working LIST and Fixed CC settings for LIST. Keep the terminal
+record private. The standalone CLI sends the baseline to stderr and the
+script keeps it out of shareable reports. The LIST trial returns to Fixed CC
+and verifies the original working buffer. Configuration writes require a
+restorable baseline. If restoration cannot be verified after a write, keep
+the terminals isolated and use the recorded baseline for recovery at the
+instrument.
 
 Run the isolated trials separately from source-connected or mode-changing
 trials. Full and incompatible selections preserve the isolated case previews
@@ -1437,8 +1454,12 @@ CC 案例從 Fixed CC Low 開始，使用專用的 5 V、限流 0.8 A 電源，�
 0.00010 Ah 才通過，電壓降至 4.5 V 以下（含）或第 6 秒容量仍未達標時即停止。
 兩項都從 SCPI `INP ON` 寫入起算。每次確認前先備妥獨立硬體停損，確保從
 寫入至 OFF 確認不超過 10 秒。通訊失信時立即使用停損。現場無法確保期限時，
-不執行實機測試。確認 OFF 後，確認電源在帶載期間持續供電。CC 案例結束後，
-Fixed CC 設定保留 0.1 A，Input 為 OFF。
+不執行實機測試。Timed Load 須在 Input ON 前開始獨立記錄電流，持續記錄至
+OFF。確認 OFF 後，核對本次記錄顯示帶載電流維持在 0.09 至 0.11 A，直到第 5
+秒預定 OFF，期間沒有提前掉載或外部介入。請私下保留記錄。單獨執行 CLI 會提供
+SCPI 寫入時間及 `load_duration_confirmed: false`。操作者核對電流記錄後，腳本
+才記錄確認結果。放電案例須確認電源持續供電至清理。CC 案例結束後，Fixed CC
+設定保留 0.1 A，Input 為 OFF。
 
 `measurement-extensions` 查詢原生 Min/Max 與放電讀值，經操作者確認後
 將 Average 設為 8、驗證讀回並保留設定。
@@ -1446,11 +1467,17 @@ Fixed CC 設定保留 0.1 A，Input 為 OFF。
 `auxiliary-controls` 與 `list-cc` 須物理隔離來源及待測物，從 Fixed CC 開始，
 確認 Input、Short、Transient 與 Input Timer 皆為 OFF。VON 與同檔 Slew
 保存原值、確認測試值讀回，再還原並比對原值。Short 只在端子隔離時驗證 ON／OFF
-狀態並確認 Input OFF，不測帶載電流。LIST 先讀回並記錄原工作設定，只修改第一步
-寬度來區分 A 與 B，存 A 至 `-ListScratchSlot`，召回後逐步核對 A。只有容許該槽
-保留 A 時，才輸入 `OVERWRITE <槽號>`。最後退出至 Fixed CC 並驗證原工作設定。
-原始設定無法安全還原時，拒絕設定寫入。寫入後若無法確認還原，維持端子隔離並由
-現場完成還原。
+狀態並確認 Input OFF。LIST 只修改第一步寬度來區分 A 與 B，存 A 至
+`-ListScratchSlot`，召回後逐步核對 A。只有容許該槽保留 A 時，才輸入
+`OVERWRITE <槽號>`。要驗證 Save，請提供同一台儀器、同一槽位先前已驗證且至今
+未被修改的第一步寬度。單獨執行 CLI 可用 `--previous-slot-width` 傳入。試驗會
+選用與該寬度不同的 A。舊寬度未知時，可確認 Recall 與 Exit，Save 則維持未確認。
+已驗證的 Recall 可提供下次試驗的舊寬度，前提是這段期間該槽沒有變更。
+
+試驗會在寫入前顯示私有復原基準，LIST 基準包含原始工作緩衝及 Fixed CC 設定。
+請私下保留終端紀錄。單獨執行 CLI 時，基準會由 stderr 輸出。腳本的可分享報告
+不包含基準。LIST 最後退出至 Fixed CC 並驗證原工作緩衝。只有可安全還原原值時
+才執行設定寫入。寫入後若無法確認還原，維持端子隔離，依記錄的基準在儀器上還原。
 
 請將隔離設定案例與需接電源或切換模式的試驗分開執行。Full 或不相容的混選將隔離
 案例列為 `NOT RUN`，並保留預覽及另跑原因。隔離案例可彼此混選，也可搭配原生量測、
