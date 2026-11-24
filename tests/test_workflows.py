@@ -493,7 +493,8 @@ def test_contributor_cc_owns_bounded_on_and_cleanup(clock, monkeypatch, capsys, 
                 # Return the value sampled at query start; the reply takes
                 # the real configured delay even if Input drops in between.
                 response = super().query(command)
-                clock.wait(0.25 if scenario == "sample_gap" else self.query_delay)
+                delay = 0.45 if scenario == "sample_gap" and clock.now - self.dispatched > 2 else self.query_delay
+                clock.wait(delay)
                 return response
             if command == "MEAS:CURR?" and scenario == "lost":
                 self.calls.append(command)

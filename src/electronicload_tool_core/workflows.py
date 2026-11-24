@@ -426,10 +426,14 @@ def _timed_current_samples(session, stop, result, start_ns):
                         input_started_ns - samples[-2]["sample_started_ns"] > gap_ns
                         or completed_ns - samples[-2]["input_query_started_ns"] > gap_ns)):
                 raise LoadError("workflow_load_unconfirmed", "Timed Load sample coverage is insufficient.", 3)
-            remaining_ns = deadline_ns - monotonic_ns()
-            if remaining_ns <= int(CONTRIBUTOR_INTERVAL * 10**9):
+            # The existing interval is a sample-start cadence, not a
+            # full extra sleep after the two queries. Count query time.
+            now_ns = monotonic_ns()
+            wait_ns = max(0, int(CONTRIBUTOR_INTERVAL * 10**9) - (now_ns - sample_started_ns))
+            if deadline_ns - now_ns <= wait_ns + minimum_query_ns:
                 break
-            _wait(stop, float(CONTRIBUTOR_INTERVAL))
+            if wait_ns:
+                _wait(stop, wait_ns / 1e9)
         if len(samples) < 2 or deadline_ns - samples[-1]["sample_started_ns"] > gap_ns:
             raise LoadError("workflow_load_unconfirmed", "Timed Load final sample is too far from scheduled OFF.", 3)
     finally:

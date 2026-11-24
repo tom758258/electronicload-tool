@@ -999,10 +999,18 @@ from contextlib import contextmanager
 sys.path.insert(0, str(Path.cwd() / 'tests'))
 from test_hardware_validation import ValidationFake
 from electronicload_tool_core import workflows
+from time import sleep
 
 @contextmanager
 def fake_session(_resource):
-    fake = ValidationFake()
+    class DelayedLoad(ValidationFake):
+        def query(self, command):
+            response = super().query(command)
+            if self.input:
+                sleep(self.query_delay)
+            return response
+
+    fake = DelayedLoad()
     fake.range = 6
     fake.query_delay = 0.15
     fake.values.update({'INP:TIM': '0', 'MEAS:CURR': '0.1'})
