@@ -46,7 +46,7 @@ def physical(command, **arguments):
 
 @pytest.mark.parametrize("scenario", [
     "recall_works", "recall_ignored", "unrestorable", "stale_slot", "unknown_slot", "lost_after_recall",
-    "second_save_ignored", "unknown_stale_slot",
+    "second_save_ignored", "unknown_stale_slot", "transient_enabled",
 ])
 def test_contributor_list_requires_independent_recall_then_restores_working_buffer(
     monkeypatch, capsys, scenario,
@@ -74,6 +74,7 @@ def test_contributor_list_requires_independent_recall_then_restores_working_buff
 
     fake = SettingsList()
     fake.range = 6
+    fake.transient = scenario == "transient_enabled"
     if scenario == "unrestorable":
         fake.values["LIST:RANG"] = "0.1"  # Readable number without a restorable LIST range mapping.
     start = fake.list_steps.copy()
@@ -86,6 +87,11 @@ def test_contributor_list_requires_independent_recall_then_restores_working_buff
     status = cli.main([*args, "--confirm-isolated"])
     output = capsys.readouterr()
     result = json.loads(output.out)
+    if scenario == "transient_enabled":
+        assert status != 0 and result["error"]["details"]["no_settings_written"]
+        assert fake.transient and fake.save_count == 0
+        assert all("?" in command for command in fake.calls)
+        return
     if scenario == "unrestorable":
         assert status == 3 and result["error"]["code"] == "list_baseline_unrestorable"
         assert result["error"]["details"]["no_settings_written"]
@@ -202,6 +208,15 @@ def test_contributor_trigger_observation_plan_and_refusal_before_visa(monkeypatc
     expected["configuration"]["pulse_width"] = "0.001"
     args[args.index("--validation-settings-json") + 1] = json.dumps(expected)
     assert cli.main([*args, "--confirm", "--dry-run"]) == 2 and not fake.calls
+    capsys.readouterr()
+    args[args.index("--observation-seconds") + 1] = "40"
+    expected = {"function": "LIST", "trigger": {"source": "BUS"}, "configuration": {
+        "range": "low", "repeat_count": 1, "steps": [
+            {"current_a": 0.1, "slew_a_per_us": 0.1, "width_s": 20},
+            {"current_a": 0.2, "slew_a_per_us": 0.1, "width_s": 20}]}}
+    args[args.index("--validation-settings-json") + 1] = json.dumps(expected)
+    assert cli.main([*args, "--confirm", "--dry-run"]) == 2 and not fake.calls
+    assert "capture deadline" in json.loads(capsys.readouterr().out)["error"]["message"]
 
 
 def test_automatic_bus_does_not_dispatch_after_input_drops(monkeypatch, capsys):

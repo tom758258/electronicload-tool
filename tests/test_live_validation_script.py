@@ -1189,8 +1189,10 @@ def test_trigger_validation_script_plan_preflight_and_noninteractive_refusal(run
     assert list_plan['repeat_count'] == 1
     assert [step['width_s'] for step in list_plan['steps']] == [2, 2]
     assert not any(name.startswith('transient-') or name.startswith('cc-') for name in cases)
-    short = run_script(['-Modes', 'trigger', '-PulseWidth', '0.001', '-PlanOnly'])
-    assert short.returncode == 2, short.stdout + short.stderr
+    for flags in (['-PulseWidth', '0.001'],
+                  ['-TriggerObservationSeconds', '40', '-TriggerListWidthA', '20', '-TriggerListWidthB', '20']):
+        refused_plan = run_script(['-Modes', 'trigger', '-PlanOnly', *flags])
+        assert refused_plan.returncode == 2, refused_plan.stdout + refused_plan.stderr
     refused = run_script(['-Modes', 'trigger'])
     assert refused.returncode == 2 and 'requires an interactive console' in refused.stdout
     mixed = run_script(['-Modes', 'transient-cc,trigger', '-PlanOnly'])
@@ -1224,7 +1226,7 @@ def test_configuration_readback_script_plan_preflight_and_noninteractive_refusal
     auto_report = json.loads(auto_path.read_text(encoding='utf-8-sig'))
     assert [case['name'] for case in auto_report['cases']] == expected
     assert all(case['command'] == 'contributor-settings' and '--confirm-isolated' in case['arguments']
-               for case in auto_report['cases'][3:])
+               and '--readback-trial' in case['arguments'] for case in auto_report['cases'][3:])
     assert all(case['status'] == 'NOT RUN' for case in auto_report['cases'])
     assert not auto_report['hardware_touched']
     for options, status in [(['-PlanOnly', *baseline], 'PLAN ONLY'),

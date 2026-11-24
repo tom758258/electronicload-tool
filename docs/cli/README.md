@@ -1449,7 +1449,10 @@ or manual function selection. With Input OFF it exercises known values and
 restores the original settings and function, including LIST without saving a
 slot. An enabled Transient starting state is supported when its original
 settings and HOLD source can be verified and restored; other unsafe or
-unrestorable states are refused before writing. Without LiveExtensions or
+unrestorable states are refused before writing. Only the automatic Readback
+procedure authorizes that temporary Transient change, including its VON,
+Slew and Short readbacks. Standalone Auxiliary Controls and LIST CC still
+require Transient OFF and never opt into that procedure. Without LiveExtensions or
 with explicit legacy Expected parameters, Readback remains a read-only
 diagnostic, not automatic acceptance.
 
@@ -1494,7 +1497,9 @@ Full 或混選在切換至隔離批次時只提示一次；操作者須實體斷
 Readback 加上 `-LiveExtensions` 且未提供 Expected 參數時，不需提供面板值或手動選擇功能；
 Input OFF 時自動測試已知設定並還原原始設定及功能，LIST 讀回不需儲存槽位。
 已啟用 Transient 的起始狀態須可確認並還原原設定及 HOLD 來源；不安全或不可還原的
-狀態在寫入前拒絕。未加 LiveExtensions 或明確提供舊有 Expected 參數時為唯讀診斷，
+狀態在寫入前拒絕。僅自動 Readback 流程（含 VON／Slew／Short）授權此暫時切換；
+獨立 Auxiliary Controls 與 LIST CC 仍須 Transient OFF，不進行此切換。
+未加 LiveExtensions 或明確提供舊有 Expected 參數時為唯讀診斷，
 不代表自動驗收。
 
 ### Script parameters
@@ -1755,7 +1760,7 @@ independent operator action; the run stays FAIL.
 
 | Parameters | Purpose |
 | --- | --- |
-| `-TriggerObservationSeconds`, `-TriggerMaxOnSeconds` | Whole seconds of observation and the larger per-trial deadline from before Input ON through OFF confirmation, within the 900 s total deadline. Allow time for VISA setup, command readbacks and cleanup. The script reserves part of the difference for OFF and any process termination. |
+| `-TriggerObservationSeconds`, `-TriggerMaxOnSeconds` | Whole seconds of observation and the larger per-trial deadline from before Input ON through OFF confirmation, within the 900 s total deadline. Capture is additionally limited to a single 30 s command minus the existing 500 ms return reserve. Plans must fit the required event and minimum query costs within the smaller window. Actual VISA latency may still limit evidence. The script reserves part of the difference for OFF and any process termination. |
 | `-LevelA`, `-LevelB`, `-RiseSlew`, `-FallSlew`, `-PulseWidth` | Distinct bounded Low-range CC levels, slew rates in A/μs and the Transient pulse width in seconds. Both current levels must fit the declared source limit. |
 | `-TriggerIntervalSeconds` | TIMER interval in seconds. The observation must accommodate two periods plus the pulse width. |
 | `-TriggerListWidthA`, `-TriggerListWidthB`, `-TriggerListRepeat` | LIST CC dwell times in seconds and a finite repeat count. The LIST must fit the observation window. |
@@ -1804,6 +1809,7 @@ configuration and a bounded observation deadline. It does not enable Input.
 HOLD／BUS／TIMER 在初始安全授權後自動取得儀器電流取樣、核對電平順序及
 時間區間，不需人工觀察或回答 Yes／No；HOLD／BUS 派送前再次確認 Input ON。
 若脈衝或停留時間短到既有 VISA 查詢延遲無法取樣，PlanOnly 即拒絕。
+擷取受單一命令 30 秒與既有 500 ms 返回預留限制，必須在較短的觀察窗內容納事件與最低必要查詢耗時；實際 VISA 延遲仍可能使證據不足。
 EXTERNAL 只保留設備準備及收到擷取
 就緒提示後提供實體訊號。程式在確認 OFF 後才完成波形驗收。取樣不足、期限超過
 或還原失敗均不得 PASS。這是儀器自身取樣的功能證據，不是獨立波形校正。

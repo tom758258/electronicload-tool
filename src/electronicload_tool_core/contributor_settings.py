@@ -13,6 +13,7 @@ from .visa import open_request_session, validate_request_connection
 
 COMMAND = "contributor-settings"
 READBACK_TRIALS = ("fixed-cc", "fixed-cv", "fixed-cr", "fixed-cw", "transient", "list", "average")
+SHARED_READBACK_TRIALS = ("von", "slew", "short")
 TRIALS = ("von", "slew", "short", "list-cc", *READBACK_TRIALS)
 _FIXED = {"FIX", "FIXED"}
 _CURRENT = {"CURR", "CURRENT"}
@@ -248,8 +249,8 @@ def _selection_guard(session, *, allow_transient=False):
     return original
 
 
-def _select_fixed(session, function, write):
-    state = _selection_guard(session, allow_transient=True)
+def _select_fixed(session, function, write, *, allow_transient=False):
+    state = _selection_guard(session, allow_transient=allow_transient)
     if function == "CR" and c._flag(session, c.LED_QUERY) != "OFF":
         raise LoadError("unsafe_mode", "Plain CR settings require LED OFF.")
     if state["transient_enabled"]:
@@ -282,7 +283,7 @@ def _with_selection(session, original, function, exercise, restore, baseline):
             if (readback._transient(session, original)["configuration"] != original_transient
                     or _trigger_snapshot(session) != original_trigger):
                 raise _mismatch("Original Transient or Trigger changed before testing.")
-        _select_fixed(session, function, write)
+        _select_fixed(session, function, write, allow_transient=original_transient is not None)
 
         def exercise_write(command):
             nonlocal target_changed
@@ -484,13 +485,13 @@ def _average_readback_trial(session):
     return exercise, restore, {"average_count": original}
 
 
-def _prepare_trial(session, trial, slot, previous_slot_width):
+def _prepare_trial(session, trial, slot, previous_slot_width, *, readback_trial=False):
     selection = readback._selection(session)
     target = trial[-2:].upper() if trial.startswith("fixed-") else "CC"
     needs_selection = selection["active_mode"] != "fixed" or selection["function"] != target
     if needs_selection:
-        selection = _selection_guard(session, allow_transient=True)
-    elif trial not in READBACK_TRIALS:
+        selection = _selection_guard(session, allow_transient=readback_trial)
+    elif not readback_trial:
         _guard(session)
     else:
         _selection_guard(session)
@@ -512,18 +513,21 @@ def _prepare_trial(session, trial, slot, previous_slot_width):
         functions = _round_trip(session, trial)
     if needs_selection:
         return _with_selection(session, selection, target, *functions)
-    if trial in READBACK_TRIALS:
+    if readback_trial:
         exercise, restore, original = functions
         return exercise, restore, {"selection": selection, **original}
     return functions
 
 
 def execute(trial, *, mode, resource, backend, model_id, confirmed, slot=None, previous_slot_width=None,
-            asrl=None, stop=None, on_baseline=None):
+            asrl=None, stop=None, on_baseline=None, readback_trial=False):
     if model_id != MODEL_ID:
         raise LoadError("unsupported_model", "The requested model profile is not registered.")
     if trial not in TRIALS or mode not in {"live", "dry-run"}:
         raise LoadError("argument_error", "Choose a Contributor settings trial in live or dry-run mode.")
+    if readback_trial and trial not in (*READBACK_TRIALS, *SHARED_READBACK_TRIALS):
+        raise LoadError("argument_error", "Readback selection is not applicable to this settings trial.")
+    readback_trial = readback_trial or trial in READBACK_TRIALS
     if trial == "list-cc":
         slot = c.validate_list_slot(slot)
         if previous_slot_width is not None:
@@ -588,12 +592,15 @@ def execute(trial, *, mode, resource, backend, model_id, confirmed, slot=None, p
                        "writes": ["FUNC:MODE FIX", f"FUNC {c.TRANSIENT_FUNCTIONS[target]}",
                                   "FUNC <original>", "FUNC:MODE <original FIX/LIST>"]}
         conditional.setdefault(trial, []).append(mode_change)
-        conditional[trial].append({"condition": "Original Transient enabled, HOLD and restorable settings confirmed with Input OFF",
-                                   "writes": ["TRAN OFF", "TRAN ON"]})
+        if readback_trial:
+            conditional[trial].append({"condition": "Original Transient enabled, HOLD and restorable settings confirmed with Input OFF",
+                                       "writes": ["TRAN OFF", "TRAN ON"]})
         if trial == "transient":
             conditional[trial].append({"condition": "Original Trigger Source differs from HOLD",
                                        "writes": ["TRIG:SOUR HOLD", "TRIG:TIM <original>", "TRIG:SOUR <original>"]})
-        queries[trial] += [c.SLOW_RISE_QUERY, c.LED_QUERY, "TRIG:SOUR?", "TRIG:TIM?"]
+        queries[trial] += [c.SLOW_RISE_QUERY, c.LED_QUERY]
+        if readback_trial:
+            queries[trial] += ["TRIG:SOUR?", "TRIG:TIM?"]
         return {**marker, "hardware_access": False, "planned_writes": ["SYST:REM", *writes[trial]],
                 **({"conditional_writes": conditional[trial]} if trial in conditional else {}),
                 "queries": ["*IDN?", "INP:STAT?", "FUNC:MODE?", "FUNC?", "TRAN?", "INP:TIM?",
@@ -603,7 +610,8 @@ def execute(trial, *, mode, resource, backend, model_id, confirmed, slot=None, p
         _stopping(stop)
         parse_identity(c._query(session, "*IDN?"))
         try:
-            exercise, restore, original = _prepare_trial(session, trial, slot, previous_slot_width)
+            exercise, restore, original = _prepare_trial(
+                session, trial, slot, previous_slot_width, readback_trial=readback_trial)
         except LoadError as exc:
             exc.details["no_settings_written"] = True
             raise
@@ -614,9 +622,9 @@ def execute(trial, *, mode, resource, backend, model_id, confirmed, slot=None, p
         c._write(session, "SYST:REM")
         c._input_off(session)
         if "selection" in original:
-            if _selection_guard(session, allow_transient=True) != original["selection"]:
+            if _selection_guard(session, allow_transient=readback_trial) != original["selection"]:
                 raise _mismatch("Original selection changed before the settings trial.")
-        elif trial in READBACK_TRIALS:
+        elif readback_trial:
             _selection_guard(session)
         else:
             _guard(session)

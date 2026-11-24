@@ -2075,7 +2075,7 @@ try {
         }
         foreach ($name in $readbackTrials.Keys) {
             $step = @{name=$name;command='contributor-settings';
-                args=@('--trial',$readbackTrials[$name],'--confirm-isolated');execution='live';isolated=$true;
+                args=@('--trial',$readbackTrials[$name],'--readback-trial','--confirm-isolated');execution='live';isolated=$true;
                 expected=@{input_state='OFF';restored=$true};
                 condition='Automatic known-setting readback and verified restoration with physically isolated terminals and Input OFF.'}
             if ($name -ceq 'list-status') { $step.deadline_ms = 300000 }
@@ -2174,7 +2174,7 @@ try {
             @{name='timer-on';command='input-on';args=($timerScope + @('--confirm', '--validation-settings-json', $timerExpected));
               condition='LIVE requires the 5 s Timer and an independent 10 s cutoff armed no later than the SCPI ON write'},
             @{name='timer-expiry';command='input-timer-status';args=$timerScope;
-              condition='Observe ON near expiry then OFF by Timer seconds plus one second from the SCPI ON write start; authorize a cutoff that cannot intervene during the observation'},
+              condition='Require an ON query starting at or after the Timer expiry boundary, followed by first OFF within Timer seconds plus one second from SCPI ON write start; ambiguous timing fails. Authorize a cutoff that cannot intervene during observation'},
             @{name='timer-off';command='input-off';args=@()},
             @{name='timer-disable';command='input-timer-disable';args=$timerScope},
             @{name='timer-status-disabled';command='input-timer-status';args=$timerScope},

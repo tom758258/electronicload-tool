@@ -164,6 +164,8 @@ def main(argv: list[str] | None = None, *, timer_on_write_started: Callable[[int
             continue
         if name == SETTINGS_COMMAND:
             sub.add_argument("--trial", required=True, choices=SETTINGS_TRIALS)
+            sub.add_argument("--readback-trial", action="store_true",
+                             help="Use the explicitly authorized automatic Readback procedure.")
             sub.add_argument("--slot", type=int, help="Explicit scratch slot to overwrite for the LIST trial.")
             sub.add_argument("--previous-slot-width", type=_workflow_number,
                              help="Previously verified first-step width in seconds for that scratch slot.")
@@ -412,7 +414,7 @@ def main(argv: list[str] | None = None, *, timer_on_write_started: Callable[[int
             result = settings_execute(args.trial, mode=mode, model_id=args.model, backend=args.backend,
                                       resource=args.resource, confirmed=args.confirm_isolated, slot=args.slot,
                                       previous_slot_width=args.previous_slot_width, asrl=asrl, stop=contributor_stop,
-                                      on_baseline=settings_on_baseline)
+                                      on_baseline=settings_on_baseline, readback_trial=args.readback_trial)
         elif (args.command in PROTECTION_COMMANDS
               or getattr(args, "hardware_validation", None) == "protection"):
             if getattr(args, "validation_settings_json", None) is not None:

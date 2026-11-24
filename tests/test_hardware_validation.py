@@ -81,14 +81,20 @@ def run(command, scope='transient-cc', **kwargs):
     return control.execute(command, resource=RESOURCE, hardware_validation=scope, **kwargs)
 
 
-@pytest.mark.parametrize('trial', ['von', 'slew', 'short', 'slew_unrestorable', 'short_untrusted', 'short_unexpected'])
+@pytest.mark.parametrize('trial', ['von', 'slew', 'short', 'slew_unrestorable', 'short_untrusted', 'short_unexpected',
+                                  'von_transient', 'slew_transient', 'short_transient', 'short_readback'])
 def test_isolated_auxiliary_trial_restores_or_stops_without_input_on(monkeypatch, capsys, trial):
     fake = ValidationFake()
     fake.range = 6
     fake.values.update({'INP:TIM': '0', 'VOLT:ON': '.5', 'VOLT:LATC': '1'})
     session(fake, monkeypatch)
     command = trial.split('_')[0]
+    if trial.endswith(('_transient', '_readback')):
+        fake.transient = True
+        fake.values['TRIG:TIM'] = '5'
     args = ['contributor-settings', '--trial', command, '--resource', RESOURCE, '--json']
+    if trial.endswith('_readback'):
+        args.append('--readback-trial')
     assert cli.main(args) == 2 and not fake.calls
     capsys.readouterr()
 
@@ -117,7 +123,15 @@ def test_isolated_auxiliary_trial_restores_or_stops_without_input_on(monkeypatch
             assert Decimal(baseline['rise_slew_a_per_us']) == Decimal(original['CURR:SLEW:POS'])
             assert Decimal(baseline['fall_slew_a_per_us']) == Decimal(original['CURR:SLEW:NEG'])
     assert 'INP ON' not in fake.calls
-    if trial == 'slew_unrestorable':
+    if trial.endswith('_transient'):
+        assert exit_code != 0 and result['error']['details']['no_settings_written']
+        assert fake.transient and all(call.endswith('?') for call in fake.calls)
+    elif trial == 'short_readback':
+        assert exit_code == 0 and result['result']['restored']
+        assert fake.transient and not fake.input and not fake.short
+        assert [call for call in fake.calls if '?' not in call] == [
+            'SYST:REM', 'TRAN OFF', 'INP:SHOR 1', 'INP:SHOR 0', 'TRAN ON']
+    elif trial == 'slew_unrestorable':
         assert exit_code == 3 and result['error']['details']['no_settings_written']
         assert all(call.endswith('?') for call in fake.calls)
     elif trial == 'short_untrusted':

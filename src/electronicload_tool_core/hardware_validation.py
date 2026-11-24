@@ -666,11 +666,20 @@ def execute_trigger_observation(*, mode, resource, backend, model_id, expected, 
         raise LoadError("argument_error", "Trigger dwell or pulse is too short for automatic current sampling.")
     if levels["level_a"] == levels["level_b"] or needed > seconds:
         raise LoadError("argument_error", "Trigger observation needs distinct levels and a sufficient window.")
+    # The runner gives capture at most one 30 s command, minus its
+    # existing 500 ms process-return reserve. Account for unavoidable
+    # queries before the event and at completion (not a latency guarantee).
+    software = source in {"HOLD", "BUS"}
+    guard_queries = 18 if is_list else 17
+    fixed_queries = 4 + guard_queries * (2 if software else 1) + int(software)
+    event_seconds = needed - trigger["interval_s"] if source == "TIMER" else needed
+    minimum_seconds = float(event_seconds) + fixed_queries * QUERY_DELAY_S + 0.3
+    if minimum_seconds >= min(seconds, 30) - 0.5:
+        raise LoadError("argument_error", "Trigger event and required queries cannot fit the capture deadline.")
     if not confirmed:
         raise LoadError("confirmation_required", "Authorize the bounded Trigger observation.")
     validate_request_connection(resource, backend, mode=mode, asrl=asrl, allowed=True)
     marker = {"validation_only": True, "validation_scope": "trigger"}
-    software = source in {"HOLD", "BUS"}
     if mode == "dry-run":
         return {**marker, "hardware_access": False,
                 "planned_writes": ["SYST:REM", software_trigger(source)] if software else [],
