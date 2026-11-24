@@ -979,6 +979,75 @@ catch {
     assert evidence['statuses'] == ['FAIL'] + (['NOT RUN'] * 3 if scenario == 'Timer' else [])
 
 
+def test_timer_expiry_script_observes_with_one_real_cli_process(run_script, tmp_path):
+    # Exercise the actual process/CLI/session boundary that caused the
+    # former polling interval to exceed the approved one-second bracket.
+    with (tmp_path / 'sitecustomize.py').open('a', encoding='utf-8') as preload:
+        preload.write("""
+import os
+import sys
+from contextlib import contextmanager
+from time import monotonic_ns, sleep
+
+sys.path.insert(0, str(Path.cwd() / 'tests'))
+from test_hardware_validation import ValidationFake
+from electronicload_tool_core import control
+
+@contextmanager
+def fake_session(_resource):
+    class TimerObserver(ValidationFake):
+        def query(self, command):
+            if command == 'INP:STAT?':
+                self.input = monotonic_ns() < int(os.environ['FAKE_TIMER_ON_NS']) + 5_010_000_000
+            response = super().query(command)
+            sleep(0.15)
+            return response
+
+        def write(self, command):
+            raise AssertionError('Timer observation must be read-only')
+
+    with Path(os.environ['FAKE_TIMER_SESSIONS']).open('a') as log:
+        log.write('session\\n')
+    fake = TimerObserver()
+    fake.query_delay = 0.15
+    fake.values.update({'INP:TIM:DEL': '5', 'INP:TIM': '1'})
+    yield fake, {'library': 'fake', 'manufacturer': 'fake'}
+
+control.open_session = fake_session
+""")
+    sessions = tmp_path / 'sessions.txt'
+    result = run_script([], extra_env={'FAKE_TIMER_PYTHON': sys.executable,
+                                      'FAKE_TIMER_RESOURCE': RESOURCE,
+                                      'FAKE_TIMER_SESSIONS': str(sessions)}, harness="""
+$python = $env:FAKE_TIMER_PYTHON
+$repo = (Get-Location).Path
+$script:connectionArgs = @('--resource', $env:FAKE_TIMER_RESOURCE)
+$script:report = @{status='NOT RUN';results=@([ordered]@{name='timer-expiry';status='NOT RUN'})}
+$script:perCommandDeadlineMs = 30000
+$script:totalDeadlineMs = 900000
+$script:expectedLibrary = 'fake'
+$script:expectedManufacturer = 'fake'
+$watch = [Diagnostics.Stopwatch]::StartNew()
+$script:timerPowered = $true
+$TimerSeconds = '5'
+$now = Get-TimerMonotonicNs
+$script:timerOnTiming = @{on_write_started_ns=($now - 1000000000L);on_confirmed_ns=$now}
+$script:timerOnStartMs = -1000
+$script:timerOnConfirmedMs = 0
+$env:FAKE_TIMER_ON_NS = [string]$script:timerOnTiming.on_write_started_ns
+function Read-ValidationAnswer { throw 'Timer result must not ask the operator.' }
+Invoke-TimerExpiry @{name='timer-expiry';command='input-timer-status';args=@()}
+$entry = $script:report.results[0]
+@{status=$entry.status;bracket=$entry.timer_expiry_bracket} | ConvertTo-Json -Depth 4 -Compress
+""")
+    assert result.returncode == 0, result.stdout + result.stderr
+    evidence = json.loads(result.stdout.splitlines()[-1])
+    assert evidence['status'] == 'NOT RUN'  # Real cleanup remains a separate requirement.
+    assert 0 <= evidence['bracket']['uncertainty_ns'] <= 10**9
+    assert evidence['bracket']['first_off_completed_ns'] >= evidence['bracket']['expected_expiry_ns']
+    assert sessions.read_text().splitlines() == ['session']
+
+
 def test_contributor_workflow_script_accepts_bounded_duration_evidence_after_confirmed_off(run_script, tmp_path):
     with (tmp_path / 'sitecustomize.py').open('a', encoding='utf-8') as preload:
         preload.write("""

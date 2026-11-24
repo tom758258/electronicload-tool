@@ -1102,11 +1102,13 @@ function Invoke-TimerExpiry($Step) {
         }
         foreach ($status in @($result.result.timer_observations)) {
             if ($null -eq $status) { break }
-            $now = $entry.observed_at_ms
             $query = $status.timer_timing
+            $observedMs = if ($null -ne $query.query_completed_ns) {
+                $entry.observed_at_ms - [Math]::Floor(($entry.observed_at_ns - $query.query_completed_ns) / 1000000)
+            } else { $null }
             $observations += [ordered]@{
-                elapsed_ms = $now - $script:timerOnStartMs
-                since_on_confirmed_ms = $now - $script:timerOnConfirmedMs
+                elapsed_ms = if ($null -ne $observedMs) { $observedMs - $script:timerOnStartMs }
+                since_on_confirmed_ms = if ($null -ne $observedMs) { $observedMs - $script:timerOnConfirmedMs }
                 query_started_ns = $query.query_started_ns
                 query_completed_ns = $query.query_completed_ns
                 seconds = $status.seconds
