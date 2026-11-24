@@ -654,6 +654,10 @@ def execute_trigger_observation(*, mode, resource, backend, model_id, expected, 
         if source == "TIMER":
             levels["interval"] = trigger["interval_s"]
             needed += 2 * trigger["interval_s"]
+    if config["range"] != "low" or not all(
+        Decimal(0) <= levels[key] <= Decimal(2) for key in ("level_a", "level_b")
+    ):
+        raise LoadError("unsupported_live_scope", "Observation requires Low range and levels within 2 A.")
     if levels["level_a"] == levels["level_b"] or needed > seconds:
         raise LoadError("argument_error", "Trigger observation needs distinct levels and a sufficient window.")
     if not confirmed:
@@ -674,7 +678,7 @@ def execute_trigger_observation(*, mode, resource, backend, model_id, expected, 
                 "observation_seconds": seconds}
     now = monotonic_ns()
     if (type(deadline_ns) is not int or deadline_ns <= now
-            or deadline_ns - now > seconds * 10**9):
+            or deadline_ns - now > min(seconds, 30) * 10**9):
         raise LoadError("argument_error", "A current, bounded observation deadline is required.")
     # The script owns the existing powered trial and OFF reserve. This command
     # never switches Input ON/OFF or starts a second VISA session.

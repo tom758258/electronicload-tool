@@ -302,8 +302,11 @@ def _fixed_readback_trial(session, function):
                   "CR": ("5", "10") if range_name == "low" else ("1000", "2000"),
                   "CW": ("0.10", "0.20")}[function]
     if function == "CV" and baseline["range_auto"] and range_name == "high":
-        candidates = ("30", "40")
-    candidate = next(validate(value) for value in candidates if Decimal(value) != original)
+        # Stay close to the validated original in the automatically selected range.
+        candidates = (str(original + Decimal("0.01")), str(original - Decimal("0.01")))
+        candidate = validate(candidates[0] if original < Decimal("120") else candidates[1])
+    else:
+        candidate = next(validate(value) for value in candidates if Decimal(value) != original)
     prefix = c.TRANSIENT_FUNCTIONS[function]
 
     def observe(value):
@@ -359,8 +362,15 @@ def _transient_readback_trial(session):
         _guard(session)
         write("TRAN ON")
         observed = readback.snapshot(session, "transient-status")
+        wanted = readback.transient_settings("CC", candidate)
+        actual = observed["configuration"]
+        matches = set(actual) == set(wanted) and all(
+            actual[key] == value if key in {"range", "transient_mode"}
+            else Decimal(str(actual[key])) == Decimal(str(value))
+            for key, value in wanted.items()
+        )
         if (not observed["enabled"] or observed["input_state"] != "OFF"
-                or observed["function"] != "CC" or settings() != candidate):
+                or observed["function"] != "CC" or not matches or settings() != candidate):
             raise _mismatch("Transient readback did not match the enabled test configuration.")
         return {"observed": observed, "expected_level_a": str(candidate["level_a"])}
 
@@ -466,6 +476,9 @@ def _prepare_trial(session, trial, slot, previous_slot_width):
         functions = _round_trip(session, trial)
     if needs_selection:
         return _with_selection(session, selection, target, *functions)
+    if trial in READBACK_TRIALS:
+        exercise, restore, original = functions
+        return exercise, restore, {"selection": selection, **original}
     return functions
 
 

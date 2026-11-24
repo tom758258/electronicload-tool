@@ -1376,11 +1376,17 @@ def test_explicit_live_extensions_never_use_simulation(run_script, mode, connect
         if mode == 'full':
             assert list(cases).index('trigger-restore') < list(cases).index('list-cc-settings')
     if 'auxiliary-controls-von' in cases:
-        assert {'VOLT:ON?', 'VOLT:LATC?'} <= set(cases['auxiliary-controls-von']['queries'])
-        short = cases['auxiliary-controls-short']
-        assert short['planned_writes'] == ['SYST:REM', 'INP:SHOR 1', 'INP:SHOR 0']
-        assert short['conditional_writes'][0]['writes'] == ['SYST:REM', 'INP OFF']
-        assert not any(write.startswith('CURR:RANG ') for write in cases['auxiliary-controls-slew']['planned_writes'])
+        if mode == 'full':
+            for name, prior in (('von', 'von-status'), ('short', 'short-status'), ('slew', 'fixed-slew-status')):
+                alias = cases[f'auxiliary-controls-{name}']
+                assert alias['reuse_from'] == prior
+                assert alias['planned_writes'] == alias['queries'] == alias['conditional_writes'] == []
+        else:
+            assert {'VOLT:ON?', 'VOLT:LATC?'} <= set(cases['auxiliary-controls-von']['queries'])
+            short = cases['auxiliary-controls-short']
+            assert short['planned_writes'] == ['SYST:REM', 'INP:SHOR 1', 'INP:SHOR 0']
+            assert short['conditional_writes'][0]['writes'] == ['SYST:REM', 'INP OFF']
+            assert not any(write.startswith('CURR:RANG ') for write in cases['auxiliary-controls-slew']['planned_writes'])
     if 'workflow-measure-log' in cases:
         assert cases['workflow-measure-log']['queries'][:2] == ['*IDN?', 'INP:STAT?']
         assert cases['workflow-measure-until']['queries'] == ['*IDN?', 'INP:STAT?', 'MEAS:VOLT?']
@@ -1451,8 +1457,8 @@ def test_new_modes_deduplicate_and_leave_physical_cases_not_run(run_script):
     assert report['overall_status'] == 'BLOCKED' and report['hardware_touched'] is False
     assert report['modes'] == ['readback', 'measurement-extensions', 'list-cc']
     assert len({case['name'] for case in report['cases']}) == len(report['cases'])
-    assert {case['status'] for case in report['cases'] if 'execution' in case} == {'PASS'}
-    assert {case['status'] for case in report['cases'] if 'execution' not in case} == {'NOT RUN'}
+    assert {case['status'] for case in report['cases'] if case.get('execution') in ('simulate', 'dry-run')} == {'PASS'}
+    assert {case['status'] for case in report['cases'] if case.get('execution') in (None, 'live')} == {'NOT RUN'}
 
 
 @pytest.mark.parametrize('extra,resource', [

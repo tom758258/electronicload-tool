@@ -756,9 +756,10 @@ transition Core rechecks physical OFF, CC settings, Short/Transient OFF and Time
 readback. Core signals the SCPI ON write start before waiting for the instrument,
 so the same six-second deadline covers the ON subprocess and subsequent polls.
 Once ON is confirmed, polling can begin as early as one second before the
-earliest possible expiry. The script accepts an OFF observation if the Input
-state query started at least five seconds after the SCPI Input ON write began
-and the response arrived within six seconds of that write start. An OFF reply
+earliest possible expiry. The script requires a recent ON observation, no more
+than one second before expected expiry, and an OFF query that started at least
+five seconds after the SCPI Input ON write began and returned within six seconds
+of that write start. An OFF reply
 completed before five seconds fails the trial. Each poll respects the remaining
 observation window. When the window closes without a valid observation, the
 script fails and begins OFF cleanup. If the CLI process is still running at
@@ -769,9 +770,11 @@ communication failure in a run that includes Trigger requires independent
 operator action. The CLI records the write, ON confirmation and Input query
 times. `-DebugArtifacts`
 saves these observations privately. The script sends and verifies explicit
-OFF, disables Timer separately and reads the final state. At that point type
-`AUTO` only if Timer switched Input OFF without manual or external intervention
-during the observation. A possible ON attempt gets one bounded OFF cleanup
+OFF, disables Timer separately and reads the final state. Acceptance is automatic
+from the timed ON/OFF evidence and verified cleanup. The operator must ensure
+the independent cutoff cannot intervene in the observation window and must not
+intervene except for safety; sampled evidence does not independently prove causation.
+A possible ON attempt gets one bounded OFF cleanup
 attempt under the existing communication rules. Timer-disable cleanup follows
 confirmed OFF.
 
@@ -781,14 +784,16 @@ confirmed OFF.
 在 Timer Input ON 提示確認上述條件，10 秒上限僅適用這組核准條件。
 Core 在等待儀器回覆前通知 Script SCPI ON 的寫入起點，因此 ON 子程序與
 後續查詢共用 6 秒期限。ON 確認後，最早從可能到期前 1 秒開始查詢。
-OFF 查詢必須在寫入開始後至少 5 秒才啟動，且在第 6 秒前收到結果。
+須有距預期到期不超過 1 秒的近期 ON 證據；OFF 查詢必須在寫入開始後至少
+5 秒才啟動，且在第 6 秒前收到結果。
 若在第 5 秒前讀到 OFF 即失敗。第 6 秒仍無有效觀察則判定失敗並開始 OFF
 清理。若 CLI 子程序在截止時仍在執行，Script 會先提示立即使用獨立硬體
 停損，再等待子程序退出。子程序已退出且既有通訊規則允許時，才執行
 VISA 清理。混選含 Trigger 且通訊失信時，由現場獨立處理。
 CLI 記錄 SCPI 寫入、ON 確認及 Input 查詢起訖，`-DebugArtifacts` 將觀察
-資料存於私有目錄。明確確認 OFF、獨立停用 Timer 並讀回最終狀態後，
-只有確認觀察期間由 Timer 自動關閉且未經人工或外部介入，才輸入 `AUTO`。
+資料存於私有目錄。依時間與 ON/OFF 證據自動判定，並確認 OFF、停用 Timer
+及讀回最終狀態。操作者須確保獨立停損不在觀察期間動作，除安全需要外不得介入；
+儀器取樣證據並非獨立的因果證明。
 
 The validation-only Core/CLI scope uses `INP:TIM:DEL <seconds>`, `INP:TIM 0|1`,
 `INP:TIM:DEL?` and `INP:TIM?` from the
@@ -1371,11 +1376,10 @@ to pass. If pytest deselects any of those cases, the script stops the group
 before running it. The report records `NOT RUN` when no test ran and `SKIP`
 when tests were skipped. Either result leaves the run incomplete.
 
-Readback queries the existing configuration with Input OFF before any setup.
-The current mode determines which Fixed, Slew, Transient or LIST case is
-applicable. Other selections are marked `SKIP`. To cover them, repeat
-`-Modes readback` with the relevant settings already present on the instrument.
-For comparisons with known panel settings, use `-ExpectedRiseSlew` and
+By default, Readback uses the isolated settings batch to automatically select
+functions, exercise known settings, compare independent readbacks and verify
+restoration. No panel values or repeated manual function selection are required.
+For legacy read-only diagnostics with known panel settings, explicitly use `-ExpectedRiseSlew` and
 `-ExpectedFallSlew` together (A/µs), `-ExpectedVonThreshold` (V) and
 `-ExpectedVonLatch` (`on` or `off`) together, `-ExpectedShort` (`on` or
 `off`), and `-ExpectedAverageCount` (2–16). Incomplete baselines leave the case
@@ -1392,7 +1396,7 @@ interactive physical validation procedure.
 The hardware case results carry `execution: live`.
 
 With Input OFF, `workflow` verifies two scheduled measurement samples and
-completion of a voltage condition at 1 V or above. The two CC cases start in
+completion of a voltage condition at 1 V or above. The two CC cases establish
 Fixed CC Low with a dedicated 5 V source limited to 0.8 A and use a 0.1 A
 setpoint. Timed Load requests OFF at 5 seconds. Discharge samples every
 0.5 seconds and must reach 0.00010 Ah. It stops on a voltage of 4.5 V or lower
@@ -1415,7 +1419,8 @@ verifies Average set to 8. The Average case leaves that setting after operator
 confirmation.
 
 For `auxiliary-controls` and `list-cc`, physically disconnect the source and
-DUT and start in Fixed CC with Input, Short, Transient and Input Timer OFF.
+DUT with Input, Short, Transient and Input Timer OFF. The trials select Fixed CC
+from a supported starting mode and verify restoration.
 VON and same-range Slew save the original values, verify test readback, then
 restore and verify the original values. The Short trial checks ON and OFF
 state with isolated terminals and verifies Input OFF. LIST uses different
@@ -1451,7 +1456,7 @@ Contributor 實機項目。指定與 `-Connection` 相符的 `-Resource`，
 執行時需遵循互動式實機驗證流程，硬體項目會標記 `execution: live`。
 
 Input OFF 時，`workflow` 驗證定時取樣兩次及電壓達到 1 V 的條件。兩個
-CC 案例從 Fixed CC Low 開始，使用專用的 5 V、限流 0.8 A 電源，負載
+CC 案例自動設定 Fixed CC Low，使用專用的 5 V、限流 0.8 A 電源，負載
 設定為 0.1 A。Timed Load 在第 5 秒要求 OFF。放電每 0.5 秒取樣，須達到
 0.00010 Ah 才通過，電壓降至 4.5 V 以下（含）或第 6 秒容量仍未達標時即停止。
 兩項都從 SCPI `INP ON` 寫入起算。每次確認前先備妥獨立硬體停損，確保從
@@ -1465,8 +1470,9 @@ CC 案例從 Fixed CC Low 開始，使用專用的 5 V、限流 0.8 A 電源，�
 `measurement-extensions` 查詢原生 Min/Max 與放電讀值，經操作者確認後
 將 Average 設為 8、驗證讀回並保留設定。
 
-`auxiliary-controls` 與 `list-cc` 須物理隔離來源及待測物，從 Fixed CC 開始，
-確認 Input、Short、Transient 與 Input Timer 皆為 OFF。VON 與同檔 Slew
+`auxiliary-controls` 與 `list-cc` 須物理隔離來源及待測物，
+確認 Input、Short、Transient 與 Input Timer 皆為 OFF，再由受支援的起始模式
+自動選擇 Fixed CC 並驗證還原。VON 與同檔 Slew
 保存原值、確認測試值讀回，再還原並比對原值。Short 只在端子隔離時驗證 ON／OFF
 狀態並確認 Input OFF。隔離設定批次只需確認一次實體隔離。選取 LIST 時，
 只有容許覆寫指定槽位才輸入 `OVERWRITE <槽號>`，否則不含 LIST 的批次輸入

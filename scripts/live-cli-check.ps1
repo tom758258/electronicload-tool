@@ -265,7 +265,7 @@ function Save-Report {
         if ($entry.Contains('origin_function')) { $case.origin_function = $entry.origin_function }
         foreach ($field in @('trace_source','trace_points','trace_interval_s','trace_sample_count',
                              'trace_csv_complete','operator_observed','load_duration_confirmed','trigger_observation','trigger_source','trigger_interval_s',
-                             'trigger_source_restore','trigger_interval_restore','list_selected')) {
+                             'trigger_source_restore','trigger_interval_restore','list_selected','automatic_off_observed','reuse_from')) {
             if ($entry.Contains($field)) { $case[$field] = $entry[$field] }
         }
         if ($entry.Contains('confirmed_input_state')) { $case.input_state = $entry.confirmed_input_state }
@@ -312,7 +312,9 @@ function Save-Report {
             if ($entry.execution -ceq 'live' -and $entry.command -cin @('cc-timed-load','cc-discharge','contributor-settings')) {
                 foreach ($field in @('input_state','cleanup','on_write_started_ns','off_write_started_ns','off_confirmed_ns','duration_s',
                                      'current_a','measured_current_a','capacity_ah','trial','restored','short_state',
-                                     'short_on_confirmed','saved_slot','a_width_s','b_width_s','save_confirmed','recall_confirmed','exited_list')) {
+                                     'short_on_confirmed','saved_slot','a_width_s','b_width_s','save_confirmed','recall_confirmed','exited_list',
+                                     'load_evidence_source','current_samples','observed','expected_setpoint',
+                                     'expected_level_a','expected_width_s','expected_average_count')) {
                     if ($null -ne $entry.response.result.$field) { $case[$field] = $entry.response.result.$field }
                 }
             }
@@ -2064,13 +2066,14 @@ try {
             'von-status'='von'; 'short-status'='short'; 'average-status'='average'
         }
         foreach ($name in $readbackTrials.Keys) {
-            $isolated += @{name=$name;command='contributor-settings';
+            $step = @{name=$name;command='contributor-settings';
                 args=@('--trial',$readbackTrials[$name],'--confirm-isolated');execution='live';isolated=$true;
                 expected=@{input_state='OFF';restored=$true};
                 condition='Automatic known-setting readback and verified restoration with physically isolated terminals and Input OFF.'}
+            if ($name -ceq 'list-status') { $step.deadline_ms = 300000 }
+            $isolated += $step
         }
     }
-    $pendingLive = @()
     if ($LiveExtensions) {
         if ($workflowSelected) {
             $scope = @('--hardware-validation','workflow')
@@ -2418,16 +2421,12 @@ try {
         @($triggerPlans | Select-Object -First 1) +
         @($planned | Select-Object -Skip 3 -First ([Math]::Max(0, $protectionIndex - 3))) +
         $protectionPlans + @($planned | Select-Object -Skip $protectionIndex | Where-Object { -not $_.isolated }) +
-        $slowRiseCleanup + @($triggerPlans | Select-Object -Skip 1) + $isolated + $pendingLive
+        $slowRiseCleanup + @($triggerPlans | Select-Object -Skip 1) + $isolated
     $report.results = @($allSteps | ForEach-Object {
         $entry = [ordered]@{name=$_.name;command=$_.command;arguments=$_.args;status='NOT RUN'}
         if ($_.name -like 'workflow-*') { $entry['execution'] = 'simulate' }
         if ($_.ContainsKey('execution')) { $entry['execution'] = $_.execution }
-        if ($_ -in $pendingLive) {
-            if (-not $_.ContainsKey('args')) { $entry.arguments = @() }
-            $entry['execution'] = 'live'
-            $entry['error_code'] = if ($_.not_run_reason) { $_.not_run_reason } else { 'live_procedure_unapproved' }
-        }
+        if ($_.ContainsKey('reuse_from')) { $entry['reuse_from'] = $_.reuse_from }
         if ($_.ContainsKey('expected_error')) { $entry['expected_error'] = $_.expected_error }
         if ($_.ContainsKey('condition')) { $entry['condition'] = $_.condition }
         if ($_.ContainsKey('expected_readback')) { $entry['expected_readback'] = $_.expected_readback }
@@ -2437,8 +2436,7 @@ try {
     $plannedRanges = @{}
     $offlinePlans = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
     foreach ($step in $allSteps) {
-        if ($step.command -in @('operator-observation','automatic-observation','pytest') -or
-            ($step -in $pendingLive -and -not $step.ContainsKey('args'))) { continue }
+        if ($step.command -in @('operator-observation','automatic-observation','pytest')) { continue }
         $extras = @($step.args)
         $noConnection = $step.execution -in @('dry-run','simulate') -or
             ($step.name -like 'workflow-*' -and $step.execution -cne 'live')
@@ -2450,7 +2448,8 @@ try {
         if ($step.execution -ceq 'live') {
             $entry = $report.results | Where-Object { $_.name -ceq $step.name }
             foreach ($field in @('queries','planned_writes','conditional_writes')) {
-                if ($null -ne $plan.result.$field) { $entry[$field] = @($plan.result.$field) }
+                if ($step.ContainsKey('reuse_from')) { $entry[$field] = @() }
+                elseif ($null -ne $plan.result.$field) { $entry[$field] = @($plan.result.$field) }
             }
         }
         if ($step.command -in @('set-cc', 'set-cv', 'set-cr', 'set-cr-led',
@@ -2484,9 +2483,6 @@ try {
     Write-Host "Selected modes: $($selectedModes -join ', ')."
     if (-not $offlineOnly) { Write-Host 'Plan: Identify, confirm Input OFF and measure before physical trials.' }
     if ($workflowPlans.Count) { Write-Host 'Workflow: four simulated cases with no VISA or source access.' }
-    if ($pendingLive.Count) {
-        Write-Host 'Some selected LIVE cases require a separate run and will remain NOT RUN.'
-    }
     if ($systemQuerySelected) { Write-Host 'System Query: read version, display mode and one Error Queue entry.' }
     if ($readbackSelected) {
         if ($legacyReadback) {
@@ -2516,7 +2512,7 @@ try {
         Write-Host 'CR-LED and Current Slow Rise trials keep Input OFF and verify configuration readback.'
     }
     if ($triggerSelected) {
-        Write-Host 'Trigger: four source trials (HOLD, TIMER, BUS, EXTERNAL) with manual observation, explicit OFF and restoration of original Source and Timer.'
+        Write-Host 'Trigger: four source trials (HOLD, TIMER, BUS, EXTERNAL) with automatic sampled observation, explicit OFF and restoration of original Source and Timer.'
         Write-Host "Each Trigger observation is $TriggerObservationSeconds s. The Input ON/OFF budget is $TriggerMaxOnSeconds s per trial."
     }
     if ('current-slow-rise' -in $selectedModes) {
@@ -2920,7 +2916,6 @@ try {
     if ($report.results.error_code -contains 'list_save_unconfirmed') {
         throw 'LIST validation is incomplete because Save was not confirmed.'
     }
-    if ($pendingLive.Count) { throw 'LIVE validation is incomplete. Review the NOT RUN cases and their required procedures.' }
     $report.status = if ($readbackSelected -and ($report.results.readback_comparison -contains 'OBSERVED ONLY')) {
         'OBSERVED ONLY'
     } else { 'PASS' }
