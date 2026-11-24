@@ -548,19 +548,21 @@ Input Timer, Trigger, and Protection use their existing scopes. These requests
 require the exact IT8812C identity and an explicit USB or ASRL INSTR Resource with
 System VISA. The new contributor readbacks identify their source as
 `instrument_readback`. Query failures and invalid replies return errors.
-`fixed-slew-status` checks both rates against the current CC Range. An out-of-range
-rate reports the query, observed rate, range and bounds. The programming guide
-for `CURR:RANG` says existing current settings, including slew, that exceed the
-new range are set to its maximum. The tool still checks the actual readback
-against the reported range. To investigate a mismatch, record the range and
-both slew rates before and after the range change with Input OFF.
+`fixed-slew-status` checks the positive and negative rates against the reported
+CC Range. It stops at the first out-of-range rate and reports the query, observed
+rate, range and bounds. Compare those details with the instrument's current
+front-panel readings without changing settings. The programming guide for
+`CURR:RANG` says a range change can affect immediate, transient and triggered
+current settings as well as slew. Settings outside the new range are set to
+its maximum. A test that changes the range requires a separately approved
+Contributor procedure.
 [Programming Guide, printed p. 47](https://assets.testequity.com/te1/Documents/pdf/itech/ITECH_IT8800-Programming-Guide-EN.pdf#page=57)
 
-`fixed-slew-status` 依目前 CC Range 檢查正、負 Slew。超界時會回報查詢、
-觀測值、Range 與上下限。Programming Guide 的 `CURR:RANG` 說明指出，
-含 Slew 在內的電流設定若超出新檔範圍，儀器會調整至新檔上限。工具仍以
-儀器回報的 Range 驗證實際讀值。若需釐清不符原因，請保持 Input OFF，
-記錄切換前後的 Range 和兩個 Slew 讀值。
+`fixed-slew-status` 依儀器回報的 CC Range 檢查正、負 Slew。遇到第一個超界
+讀值就停止，並回報查詢、觀測值、Range 與上下限。請在維持目前設定的情況下，
+將這些資訊與儀器面板的目前讀值比對。Programming Guide 的 `CURR:RANG`
+說明指出，切檔可能影響即時、暫態、觸發電流設定及 Slew，超出新檔範圍的設定
+會調整至新檔上限。涉及切檔的測試須依另行核准的 Contributor 程序進行。
 [Programming Guide，第 47 頁](https://assets.testequity.com/te1/Documents/pdf/itech/ITECH_IT8800-Programming-Guide-EN.pdf#page=57)
 
 For CV, CR and LIST, a valid numeric Range selector without a known label is
