@@ -318,11 +318,12 @@ def _run_cc(session, settings, stop, result, run_load, *, on_write_started=None)
         if result["input_state"] != "OFF":
             raise LoadError("input_not_off", "Switch off the load before starting the Workflow.")
         initial_off = True
+        # The established Sequence setup selects and verifies Fixed CC Low
+        # itself, including the original mode's interlocks, before Input ON.
         if timed:
-            origin = control._settings(session)
-            if (origin["function_mode"] not in {"FIX", "FIXED"} or origin["range"] != "low"
-                    or origin["function"] not in {"CURR", "CURRENT"}):
-                raise LoadError("unsafe_mode", "Contributor CC requires Fixed CC Low before setup.")
+            control._fixed_setup_guard(session, stop, fixed_only=True, on_input_state=observe)
+            if control._check_mode_change(session):
+                raise LoadError("unsafe_mode", "Disable CR-LED before Contributor CC setup.")
         cutoff = settings.get("cutoff_voltage")
         if cutoff is not None:
             result["initial_voltage_v"] = _sample(session, ("voltage",))["voltage_v"]

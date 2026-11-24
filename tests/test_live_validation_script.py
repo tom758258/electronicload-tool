@@ -451,7 +451,7 @@ def test_default_usb_and_explicit_asrl_full_plan_share_the_matrix(run_script):
                  'trigger-hold-on', 'trigger-external-on', 'trigger-restore'):
         assert name in names
     assert names.index('trigger-snapshot') < names.index('scpi-version') < names.index('readback')
-    assert names.index('average-status') < names.index('protection-start-state')
+    assert names.index('trigger-restore') < names.index('average-status')
     assert names.index('protection-prepare-cc-readback') < names.index('protection-software-current-original')
     assert names.index('protection-default-hardware-power-final') < names.index('sequence-cc')
     assert names.index('sequence-cw') < names.index('set-cc-high')
@@ -1187,6 +1187,15 @@ def test_configuration_readback_script_plan_preflight_and_noninteractive_refusal
     settings = {'fixed-slew-status': {'rise_slew_a_per_us': 0.1, 'fall_slew_a_per_us': 0.2},
                 'von-status': {'threshold_v': 0, 'latch': 'off'}, 'short-status': {'short_state': 'ON'},
                 'average-status': {'average_count': 8}}
+    auto = run_script(['-Modes', 'readback', '-PlanOnly'])
+    assert auto.returncode == 0, auto.stdout + auto.stderr
+    auto_path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', auto.stdout)[-1])
+    auto_report = json.loads(auto_path.read_text(encoding='utf-8-sig'))
+    assert [case['name'] for case in auto_report['cases']] == expected
+    assert all(case['command'] == 'contributor-settings' and '--confirm-isolated' in case['arguments']
+               for case in auto_report['cases'][3:])
+    assert all(case['status'] == 'NOT RUN' for case in auto_report['cases'])
+    assert not auto_report['hardware_touched']
     for options, status in [(['-PlanOnly', *baseline], 'PLAN ONLY'),
                             (['-ExpectedRiseSlew', '0.1'], 'BLOCKED')]:
         result = run_script(['-Modes', 'readback', *options])
@@ -1351,15 +1360,15 @@ def test_explicit_live_extensions_never_use_simulation(run_script, mode, connect
         assert trial['planned_writes'].count(f'LIST:RCL {slot}') == 2
         assert 'CURR:SLEW:STAT?' in trial['queries']
         assert ['LIST:WID 1,<original>'] in [branch['writes'] for branch in trial['conditional_writes']]
-        restoration = trial['conditional_writes'][-1]['writes']
+        restoration = next(branch['writes'] for branch in trial['conditional_writes']
+                           if branch['writes'][0].startswith('LIST:RANG '))
         assert {write.split()[0] for write in restoration} == {
             'LIST:RANG', 'LIST:COUN', 'LIST:STEP', 'LIST:LEV', 'LIST:SLEW', 'LIST:WID',
         }
         assert not {'INP ON', '*TRG'}.intersection(trial['planned_writes'], restoration)
-        if mode not in ('list-cc', 'list-cc,auxiliary-controls'):
-            assert trial['error_code'] == 'settings_require_isolated_run'
-        else:
-            assert 'error_code' not in trial
+        assert 'error_code' not in trial
+        if mode == 'full':
+            assert list(cases).index('trigger-restore') < list(cases).index('list-cc-settings')
     if 'auxiliary-controls-von' in cases:
         assert {'VOLT:ON?', 'VOLT:LATC?'} <= set(cases['auxiliary-controls-von']['queries'])
         short = cases['auxiliary-controls-short']

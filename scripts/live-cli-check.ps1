@@ -5,7 +5,7 @@ Default: the established validation modes, with common read-only safety precheck
 trigger and input-timer. Omitted -Modes selects all default modes.
 -Modes protection selects the separate Protection validation procedure.
 -Modes sequence selects four bounded Fixed Software Sequence trials.
--Modes readback checks existing settings with Input OFF and without changing the instrument.
+-Modes readback automatically exercises settings with Input OFF and isolated terminals.
 -Modes full (default) selects all trials. USB and ASRL use the same matrix.
 -Modes workflow runs only dry-run and simulation, without an instrument.
 -Modes measurement-extensions,auxiliary-controls,list-cc selects offline checks.
@@ -1975,7 +1975,10 @@ try {
             $planned += @{name=$command;command=$command;args=@('--hardware-validation','system-query')}
         }
     }
-    if ($readbackSelected) {
+    $isolated = @()
+    $legacyReadback = @(@('ExpectedRiseSlew','ExpectedFallSlew','ExpectedVonThreshold','ExpectedVonLatch',
+        'ExpectedShort','ExpectedAverageCount') | Where-Object { $PSBoundParameters.ContainsKey($_) }).Count -gt 0
+    if ($readbackSelected -and $legacyReadback) {
         $baselineParameters = @{
             'fixed-slew-status' = @{rise_slew_a_per_us='ExpectedRiseSlew';fall_slew_a_per_us='ExpectedFallSlew'}
             'von-status' = @{threshold_v='ExpectedVonThreshold';latch='ExpectedVonLatch'}
@@ -2025,8 +2028,23 @@ try {
             $planned += $step
         }
     }
+    if ($readbackSelected -and -not $legacyReadback) {
+        $planned += @{name='readback';command='readback';args=$readbackScope;independent_snapshot=$true;
+                      readback_expected=@{input_state='OFF'}}
+        $readbackTrials = [ordered]@{
+            'fixed-status-cc'='fixed-cc'; 'fixed-status-cv'='fixed-cv';
+            'fixed-status-cr'='fixed-cr'; 'fixed-status-cw'='fixed-cw';
+            'transient-status'='transient'; 'list-status'='list'; 'fixed-slew-status'='slew';
+            'von-status'='von'; 'short-status'='short'; 'average-status'='average'
+        }
+        foreach ($name in $readbackTrials.Keys) {
+            $isolated += @{name=$name;command='contributor-settings';
+                args=@('--trial',$readbackTrials[$name],'--confirm-isolated');execution='live';isolated=$true;
+                expected=@{input_state='OFF';restored=$true};
+                condition='Automatic known-setting readback and verified restoration with physically isolated terminals and Input OFF.'}
+        }
+    }
     $pendingLive = @()
-    $isolatedNeedsSeparateRun = $false
     if ($LiveExtensions) {
         if ($workflowSelected) {
             $scope = @('--hardware-validation','workflow')
@@ -2058,13 +2076,12 @@ try {
                   expected=@{average_count=8};execution='live';condition='Input OFF and operator approves leaving Average at 8'}
             )
         }
-        $isolated = @()
         if ('auxiliary-controls' -in $selectedModes) {
-            $isolated = @(foreach ($trial in @('von','short','slew')) {
+            $isolated += @(foreach ($trial in @('von','short','slew')) {
                 @{name="auxiliary-controls-$trial";command='contributor-settings';
                   args=@('--trial',$trial,'--confirm-isolated');execution='live';isolated=$true;
                   expected=@{input_state='OFF';restored=$true};
-                  condition='Source and DUT physically disconnected, Fixed CC with Input OFF. Verify test values and restored settings.'}
+                  condition='Source and DUT physically disconnected, Input OFF. Select Fixed CC if needed, verify and restore settings.'}
             })
         }
         if ('list-cc' -in $selectedModes) {
@@ -2072,19 +2089,19 @@ try {
                 args=@('--trial','list-cc','--slot',[string]$ListScratchSlot,'--confirm-isolated');
                 execution='live';isolated=$true;deadline_ms=300000;
                 expected=@{input_state='OFF';restored=$true;recall_confirmed=$true;exited_list=$true};
-                condition="Fixed CC, source and DUT isolated, Input OFF. Authorize overwriting slot $ListScratchSlot once for the isolated batch. Establish and verify B as the slot baseline, then Save A, verify Recall A and restore the original working buffer."}
+                condition="Source and DUT isolated, Input OFF. Select and restore Fixed CC as needed. Authorize overwriting slot $ListScratchSlot once for the isolated batch. Establish and verify B as the slot baseline, then Save A, verify Recall A and restore the original working buffer."}
         }
-        $isolationCompatible = @('auxiliary-controls','list-cc','measurement-extensions','readback','system-query')
-        $isolatedNeedsSeparateRun = $isolated.Count -gt 0 -and
-            @($selectedModes | Where-Object { $_ -notin $isolationCompatible }).Count -gt 0
-        if ($isolatedNeedsSeparateRun) {
+        # Isolated cases are appended after source-connected and Trigger trials.
+        # Reuse successful readback trials for identical Auxiliary cases.
+        if ($readbackSelected -and -not $legacyReadback) {
+            $reuse = @{'auxiliary-controls-von'='von-status'; 'auxiliary-controls-short'='short-status';
+                       'auxiliary-controls-slew'='fixed-slew-status'}
             foreach ($step in $isolated) {
-                $step.not_run_reason = 'settings_require_isolated_run'
-                $step.condition = "$($step.condition) Run separately from source-connected or mode-changing trials."
+                if ($reuse.ContainsKey($step.name)) {
+                    $step.reuse_from = $reuse[$step.name]
+                    $step.condition = "Reuse successful $($step.reuse_from) evidence in this isolated batch."
+                }
             }
-            $pendingLive += $isolated
-        } else {
-            $planned += $isolated
         }
     }
     # Read existing configuration before any setup, then prepare and finish Protection
@@ -2308,6 +2325,7 @@ try {
     }
     if ($triggerSelected) { New-TriggerPlan }
     if ($protectionSelected) { New-ProtectionPlan }
+    $planned += $isolated
     foreach ($step in ($planned | Where-Object { $_.ContainsKey('cr_handoff_after') })) {
         $step.condition = "$($step.cr_handoff_after) refused a resistance origin before remote"
     }
@@ -2373,8 +2391,8 @@ try {
     $allSteps = $extensionPlans + $workflowPlans + @($planned | Select-Object -First 3) +
         @($triggerPlans | Select-Object -First 1) +
         @($planned | Select-Object -Skip 3 -First ([Math]::Max(0, $protectionIndex - 3))) +
-        $protectionPlans + @($planned | Select-Object -Skip $protectionIndex) + $slowRiseCleanup +
-        @($triggerPlans | Select-Object -Skip 1) + $pendingLive
+        $protectionPlans + @($planned | Select-Object -Skip $protectionIndex | Where-Object { -not $_.isolated }) +
+        $slowRiseCleanup + @($triggerPlans | Select-Object -Skip 1) + $isolated + $pendingLive
     $report.results = @($allSteps | ForEach-Object {
         $entry = [ordered]@{name=$_.name;command=$_.command;arguments=$_.args;status='NOT RUN'}
         if ($_.name -like 'workflow-*') { $entry['execution'] = 'simulate' }
@@ -2445,11 +2463,14 @@ try {
     }
     if ($systemQuerySelected) { Write-Host 'System Query: read version, display mode and one Error Queue entry.' }
     if ($readbackSelected) {
-        Write-Host 'Readback queries existing settings with Input OFF before any setup. Inapplicable modes are skipped.'
-        Write-Host 'Use known front-panel settings as expected values. Incomplete comparisons are recorded as NOT RUN.'
+        if ($legacyReadback) {
+            Write-Host 'Explicit Expected parameters select the legacy read-only diagnostic comparisons.'
+        } else {
+            Write-Host 'Readback automatically sets known values, compares independent readbacks, and restores settings in the isolated batch.'
+        }
     }
     if ($sequenceSelected) {
-        Write-Host 'Sequence: four Fixed trials, each with a separate confirmation, one ON, measurement and confirmed OFF.'
+        Write-Host 'Sequence: one batch confirmation for four Fixed trials, each with one ON, measurement and confirmed OFF.'
     }
     if ($protectionSelected) {
         Write-Host 'Protection: independent software current trip, software power trip and hardware power limit trials at 0.20 A.'
@@ -2583,18 +2604,19 @@ try {
     $report.prechecks.preflight = 'PASS'
     Write-Host "Operator resource check (LIVE): Target: $Target; Resource: $Resource; Backend: $Backend"
     Write-Host 'Physical checks before pressing Enter:'
-    if (@($planned | Where-Object isolated).Count) {
-        Write-Host '- For the isolated settings trials, physically disconnect the source and DUT and leave Input OFF.'
-    } else {
+    $connectedModes = @('cc','cv','cr','cw','transient-cc','transient-cv','transient-cr','transient-cw',
+        'trace','trigger','input-timer','protection','sequence')
+    $connectedTrials = $workflowLoadSelected -or @($selectedModes | Where-Object { $_ -in $connectedModes }).Count -gt 0
+    if ($connectedTrials -or -not $isolated.Count) {
         Write-Host "- Confirm the external source is manually set to $SourceVoltageLimitV V with a $SourceCurrentLimitA A current limit."
+    }
+    if ($isolated.Count) {
+        Write-Host '- Before the isolated settings batch, physically disconnect the source and DUT and leave Input OFF. The script will prompt once.'
     }
     Write-Host '- Confirm physical load Input OFF, safe wiring/DUT and tolerance of every selected setting (use -Verbose or the report).'
     Write-Host '- Confirm no other application controls this instrument and an independent manual Input OFF procedure is available.'
     if ($protectionSelected) {
         Write-Host '- Confirm Timer, Short, Slow Rise and Transient OFF for Protection. The script can prepare Fixed CC from Fixed CV or CW while Input is OFF.'
-    }
-    if ($isolatedNeedsSeparateRun) {
-        Write-Host '- Run Auxiliary Controls and LIST settings separately with the source and DUT physically disconnected.'
     }
     if ($LiveExtensions -and 'measurement-extensions' -in $selectedModes) {
         Write-Host '- Confirm the Average count may be set to 8 and left at that setting.'
@@ -2647,10 +2669,15 @@ try {
     $readbackSelection = $null
     $isolatedBatchConfirmed = $false
     $sequenceBatchConfirmed = $false
+    $triggerCompleted = $false
     for ($i = 1; $i -le $planned.Count; $i++) {
         if ($protectionSelected -and $i -eq $protectionIndex) { Invoke-ProtectionValidation $readbackSelection }
         if ($i -eq $planned.Count) { break }
         $step = $planned[$i]
+        if ($step.isolated -and $triggerSelected -and -not $triggerCompleted) {
+            Invoke-TriggerValidation
+            $triggerCompleted = $true
+        }
         if ($step.ContainsKey('readback_mode') -and
             ($readbackSelection.active_mode -cne $step.readback_mode -or
              ($step.readback_function -and $readbackSelection.function -cne $step.readback_function))) {
@@ -2695,6 +2722,17 @@ try {
                 Fail-Case $step.name 'operator_confirmation_required' 'Isolation or LIST slot overwrite was not confirmed.'
             }
             $isolatedBatchConfirmed = $true
+        }
+        if ($step.ContainsKey('reuse_from')) {
+            $prior = $report.results | Where-Object { $_.name -ceq $step.reuse_from }
+            if ($prior.status -cne 'PASS' -or $prior.response.result.restored -ne $true -or
+                $prior.response.result.input_state -cne 'OFF') {
+                Fail-Case $step.name 'readback_mismatch' 'Reusable isolated readback evidence was not confirmed.'
+            }
+            $entry = $report.results | Where-Object { $_.name -ceq $step.name }
+            $entry.response = $prior.response
+            $entry.status = 'PASS'
+            continue
         }
         # Mark uncertainty before dispatch, including subprocess/JSON/runtime failures.
         if ($step.command -eq 'input-on') { $inputOnAttempted = $true }
@@ -2811,7 +2849,7 @@ try {
             Fail-Case $step.name 'readback_mismatch' 'Auto Range differs from the Core plan.'
         }
         if ($step.independent_snapshot) { $readbackSelection = $result.result }
-        if ($step.name -ceq 'transient-status') {
+        if ($step.name -ceq 'transient-status' -and $step.ContainsKey('readback_expected')) {
             $step.readback_expected.function = $readbackSelection.function
         }
         if ($step.ContainsKey('readback_expected')) {
@@ -2849,7 +2887,7 @@ try {
         $entry = $report.results | Where-Object { $_.name -eq $step.name } | Select-Object -First 1
         $entry.status = 'SKIP'
     }
-    if ($triggerSelected) { Invoke-TriggerValidation }
+    if ($triggerSelected -and -not $triggerCompleted) { Invoke-TriggerValidation }
     if ($report.results.error_code -contains 'protection_default_out_of_bounds') {
         throw 'Protection defaults validation is incomplete because the instrument MAX exceeded the allowed bounds.'
     }

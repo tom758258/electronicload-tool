@@ -136,6 +136,37 @@ def test_isolated_auxiliary_trial_restores_or_stops_without_input_on(monkeypatch
         assert not any(call.startswith('CURR:RANG ') for call in fake.calls)
 
 
+
+@pytest.mark.parametrize("trial,function", [
+    ("fixed-cc", "VOLT"), ("fixed-cv", "CURR"), ("fixed-cr", "CURR"),
+    ("fixed-cw", "CURR"), ("transient", "VOLT"), ("average", "CURR"),
+])
+def test_automatic_readback_trials_restore_original_mode_and_settings(monkeypatch, capsys, trial, function):
+    fake = ValidationFake()
+    fake.function = function
+    fake.range = 6
+    fake.values.update({"INP:TIM": "0", "TRIG:TIM": "5", "SENS:AVER:COUN": "14"})
+    initial = dict(fake.values)
+    current = fake.current
+    session(fake, monkeypatch)
+    args = ["contributor-settings", "--trial", trial, "--resource", RESOURCE, "--json"]
+    assert cli.main(args) == 2 and not fake.calls
+    capsys.readouterr()
+    assert cli.main([*args, "--confirm-isolated"]) == 0
+    output = capsys.readouterr()
+    result = json.loads(output.out)["result"]
+    assert result["restored"] and result["input_state"] == "OFF"
+    assert fake.function == function and fake.mode == "FIX"
+    assert not fake.input and not fake.transient
+    assert fake.current == current
+    assert "INP ON" not in fake.calls
+    for key, value in initial.items():
+        try:
+            assert Decimal(fake.values[key]) == Decimal(value)
+        except ArithmeticError:
+            assert fake.values[key] == value
+
+
 def test_validation_cr_led_native_settings_and_confirmed_exit(monkeypatch):
     fake = ValidationFake()
     session(fake, monkeypatch)

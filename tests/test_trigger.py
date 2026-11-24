@@ -118,6 +118,23 @@ def test_contributor_list_requires_independent_recall_then_restores_working_buff
         assert writes.count("LIST:SAV 1") == writes.count("LIST:RCL 1") == 2
 
 
+
+def test_readback_list_buffer_without_slot_or_trigger(monkeypatch, capsys):
+    fake = TriggerFake()
+    fake.range = 6
+    fake.list_steps = {f"LIST:{key}? {index}": value for index in (1, 2)
+                       for key, value in (("LEV", ".2"), ("SLEW", ".1"), ("WID", "0.3"))}
+    original = fake.list_steps.copy()
+    session(fake, monkeypatch)
+    args = ["contributor-settings", "--trial", "list", "--resource", RESOURCE, "--json", "--confirm-isolated"]
+    assert cli.main(args) == 0
+    result = json.loads(capsys.readouterr().out)["result"]
+    assert result["observed"]["selected"] and result["restored"]
+    assert fake.list_steps == original and fake.mode == "FIX" and not fake.input
+    assert not any(call.startswith(("LIST:SAV", "LIST:RCL", "INP ON", "TRIG")) and "?" not in call
+                   for call in fake.calls)
+
+
 @pytest.mark.parametrize("function,sources", [
     ("CC", ("MANUAL", "BUS", "HOLD", "TIMER", "EXTERNAL")),
     ("CV", ("BUS",)),

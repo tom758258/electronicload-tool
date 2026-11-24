@@ -1436,10 +1436,14 @@ restorable baseline. If restoration cannot be verified after a write, keep
 the terminals isolated and use the recorded baseline for recovery at the
 instrument.
 
-Run the isolated trials separately from source-connected or mode-changing
-trials. Full and incompatible selections preserve the isolated case previews
-as `NOT RUN` with the separate-run reason. The isolated cases may be combined
-with each other, native measurements, readback and system query.
+The script runs source-connected trials (including Trigger and Protection)
+before the isolated settings batch. Full or mixed selections prompt once
+at the transition to physical isolation; the operator must disconnect both
+source and DUT before authorizing the batch. Readback needs no panel values
+or manual function selection. With Input OFF it exercises known values and
+restores the original settings and function, including LIST without saving a
+slot. Explicit legacy Expected parameters select the original read-only
+diagnostic comparisons, not automatic acceptance.
 
 使用 `-LiveExtensions` 搭配單選、多選或 `-Modes full`，明確選擇
 Contributor 實機項目。指定與 `-Connection` 相符的 `-Resource`，
@@ -1476,9 +1480,11 @@ CC 案例從 Fixed CC Low 開始，使用專用的 5 V、限流 0.8 A 電源，�
 不包含基準。LIST 最後退出至 Fixed CC 並驗證原工作緩衝。只有可安全還原原值時
 才執行設定寫入。寫入後若無法確認還原，維持端子隔離，依記錄的基準在儀器上還原。
 
-請將隔離設定案例與需接電源或切換模式的試驗分開執行。Full 或不相容的混選將隔離
-案例列為 `NOT RUN`，並保留預覽及另跑原因。隔離案例可彼此混選，也可搭配原生量測、
-設定讀回及 System Query。
+需接電源的試驗（含 Trigger 與 Protection）先執行，再進入隔離設定批次。
+Full 或混選在切換至隔離批次時只提示一次；操作者須實體斷開來源及待測物。
+Readback 不需提供面板值或手動選擇功能；Input OFF 時自動測試已知設定並還原原始
+設定及功能，LIST 讀回不需儲存槽位。明確提供舊有 Expected 參數時才執行原唯讀診斷
+比對，不代表自動驗收。
 
 ### Script parameters
 

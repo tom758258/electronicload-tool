@@ -5,13 +5,15 @@ from decimal import Decimal
 from . import control as c
 from . import readback
 from .errors import LoadError
-from .hardware_validation import _stopping, list_program_writes
+from .hardware_validation import _stopping, _trigger_snapshot, list_program_writes
+from .trigger import SOURCE_TOKENS
 from .identity import MODEL_ID, parse_identity
 from .visa import open_request_session, validate_request_connection
 
 
 COMMAND = "contributor-settings"
-TRIALS = ("von", "slew", "short", "list-cc")
+READBACK_TRIALS = ("fixed-cc", "fixed-cv", "fixed-cr", "fixed-cw", "transient", "list", "average")
+TRIALS = ("von", "slew", "short", "list-cc", *READBACK_TRIALS)
 _FIXED = {"FIX", "FIXED"}
 _CURRENT = {"CURR", "CURRENT"}
 
@@ -229,6 +231,244 @@ def _list_trial(session, slot, previous_slot_width):
     return exercise, restore, {"mode": "fixed", "function": "CC", "fixed_cc": fixed, "working_list": baseline}
 
 
+
+def _selection_guard(session):
+    """Only switch a known, unloaded mode with all relevant interlocks OFF."""
+    c._input_off(session)
+    original = readback._selection(session)
+    if (original["active_mode"] not in {"fixed", "list"} or original["transient_enabled"]
+            or c._flag(session, readback.SHORT_QUERY) != "OFF"
+            or c._flag(session, "INP:TIM?") != "OFF"
+            or c._flag(session, c.SLOW_RISE_QUERY) != "OFF"
+            or c._check_mode_change(session)):
+        raise LoadError("unsafe_mode", "Settings mode changes require Input, Short, Timer, Transient and Slow Rise OFF.")
+    if original["active_mode"] == "list" and original["function"] != "CC":
+        raise LoadError("unsafe_mode", "Only CC LIST can be restored.")
+    return original
+
+
+def _select_fixed(session, function, write):
+    state = _selection_guard(session)
+    if function == "CR" and c._flag(session, c.LED_QUERY) != "OFF":
+        raise LoadError("unsafe_mode", "Plain CR settings require LED OFF.")
+    if state["active_mode"] == "list":
+        write("FUNC:MODE FIX")
+        state = _selection_guard(session)
+    if state["function"] != function:
+        write(f"FUNC {c.TRANSIENT_FUNCTIONS[function]}")
+    state = _selection_guard(session)
+    if state["active_mode"] != "fixed" or state["function"] != function:
+        raise _mismatch("Fixed mode selection did not match the settings trial.")
+
+
+def _with_selection(session, original, function, exercise, restore, baseline):
+    entered = False
+
+    def run(write):
+        nonlocal entered
+        _select_fixed(session, function, write)
+        entered = True
+        return exercise(write)
+
+    def cleanup():
+        def write(command):
+            c._input_off(session)
+            c._write(session, command)
+
+        if entered:
+            restore()
+        _select_fixed(session, original["function"], write)
+        if original["active_mode"] == "list":
+            write("FUNC:MODE LIST")
+        if readback._selection(session) != original:
+            raise _mismatch("Original mode selection was not restored.")
+
+    return run, cleanup, {"selection": original, **baseline}
+
+
+def _fixed_readback_trial(session, function):
+    baseline = readback._fixed(session, function)
+    field = readback.FIXED_FIELDS[function]
+    range_name = baseline["range"]
+    validators = {"CC": c.validate_current, "CV": c.validate_voltage,
+                  "CR": c.validate_resistance, "CW": c.validate_power}
+
+    def validate(value):
+        validator = validators[function]
+        return validator(value) if function == "CW" else validator(value, range_name)
+
+    original = validate(baseline[field])
+    candidates = {"CC": ("0.1", "0.2"), "CV": ("3", "4"),
+                  "CR": ("5", "10") if range_name == "low" else ("1000", "2000"),
+                  "CW": ("0.10", "0.20")}[function]
+    if function == "CV" and baseline["range_auto"] and range_name == "high":
+        candidates = ("30", "40")
+    candidate = next(validate(value) for value in candidates if Decimal(value) != original)
+    prefix = c.TRANSIENT_FUNCTIONS[function]
+
+    def observe(value):
+        snapshot = readback.snapshot(session, "fixed-status")
+        if (snapshot["input_state"] != "OFF" or snapshot["function"] != function
+                or snapshot["range"] != range_name or Decimal(str(snapshot[field])) != value
+                or snapshot.get("range_auto") != baseline.get("range_auto")):
+            raise _mismatch("Fixed readback differs from the expected setting.")
+        return snapshot
+
+    def exercise(write):
+        observe(original)
+        write(f"{prefix} {candidate:f}")
+        return {"observed": observe(candidate), "expected_setpoint": str(candidate)}
+
+    def restore():
+        _selection_guard(session)
+        # Setpoint-only changes preserve the Range selector; do not attempt a
+        # restore into a different or unrecognized range.
+        if function != "CW" and readback._range(session, function)[0] != range_name:
+            raise _mismatch("Fixed Range changed; original setpoint cannot be safely restored.")
+        c._input_off(session)
+        c._write(session, f"{prefix} {original:f}")
+        observe(original)
+
+    return exercise, restore, {"fixed": baseline}
+
+
+def _transient_readback_trial(session):
+    def settings():
+        mode = readback.transient_mode(session, "CURR")
+        return c.validate_transient_cc({
+            "range": readback._range(session, "CC")[0], "transient_mode": mode,
+            **readback.transient_values(session, "CURR", mode),
+        })
+
+    baseline = settings()
+    trigger = _trigger_snapshot(session)
+    candidate = c.validate_transient_cc({
+        **baseline, "level_a": Decimal("0.2") if baseline["level_a"] == Decimal("0.1") else Decimal("0.1"),
+    })
+    source_changed = trigger["source"] != "HOLD"
+
+    def exercise(write):
+        _guard(session)
+        if settings() != baseline or _trigger_snapshot(session) != trigger:
+            raise _mismatch("Original Transient settings changed before testing.")
+        write(f"CURR:TRAN:ALEV {candidate['level_a']:f}")
+        if source_changed:
+            write("TRIG:SOUR HOLD")
+        if settings() != candidate or _trigger_snapshot(session)["source"] != "HOLD":
+            raise _mismatch("Transient setup did not match.")
+        _guard(session)
+        write("TRAN ON")
+        observed = readback.snapshot(session, "transient-status")
+        if (not observed["enabled"] or observed["input_state"] != "OFF"
+                or observed["function"] != "CC" or settings() != candidate):
+            raise _mismatch("Transient readback did not match the enabled test configuration.")
+        return {"observed": observed, "expected_level_a": str(candidate["level_a"])}
+
+    def restore():
+        c._input_off(session)
+        if c._flag(session, "TRAN?") != "OFF":
+            c._write(session, "TRAN OFF")
+        _guard(session)
+        if readback._range(session, "CC")[0] != baseline["range"]:
+            raise _mismatch("Transient Range changed; cannot restore level A.")
+        c._write(session, f"CURR:TRAN:ALEV {baseline['level_a']:f}")
+        if source_changed:
+            c._input_off(session)
+            c._write(session, f"TRIG:TIM {trigger['interval_s']:f}")
+            c._input_off(session)
+            c._write(session, f"TRIG:SOUR {SOURCE_TOKENS[trigger['source']]}")
+        if settings() != baseline or _trigger_snapshot(session) != trigger:
+            raise _mismatch("Transient or Trigger settings were not restored.")
+
+    return exercise, restore, {"transient": baseline, "trigger": trigger}
+
+
+def _list_readback_trial(session):
+    baseline = _list_settings(session)
+    fixed = readback._fixed(session, "CC")
+    original = baseline["steps"][0]["width_s"]
+    candidate = Decimal(2) if original == 1 else Decimal(1)
+    first, *rest = baseline["steps"]
+    expected = c.validate_list_cc({**baseline, "steps": [{**first, "width_s": candidate}, *rest]})
+
+    def exercise(write):
+        _guard(session)
+        if _list_settings(session) != baseline:
+            raise _mismatch("Original LIST buffer changed before testing.")
+        write(f"LIST:WID 1,{candidate:f}")
+        write("FUNC:MODE LIST")
+        observed = readback.snapshot(session, "list-status")
+        configuration = observed["configuration"]
+        if (not observed["selected"] or observed["input_state"] != "OFF"
+                or c.validate_list_cc({key: configuration[key] for key in c.LIST_FIELDS}) != expected):
+            raise _mismatch("LIST readback did not match the test buffer.")
+        return {"observed": observed, "expected_width_s": str(candidate)}
+
+    def restore():
+        _guard(session, modes=_FIXED | {"LIST"})
+        if c._load_mode(session)[0] == "LIST":
+            c._write(session, "FUNC:MODE FIX")
+        _guard(session)
+        c._write(session, f"LIST:WID 1,{original:f}")
+        if _list_settings(session) != baseline or readback._fixed(session, "CC") != fixed:
+            raise _mismatch("Original LIST buffer or Fixed CC setting was not restored.")
+
+    return exercise, restore, {"working_list": baseline, "fixed_cc": fixed}
+
+
+def _average_readback_trial(session):
+    original = c._average_count(session)
+    candidate = c.validate_average(4 if original == 8 else 8)
+
+    def exercise(write):
+        if c._average_count(session) != original:
+            raise _mismatch("Original Average setting changed before testing.")
+        write(f"SENS:AVER:COUN {candidate}")
+        observed = readback.snapshot(session, "average-status")
+        if observed["average_count"] != candidate:
+            raise _mismatch("Average readback differs from the test count.")
+        return {"observed": observed, "expected_average_count": candidate}
+
+    def restore():
+        c._input_off(session)
+        c._write(session, f"SENS:AVER:COUN {original}")
+        if c._average_count(session) != original:
+            raise _mismatch("Original Average count was not restored.")
+
+    return exercise, restore, {"average_count": original}
+
+
+def _prepare_trial(session, trial, slot, previous_slot_width):
+    selection = readback._selection(session)
+    target = trial[-2:].upper() if trial.startswith("fixed-") else "CC"
+    needs_selection = selection["active_mode"] != "fixed" or selection["function"] != target
+    if needs_selection:
+        selection = _selection_guard(session)
+    elif trial not in READBACK_TRIALS:
+        _guard(session)
+    else:
+        _selection_guard(session)
+    if target == "CR" and c._flag(session, c.LED_QUERY) != "OFF":
+        raise LoadError("unsafe_mode", "Plain CR settings require LED OFF.")
+    if trial == "short":
+        functions = _short_trial(session)
+    elif trial == "list-cc":
+        functions = _list_trial(session, slot, previous_slot_width)
+    elif trial.startswith("fixed-"):
+        functions = _fixed_readback_trial(session, target)
+    elif trial == "transient":
+        functions = _transient_readback_trial(session)
+    elif trial == "list":
+        functions = _list_readback_trial(session)
+    elif trial == "average":
+        functions = _average_readback_trial(session)
+    else:
+        functions = _round_trip(session, trial)
+    if needs_selection:
+        return _with_selection(session, selection, target, *functions)
+    return functions
+
+
 def execute(trial, *, mode, resource, backend, model_id, confirmed, slot=None, previous_slot_width=None,
             asrl=None, stop=None, on_baseline=None):
     if model_id != MODEL_ID:
@@ -275,6 +515,34 @@ def execute(trial, *, mode, resource, backend, model_id, confirmed, slot=None, p
                             "LIST:WID <step>,<original width>"]},
             ],
         }
+        for function in ("CC", "CV", "CR", "CW"):
+            key = "fixed-" + function.lower()
+            prefix = c.TRANSIENT_FUNCTIONS[function]
+            writes[key] = [f"{prefix} <test>", f"{prefix} <original>"]
+            queries[key] = [f"{prefix}?", *([f"{prefix}:RANG?"] if function != "CW" else []),
+                            *(["VOLT:RANG:AUTO?"] if function == "CV" else []),
+                            *([c.LED_QUERY] if function == "CR" else [])]
+        writes.update({
+            "transient": ["CURR:TRAN:ALEV <test>", "TRAN ON", "TRAN OFF", "CURR:TRAN:ALEV <original>"],
+            "list": ["LIST:WID 1,<test>", "FUNC:MODE LIST", "FUNC:MODE FIX", "LIST:WID 1,<original>"],
+            "average": ["SENS:AVER:COUN <test>", "SENS:AVER:COUN <original>"],
+        })
+        queries.update({
+            "transient": ["CURR:RANG?", "CURR:TRAN:MODE?", "TRIG:SOUR?", "TRIG:TIM?",
+                          *(stem + "?" for stem in readback.TRANSIENT_LEVEL_QUERIES.values()),
+                          "CURR:TRAN:AWID?", "CURR:TRAN:BWID?"],
+            "list": queries["list-cc"],
+            "average": ["SENS:AVER:COUN?"],
+        })
+        target = trial[-2:].upper() if trial.startswith("fixed-") else "CC"
+        mode_change = {"condition": "Original selected function differs or original LIST is selected",
+                       "writes": ["FUNC:MODE FIX", f"FUNC {c.TRANSIENT_FUNCTIONS[target]}",
+                                  "FUNC <original>", "FUNC:MODE <original FIX/LIST>"]}
+        conditional.setdefault(trial, []).append(mode_change)
+        if trial == "transient":
+            conditional[trial].append({"condition": "Original Trigger Source differs from HOLD",
+                                       "writes": ["TRIG:SOUR HOLD", "TRIG:TIM <original>", "TRIG:SOUR <original>"]})
+        queries[trial] += [c.SLOW_RISE_QUERY, c.LED_QUERY]
         return {**marker, "hardware_access": False, "planned_writes": ["SYST:REM", *writes[trial]],
                 **({"conditional_writes": conditional[trial]} if trial in conditional else {}),
                 "queries": ["*IDN?", "INP:STAT?", "FUNC:MODE?", "FUNC?", "TRAN?", "INP:TIM?",
@@ -283,14 +551,8 @@ def execute(trial, *, mode, resource, backend, model_id, confirmed, slot=None, p
     with open_request_session(resource, asrl, c.open_session) as (session, runtime):
         _stopping(stop)
         parse_identity(c._query(session, "*IDN?"))
-        _guard(session)
         try:
-            if trial == "short":
-                exercise, restore, original = _short_trial(session)
-            elif trial == "list-cc":
-                exercise, restore, original = _list_trial(session, slot, previous_slot_width)
-            else:
-                exercise, restore, original = _round_trip(session, trial)
+            exercise, restore, original = _prepare_trial(session, trial, slot, previous_slot_width)
         except LoadError as exc:
             exc.details["no_settings_written"] = True
             raise
@@ -299,5 +561,12 @@ def execute(trial, *, mode, resource, backend, model_id, confirmed, slot=None, p
         _stopping(stop)
         c._input_off(session)
         c._write(session, "SYST:REM")
-        _guard(session)
+        c._input_off(session)
+        if "selection" in original:
+            if _selection_guard(session) != original["selection"]:
+                raise _mismatch("Original selection changed before the settings trial.")
+        elif trial in READBACK_TRIALS:
+            _selection_guard(session)
+        else:
+            _guard(session)
         return {**_exercise_and_restore(session, stop, exercise, restore), **marker, "visa": runtime}

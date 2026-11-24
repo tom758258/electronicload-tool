@@ -548,8 +548,9 @@ writes, and no blind writes after communication is lost. Cover Short without
 `INP ON`, LIST baseline B established by Recall from a different working value,
 then Save A and Recall from B, including ignored Save or Recall without a
 manually supplied prior slot width. In PlanOnly, check the safety queries,
-conditional cleanup writes and separate isolated run for a source-connected
-or mode-changing selection. For Timer expiry, use
+conditional cleanup writes and the isolated batch after source-connected
+and Trigger trials. Check automatic Readback settings and restoration with
+a recording fake, and one isolation/slot authorization for the batch. For Timer expiry, use
 a controlled clock for early OFF refusal, a timely ON/OFF observation bracket
 and automatic confirmation after cleanup. Use a delayed Fake VISA ON reply to verify
 that the SCPI write-start deadline already applies while the ON subprocess is
@@ -566,8 +567,8 @@ remains a separately authorized check with an independent hardware cutoff.
 時拒絕寫入、寫入前顯示私有復原基準，以及通訊失信後停止寫入。Short 不開啟
 Input。LIST 核對從不同工作值 Recall B 建立基準，再 Save A 並從 B 召回 A；
 不需人工提供舊寬度，涵蓋 Save 或 Recall 未生效。
-PlanOnly 核對安全查詢及條件式清理。混選含需接電源或切換模式的試驗時，隔離
-案例須分開執行。Timer 使用可控制的
+PlanOnly 核對安全查詢及條件式清理。混選先執行需接電源的試驗及 Trigger，
+再進入一次隔離及槽位授權批次；以 Fake VISA 驗證 Readback 自動設定與還原。Timer 使用可控制的
 時鐘驗證過早 OFF 拒絕、到期前後 ON／OFF 時間區間及清理後自動確認。以 Fake VISA 模擬延遲的
 ON 回覆，驗證 ON 子程序尚在執行時已受 SCPI 寫入起點的期限約束。用收到
 終止要求後仍在執行的程序替身，確認提示在觀察期限到達時發出，且清理時
