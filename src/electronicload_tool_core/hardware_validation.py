@@ -47,7 +47,7 @@ def _input_timer_snapshot(session, *, timing=False):
 
 
 def execute_input_timer(command, *, mode, resource, seconds, current, range_name,
-                        expected, confirmed, stop, asrl=None):
+                        expected, confirmed, stop, asrl=None, on_write_started=None):
     """CLI-only bounded CC validation. Normal Product/Worker Timer LIVE stays closed."""
     if mode not in {"live", "dry-run"} or command not in {*c.INPUT_TIMER_COMMANDS,
                                                            "input-on", "input-off"}:
@@ -109,6 +109,9 @@ def execute_input_timer(command, *, mode, resource, seconds, current, range_name
             if command == "input-on":
                 try:
                     on_started = monotonic_ns()
+                    # Notify the validation runner before the VISA call can block.
+                    if on_write_started is not None:
+                        on_write_started(on_started)
                     c._write(session, writes[command])
                     if not c._confirm_input_state(session, "ON"):
                         raise LoadError("input_on_not_confirmed", "Input ON was not confirmed.", 3)

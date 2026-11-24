@@ -3,6 +3,7 @@
 No hidden write retry, automatic input OFF or VISA connection selection.
 """
 
+from collections.abc import Callable
 from decimal import Decimal, InvalidOperation, localcontext
 from datetime import datetime, timezone
 import math
@@ -1208,6 +1209,7 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
             latch: str | None = None, seconds: int | None = None,
             count: int | None = None, vdrop: object | None = None,
             trigger_source: str | None = None, trigger_interval: object | None = None,
+            timer_on_write_started: Callable[[int], None] | None = None,
             asrl=None) -> dict:
     if command not in CONTROL_COMMANDS or mode not in {"live", "simulate", "dry-run"}:
         raise LoadError("argument_error", "Unknown control command or mode.")
@@ -1328,7 +1330,8 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
 
         return execute_input_timer(command, mode=mode, resource=resource, seconds=seconds,
                                    current=current, range_name=range_name, expected=validation_settings,
-                                   confirmed=confirmed, stop=stop, asrl=asrl)
+                                   confirmed=confirmed, stop=stop, asrl=asrl,
+                                   on_write_started=timer_on_write_started)
     if command in INPUT_TIMER_COMMANDS:
         if mode == "live":
             raise LoadError("unsupported_live_scope", "Input Timer is offline only.")

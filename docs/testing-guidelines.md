@@ -539,14 +539,17 @@ Check `-LiveExtensions` for explicit single, mixed and Full selection and
 verify that it never falls back to the offline cases. Exercise the contributor
 read-only sampling and measurements and the Input OFF guards for Workflow and
 Average with recording Fake VISA. Verify VON, Short and indexed LIST queries
-in PlanOnly and the separate LIST readback required when Protection is selected.
-For Timer expiry, use a controlled clock to verify the window relative to the
-SCPI write start, early OFF refusal and operator confirmation after cleanup.
+in PlanOnly and the separate LIST readback required when a mode-changing trial
+is selected. For Timer expiry, use a controlled clock for early OFF refusal and
+operator confirmation after cleanup. Use a delayed Fake VISA ON reply to verify
+that the SCPI write-start deadline already applies while the ON subprocess is
+still running and that the existing communication rules govern OFF cleanup.
 Select affected Fake VISA cases in `tests/test_input_timer.py`. Physical expiry
 remains a separately authorized check with an independent hardware cutoff.
 
 離線檢查使用虛構 Resource 並阻擋實體 VISA。以 Fake VISA 驗證 Workflow
 和 Average 的 Input OFF 前置，並核對 PlanOnly 的 VON、Short 及 LIST 索引
-查詢。混選含 Protection 時，LIST 讀回須分開執行。Timer 使用可控制的
-時鐘驗證以 SCPI 寫入開始為基準的時限、過早 OFF 拒絕，以及清理完畢後
-由操作者確認。實機到期驗證仍需另行授權及獨立的硬體停損。
+查詢。混選含會切換模式的試驗時，LIST 讀回須分開執行。Timer 使用可控制的
+時鐘驗證過早 OFF 拒絕與清理完畢後由操作者確認。以 Fake VISA 模擬延遲的
+ON 回覆，驗證 ON 子程序尚在執行時已受 SCPI 寫入起點的期限約束，以及
+OFF 清理依既有通訊規則處理。實機到期驗證仍需另行授權及獨立的硬體停損。

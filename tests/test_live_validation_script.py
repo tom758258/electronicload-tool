@@ -59,7 +59,8 @@ def run_script(tmp_path):
                 "    if ($node.Name -in @('Invoke-ProtectionValidation','Invoke-ProtectionStep',"
                 "'Get-ProtectionWriteProgress','Assert-InputOff',"
                 "'Assert-ReadbackFields','Fail-Case','Invoke-TimerExpiry','Invoke-LiveCommand',"
-                "'Get-TimerMonotonicNs','Confirm-TimerExpiry','Assert-Runtime','Save-Report')) {\n"
+                "'Get-TimerMonotonicNs','Get-TimerRemainingMs','Get-TimerObservationDeadlineNs',"
+                "'Confirm-TimerExpiry','Assert-Runtime','Save-Report','New-CliProcessInfo')) {\n"
                 "        Invoke-Expression $node.Extent.Text\n"
                 "    }\n}\n" + harness, encoding='utf-8')
             args = [str(harness_path)]
@@ -783,6 +784,105 @@ catch {
         assert 'independent operator action required' in result.stdout
 
 
+@pytest.mark.parametrize('scenario', ['timely', 'late-on', 'late-on-with-trigger'])
+def test_input_timer_on_subprocess_respects_scpi_deadline(run_script, tmp_path, scenario):
+    write_stamp = tmp_path / 'on-write-ns'
+    with (tmp_path / 'sitecustomize.py').open('a', encoding='utf-8') as preload:
+        preload.write("""
+import os
+import sys
+from contextlib import contextmanager
+from time import monotonic_ns, sleep
+
+sys.path.insert(0, str(Path.cwd() / 'tests'))
+from test_hardware_validation import ValidationFake
+from electronicload_tool_core import control, readonly
+
+class TimerFake(ValidationFake):
+    def write(self, command):
+        if command == 'INP ON':
+            Path(os.environ['FAKE_TIMER_WRITE_STAMP']).write_text(str(monotonic_ns()))
+        super().write(command)
+
+    def query(self, command):
+        if self.input and command == 'INP:STAT?' and os.environ['FAKE_TIMER_SCENARIO'] != 'timely':
+            sleep(12)
+        return super().query(command)
+
+@contextmanager
+def fake_session(_resource):
+    fake = TimerFake()
+    fake.current = 1
+    fake.values.update({'INP:TIM:DEL': '5', 'INP:TIM': '1'})
+    if 'input-on' in sys.argv:
+        sleep(0.8)
+    yield fake, {'library': 'fake', 'manufacturer': 'fake'}
+
+control.open_session = readonly.open_session = fake_session
+""")
+    result = run_script(['-Scenario', scenario], extra_env={
+        'FAKE_TIMER_PYTHON': sys.executable, 'FAKE_TIMER_RESOURCE': RESOURCE,
+        'FAKE_TIMER_WRITE_STAMP': str(write_stamp), 'FAKE_TIMER_SCENARIO': scenario,
+    }, harness="""
+$python = $env:FAKE_TIMER_PYTHON
+$repo = (Get-Location).Path
+$script:connectionArgs = @('--resource', $env:FAKE_TIMER_RESOURCE)
+$script:report = @{status='NOT RUN';results=@([ordered]@{name='timer-on';status='NOT RUN'})}
+$script:perCommandDeadlineMs = 30000
+$script:totalDeadlineMs = 900000
+$script:expectedLibrary = 'fake'
+$script:expectedManufacturer = 'fake'
+$script:triggerSelected = $Scenario -eq 'late-on-with-trigger'
+$script:triggerTrusted = $true
+$script:timerPowered = $true
+$inputOnAttempted = $true
+$timerEnableAttempted = $true
+$TimerSeconds = '5'
+$main = $ast.EndBlock.Statements | Where-Object { $null -ne $_.Finally } | Select-Object -Last 1
+$cleanup = $main.Finally.Extent.Text
+$watch = [Diagnostics.Stopwatch]::StartNew()
+$realProcessInfo = ${function:New-CliProcessInfo}
+function New-CliProcessInfo([string[]]$Arguments) {
+    if ($Arguments[2] -ceq 'input-off') { $script:cleanupDispatchedNs = Get-TimerMonotonicNs }
+    & $realProcessInfo $Arguments
+}
+try {
+    $on = Invoke-LiveCommand -Command 'input-on' -CaseName 'timer-on' -ExtraArgs @(
+        '--hardware-validation', 'input-timer', '--confirm', '--validation-settings-json',
+        '{"seconds":5,"range":"high","current":1}')
+} catch {
+    $failureNs = Get-TimerMonotonicNs
+    if ($script:report.results[0].status -ne 'FAIL') { throw }
+    $script:report.status = 'FAIL'
+} finally {
+    . ([scriptblock]::Create($cleanup.Substring(1, $cleanup.Length - 2)))
+}
+@{failure_ns=$failureNs;cleanup_dispatched_ns=$script:cleanupDispatchedNs;
+  timing=$on.result.timer_timing;error_code=$script:report.results[0].error_code;
+  statuses=@($script:report.results | ForEach-Object { $_.status })} | ConvertTo-Json -Compress
+""")
+    assert result.returncode == 0, result.stdout + result.stderr
+    evidence = json.loads(result.stdout.splitlines()[-1])
+    assert write_stamp.exists(), result.stdout + result.stderr
+    write_ns = int(write_stamp.read_text())
+    if scenario == 'timely':
+        assert evidence['statuses'] == ['PASS'] * 4
+        assert evidence['timing']['on_write_started_ns'] <= write_ns <= evidence['timing']['on_confirmed_ns']
+    else:
+        assert evidence['error_code'] == 'timer_expiry_unconfirmed'
+        if scenario == 'late-on-with-trigger':
+            assert evidence['statuses'] == ['FAIL', 'NOT RUN', 'NOT RUN', 'NOT RUN']
+            assert evidence['cleanup_dispatched_ns'] is None
+            assert 'independent operator action required' in result.stdout
+            handled_ns = evidence['failure_ns']
+        else:
+            assert evidence['statuses'] == ['FAIL', 'PASS', 'PASS', 'PASS']
+            handled_ns = evidence['cleanup_dispatched_ns']
+        # Allow process scheduling overhead while distinguishing a launch-relative timeout
+        # and the late reply from the approved six seconds after the write starts.
+        assert 5.75 <= (handled_ns - write_ns) / 1e9 <= 7.5
+
+
 def test_input_timer_script_uses_default_source_limits(run_script):
     result = run_script(['-InputTimerOnly', '-PlanOnly'], source_limits=False)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -1025,6 +1125,7 @@ def test_workflow_only_stays_offline_with_optional_connection(run_script, plan_o
     ('list-cc', 'usb', RESOURCE, False),
     ('list-cc', 'usb', RESOURCE, True),
     ('list-cc,protection', 'usb', RESOURCE, True),
+    ('list-cc,input-timer', 'usb', RESOURCE, True),
     ('workflow,auxiliary-controls,list-cc,measurement-extensions', 'asrl', ASRL, False),
     ('full', 'usb', RESOURCE, True),
     ('full', 'asrl', ASRL, True),
@@ -1050,9 +1151,11 @@ def test_explicit_live_extensions_never_use_simulation(run_script, mode, connect
             '*IDN?', 'FUNC:MODE?', 'FUNC?', 'TRAN?', 'LIST:RANG?', 'LIST:STEP?', 'LIST:COUN?',
             'LIST:LEV? {step}', 'LIST:SLEW? {step}', 'LIST:WID? {step}', 'INP:STAT?',
         ]
-        if mode in ('full', 'list-cc,protection'):
+        if mode in ('full', 'list-cc,protection', 'list-cc,input-timer'):
             assert cases['list-cc-status']['error_code'] == 'list_requires_separate_live_run'
-            assert list(cases).index('protection-start-state') < list(cases).index('list-cc-status')
+            assert 'without LIST selected' in cases['list-cc-status']['condition']
+            first_setup = 'timer-cc-setup' if mode == 'list-cc,input-timer' else 'protection-start-state'
+            assert list(cases).index(first_setup) < list(cases).index('list-cc-status')
         else:
             assert 'error_code' not in cases['list-cc-status']
     if 'workflow-measure-log' in cases:

@@ -143,6 +143,11 @@ $timerEnableAttempted = $false
 $timerOnStartMs = 0
 $timerOnConfirmedMs = 0
 $timerOnTiming = $null
+$timerPowered = $false
+$timerProcessStillRunning = $false
+$timerArtifacts = @()
+$timerFailure = $null
+$timerExpiryEvidence = $null
 $slowRiseEnableAttempted = $false
 $slowRiseCommunicationTrusted = $false
 $slowRiseCleanup = @()
@@ -589,7 +594,10 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
     }
     if ($remaining -le 0) { throw 'Total CLI validation deadline expired.' }
     $launcher = 'from electronicload_tool_cli.cli import main; raise SystemExit(main())'
-    if ($DebugArtifacts -and $Command -in @('protection-set','protection-status')) {
+    $timerOn = $CaseName -ceq 'timer-on'
+    if ($timerOn) {
+        $launcher = 'import sys; from electronicload_tool_cli.cli import main; raise SystemExit(main(timer_on_write_started=lambda ns: print("Timer INP ON write started:", ns, file=sys.stderr, flush=True)))'
+    } elseif ($DebugArtifacts -and $Command -in @('protection-set','protection-status')) {
         $launcher = 'import logging; logging.basicConfig(); logging.getLogger("electronicload_tool_core.protection").setLevel(logging.DEBUG); ' + $launcher
     }
     $arguments = @('-c', $launcher,
@@ -607,6 +615,8 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
     $started = $false
     $output = ''
     $diagnostic = ''
+    $timerWriteStartedNs = 0L
+    $timerDiagnostic = [Text.StringBuilder]::new()
     $exitStatus = 'NOT STARTED'
     $terminationAttempted = $false
     if ($script:slowRiseEnableAttempted) { $script:slowRiseCommunicationTrusted = $false }
@@ -614,17 +624,44 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
         if ($TimerObservationDeadlineNs -and (Get-TimerMonotonicNs) -ge $TimerObservationDeadlineNs) {
             Fail-Case $CaseName 'timer_expiry_unconfirmed' 'The Timer observation window closed before the next query.'
         }
+        if ($timerOn) { $dispatchNs = Get-TimerMonotonicNs }
         [void]$process.Start()
         $started = $true
         $script:report.hardware_touched = $true
         $entry.status = 'FAIL'
         $stdout = $process.StandardOutput.ReadToEndAsync()
-        $stderr = $process.StandardError.ReadToEndAsync()
+        $stderr = $null
+        if ($timerOn) {
+            # Read the write-start notification while the child still owns the VISA session.
+            $commandDeadlineNs = $dispatchNs + [long]$remaining * 1000000L
+            while ($true) {
+                $read = $process.StandardError.ReadLineAsync()
+                $remaining = Get-TimerRemainingMs $commandDeadlineNs
+                if (-not $read.Wait($remaining)) { break }
+                $line = $read.GetAwaiter().GetResult()
+                if ($null -eq $line) { break }
+                [void]$timerDiagnostic.AppendLine($line)
+                if ($line -cmatch '\ATimer INP ON write started: ([0-9]{1,19})\z') {
+                    if (-not [long]::TryParse($Matches[1], [ref]$timerWriteStartedNs) -or
+                        $timerWriteStartedNs -lt $dispatchNs -or $timerWriteStartedNs -gt (Get-TimerMonotonicNs)) {
+                        if ($script:triggerSelected) { $script:triggerTrusted = $false }
+                        Fail-Case $CaseName 'timer_timing_unconfirmed' 'Invalid SCPI Input ON write-start notification.'
+                    }
+                    $TimerObservationDeadlineNs = Get-TimerObservationDeadlineNs $timerWriteStartedNs
+                    $stderr = $process.StandardError.ReadToEndAsync()
+                    break
+                }
+                if ($remaining -le 0) { break }
+            }
+            $remaining = Get-TimerRemainingMs $commandDeadlineNs
+        } else {
+            $stderr = $process.StandardError.ReadToEndAsync()
+        }
         $timerLimited = $false
         if ($TimerObservationDeadlineNs) {
-            $observationMs = [Math]::Floor(($TimerObservationDeadlineNs - (Get-TimerMonotonicNs)) / 1000000)
+            $observationMs = Get-TimerRemainingMs $TimerObservationDeadlineNs
             $timerLimited = $observationMs -le $remaining
-            $remaining = [Math]::Max(0, [Math]::Min($remaining, $observationMs))
+            $remaining = [Math]::Min($remaining, $observationMs)
         }
         if (-not $process.WaitForExit([int]$remaining)) {
             if ($traceCase) { $script:traceCommunicationUntrusted = $true }
@@ -633,19 +670,25 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
             $process.Kill()
             $exitStatus = 'TIMEOUT; session/input state unconfirmed'
             if ($process.WaitForExit($TerminationMs)) {
-                $output = $stdout.GetAwaiter().GetResult()
-                $diagnostic = $stderr.GetAwaiter().GetResult()
+                if (-not $script:timerPowered -or $stdout.IsCompleted) { $output = $stdout.GetAwaiter().GetResult() }
+                if ($null -ne $stderr -and (-not $script:timerPowered -or $stderr.IsCompleted)) {
+                    $diagnostic = $stderr.GetAwaiter().GetResult()
+                }
             }
             $entry['error_code'] = if ($timerLimited) { 'timer_expiry_unconfirmed' } else { 'deadline_expired' }
             throw "$CaseName exceeded its deadline; physical Input state is unconfirmed."
         }
         $exitStatus = [string]$process.ExitCode
+        if ($timerOn -and $timerLimited -and (Get-TimerMonotonicNs) -ge $TimerObservationDeadlineNs) {
+            if ($script:triggerSelected) { $script:triggerTrusted = $false }
+            Fail-Case $CaseName 'timer_expiry_unconfirmed' 'Input ON did not finish within the Timer observation window.'
+        }
         if ($CaseName -ceq 'timer-expiry') {
             $entry['observed_at_ns'] = Get-TimerMonotonicNs
             $entry['observed_at_ms'] = $script:watch.ElapsedMilliseconds
         }
         $output = $stdout.GetAwaiter().GetResult()
-        $diagnostic = $stderr.GetAwaiter().GetResult()
+        if ($null -ne $stderr) { $diagnostic = $stderr.GetAwaiter().GetResult() }
         try {
             $result = $output | ConvertFrom-Json -ErrorAction Stop
         } catch {
@@ -763,6 +806,10 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
             if ($script:slowRiseEnableAttempted) { Assert-Runtime $result $CaseName }
             Fail-Case $CaseName 'unexpected_success' 'The mode change succeeded despite the expected interlock.'
         }
+        if ($timerOn -and (-not $timerWriteStartedNs -or
+            $result.result.timer_timing.on_write_started_ns -ne $timerWriteStartedNs)) {
+            Fail-Case $CaseName 'timer_timing_unconfirmed' 'The CLI result did not confirm the signaled SCPI Input ON write time.'
+        }
         if ($script:traceSelected -and $Command -eq 'trace-start') {
             # ConvertFrom-Json can normalize ISO datetimes to the runner's local
             # timezone. Preserve the UTC+8 literal from the public CLI JSON.
@@ -792,15 +839,19 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
         if ($script:triggerPowered -and $started -and -not $process.HasExited) {
             $script:triggerProcessStillRunning = $true
         }
+        if ($script:timerPowered -and $started -and -not $process.HasExited) {
+            $script:timerProcessStillRunning = $true
+        }
         $process.Dispose()
         if ($DebugArtifacts) {
             $artifact = @{prefix=('{0:D2}-{1}' -f $sequence, $CaseName); output=$output;
-                          diagnostic=$diagnostic; exitStatus=$exitStatus}
+                          diagnostic=$timerDiagnostic.ToString() + $diagnostic; exitStatus=$exitStatus}
             if ($script:triggerPowered) { $script:triggerArtifacts += $artifact }
             elseif ($script:protectionPowered) { $script:protectionArtifacts += $artifact }
+            elseif ($script:timerPowered) { $script:timerArtifacts += $artifact }
             else { Save-CommandArtifacts $artifact }
         }
-        if (-not ($script:triggerPowered -or $script:protectionPowered)) { Save-Report }
+        if (-not ($script:triggerPowered -or $script:protectionPowered -or $script:timerPowered)) { Save-Report }
     }
 }
 
@@ -842,6 +893,14 @@ function Get-TimerMonotonicNs {
         [Diagnostics.Stopwatch]::Frequency)
 }
 
+function Get-TimerRemainingMs([long]$DeadlineNs) {
+    [int][Math]::Max(0, [Math]::Floor(($DeadlineNs - (Get-TimerMonotonicNs)) / 1000000))
+}
+
+function Get-TimerObservationDeadlineNs([long]$WriteStartedNs) {
+    $WriteStartedNs + ([long][int]$TimerSeconds + 1) * 1000000000L
+}
+
 function Invoke-TimerExpiry($Step) {
     $entry = $script:report.results | Where-Object { $_.name -ceq $Step.name }
     $observations = @()
@@ -854,7 +913,7 @@ function Invoke-TimerExpiry($Step) {
             Fail-Case $Step.name 'timer_timing_unconfirmed' 'The SCPI Input ON timing was not confirmed.'
         }
         $earliestExpiryNs = $on.on_write_started_ns + [long][int]$TimerSeconds * 1000000000L
-        $deadlineNs = $earliestExpiryNs + 1000000000L
+        $deadlineNs = Get-TimerObservationDeadlineNs $on.on_write_started_ns
         # Start one second before expiry so a definite early OFF can be rejected.
         $delay = [Math]::Floor(($earliestExpiryNs - 1000000000L - $nowNs) / 1000000)
         if ($delay -gt 0) { Start-Sleep -Milliseconds $delay }
@@ -902,13 +961,11 @@ function Invoke-TimerExpiry($Step) {
         Fail-Case $Step.name 'timer_expiry_unconfirmed' 'Input OFF was not confirmed within the Timer validation window.'
     } finally {
         if ($DebugArtifacts) {
-            $file = Join-Path $script:reportDirectory 'private/timer-expiry-timing.json'
-            $timing = @{elapsed_ms=$script:watch.ElapsedMilliseconds - $script:timerOnStartMs;
-                        cli_dispatched_ms=$script:timerOnStartMs; cli_confirmed_ms=$script:timerOnConfirmedMs;
-                        scpi_on=$script:timerOnTiming;
-                        observations=$observations}
-            [IO.File]::WriteAllText($file, (ConvertTo-Json -InputObject $timing),
-                [Text.UTF8Encoding]::new($false))
+            $script:timerExpiryEvidence = @{
+                elapsed_ms=$script:watch.ElapsedMilliseconds - $script:timerOnStartMs
+                cli_dispatched_ms=$script:timerOnStartMs; cli_confirmed_ms=$script:timerOnConfirmedMs
+                scpi_on=$script:timerOnTiming; observations=$observations
+            }
         }
     }
 }
@@ -1811,6 +1868,7 @@ try {
         }
     }
     $pendingLive = @()
+    $listNeedsSeparateRun = $false
     if ($LiveExtensions) {
         if ($workflowSelected) {
             $scope = @('--hardware-validation','workflow')
@@ -1852,8 +1910,11 @@ try {
             $listStatus = @{name='list-cc-status';command='list-status';args=$readbackScope;execution='live';
                 readback_expected=@{selected=$true;input_state='OFF'};check_readback_settings=$true;
                 condition='Read an existing configured LIST with Input OFF; repeat each step query for the reported LIST:STEP? count'}
-            if ($protectionSelected) {
-                $listStatus.condition = 'Protection requires Fixed at startup. Run LIST status separately with an existing configured LIST, Input OFF, and one query per reported step for each step field.'
+            # Only these modes preserve an existing LIST selection throughout the plan.
+            $listCompatibleModes = $extensionModes + @('readback', 'system-query')
+            $listNeedsSeparateRun = @($selectedModes | Where-Object { $_ -notin $listCompatibleModes }).Count -gt 0
+            if ($listNeedsSeparateRun) {
+                $listStatus.condition = 'Other selected trials may change mode. Start those trials in their required mode without LIST selected. Run LIST status separately with an existing configured LIST and Input OFF. Repeat each step query for the reported LIST:STEP? count.'
                 $listStatus.not_run_reason = 'list_requires_separate_live_run'
                 $pendingLive += $listStatus
             } else {
@@ -2369,6 +2430,9 @@ try {
     if ($protectionSelected) {
         Write-Host '- Confirm Timer, Short, Slow Rise and Transient OFF for Protection. The script can prepare Fixed CC from Fixed CV or CW while Input is OFF.'
     }
+    if ($listNeedsSeparateRun) {
+        Write-Host '- Confirm LIST is not selected and the instrument meets the starting mode requirements for the other trials. Run LIST CC readback separately.'
+    }
     if ($LiveExtensions -and 'measurement-extensions' -in $selectedModes) {
         Write-Host '- Confirm the Average count may be set to 8 and left at that setting.'
     }
@@ -2444,6 +2508,7 @@ try {
                 Fail-Case $step.name 'operator_confirmation_required' 'The Timer hardware cutoff was not confirmed.'
             }
             $timerOnStartMs = $watch.ElapsedMilliseconds
+            $timerPowered = $true
         }
         # Mark uncertainty before dispatch, including subprocess/JSON/runtime failures.
         if ($step.command -eq 'input-on') { $inputOnAttempted = $true }
@@ -2572,6 +2637,7 @@ try {
             Assert-ReadbackFields $result.result.configuration $step.transient_expected $step.name
         }
         if ($step.command -eq 'input-off') { $inputOnAttempted = $false }
+        if ($step.name -ceq 'timer-off') { $timerPowered = $false }
         if ($step.command -eq 'input-timer-disable') { $timerEnableAttempted = $false }
         if ($step.name -ceq 'timer-final-state') { Confirm-TimerExpiry }
         if ($step.command -eq 'transient-disable') { $transientEnableAttempted = $false }
@@ -2608,13 +2674,15 @@ try {
     if ($report.status -ne 'BLOCKED') {
         $report.status = $(if ($phase -eq 'cases') { 'FAIL' } else { 'BLOCKED' })
     }
-    if ($DebugArtifacts -and $null -ne $reportDirectory) {
+    if ($timerPowered) {
+        $timerFailure = $_
+    } elseif ($DebugArtifacts -and $null -ne $reportDirectory) {
         $privateDir = Join-Path $reportDirectory 'private'
         [void][IO.Directory]::CreateDirectory($privateDir)
         [IO.File]::WriteAllText((Join-Path $privateDir 'failure.txt'),
             $_.Exception.ToString(), [Text.UTF8Encoding]::new($false))
     }
-    Write-Host "Validation did not complete: $($_.Exception.Message)"
+    if (-not $timerPowered) { Write-Host "Validation did not complete: $($_.Exception.Message)" }
 } finally {
     # PowerShell pipeline interruption can bypass catch and the exit after finally.
     $validationInterrupted = ($triggerSelected -or $protectionSelected -or $sequenceSelected -or $asrlSelected) -and
@@ -2624,7 +2692,7 @@ try {
         $report.results += [ordered]@{
             name = 'cleanup-input-off'; command = 'input-off'; status = 'NOT RUN'
         }
-        if ($traceCommunicationUntrusted -or ($triggerSelected -and -not $script:triggerTrusted)) {
+        if ($timerProcessStillRunning -or $traceCommunicationUntrusted -or ($triggerSelected -and -not $script:triggerTrusted)) {
             $report.status = 'FAIL'
             if ($traceCommunicationUntrusted) { $report.trace_safe_shutdown_unconfirmed = $true }
             if ($triggerSelected) { $report.trigger_input_off_unconfirmed = $true }
@@ -2655,7 +2723,7 @@ try {
     if ($timerEnableAttempted) {
         $report.results += [ordered]@{name='cleanup-timer-state';command='input-state';status='NOT RUN'}
         $report.results += [ordered]@{name='cleanup-timer-disable';command='input-timer-disable';status='NOT RUN'}
-        if ($traceCommunicationUntrusted -or ($triggerSelected -and -not $script:triggerTrusted)) {
+        if ($timerProcessStillRunning -or $traceCommunicationUntrusted -or ($triggerSelected -and -not $script:triggerTrusted)) {
             $report.status = 'FAIL'
             Write-Host 'WARNING: Timer cleanup blocked by untrusted communication; operator action required.'
         } else { try {
@@ -2758,6 +2826,18 @@ try {
         Remove-Item -LiteralPath $sequenceDocuments -Recurse -Force -ErrorAction SilentlyContinue
     }
     foreach ($artifact in $protectionArtifacts) { Save-CommandArtifacts $artifact }
+    foreach ($artifact in $timerArtifacts) { Save-CommandArtifacts $artifact }
+    if ($null -ne $timerExpiryEvidence) {
+        [IO.File]::WriteAllText((Join-Path $privateDir 'timer-expiry-timing.json'),
+            (ConvertTo-Json -InputObject $timerExpiryEvidence), [Text.UTF8Encoding]::new($false))
+    }
+    if ($null -ne $timerFailure) {
+        if ($DebugArtifacts -and $null -ne $reportDirectory) {
+            [IO.File]::WriteAllText((Join-Path $privateDir 'failure.txt'),
+                $timerFailure.Exception.ToString(), [Text.UTF8Encoding]::new($false))
+        }
+        Write-Host "Validation did not complete: $($timerFailure.Exception.Message)"
+    }
     if ($protectionSelected -and $report.protection_input_off_unconfirmed) {
         Write-Host 'Protection Input OFF is unconfirmed. Use the independent manual OFF procedure immediately.'
     }

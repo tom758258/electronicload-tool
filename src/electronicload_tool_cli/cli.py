@@ -3,6 +3,7 @@
 import argparse
 import json
 import sys
+from collections.abc import Callable
 from decimal import Decimal, InvalidOperation
 from importlib.metadata import version
 from pathlib import Path
@@ -74,7 +75,7 @@ def _workflow_number(value: str) -> Decimal:
         raise argparse.ArgumentTypeError("Expected a number.") from exc
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, timer_on_write_started: Callable[[int], None] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     json_output = ("--json" in argv or
                    (argv and argv[0] in (SEQUENCE_COMMAND, *WORKFLOW_COMMANDS)
@@ -440,6 +441,7 @@ def main(argv: list[str] | None = None) -> int:
                 count=getattr(args, "count", None),
                 trigger_source=getattr(args, "source", None),
                 trigger_interval=getattr(args, "interval_s", None),
+                timer_on_write_started=timer_on_write_started,
                 asrl=asrl,
             )
         else:

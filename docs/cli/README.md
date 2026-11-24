@@ -741,10 +741,12 @@ sets low-range Fixed CC, configures/enables Timer, reads status while OFF,
 then confirms Input ON through `--hardware-validation input-timer` with complete
 expected `current`, `range` and integer `seconds`. Before and after remote
 transition Core rechecks physical OFF, CC settings, Short/Transient OFF and Timer
-readback. The script starts polling one second before the earliest possible
-expiry. It accepts an OFF observation if the Input state query started at
-least five seconds after the SCPI Input ON write began and the response arrived
-within six seconds of that write start. An OFF reply completed before five
+readback. Core signals the SCPI ON write start before waiting for the instrument,
+so the same six-second deadline covers the ON subprocess and subsequent polls.
+Once ON is confirmed, polling can begin as early as one second before the
+earliest possible expiry. The script accepts an OFF observation if the Input
+state query started at least five seconds after the SCPI Input ON write began
+and the response arrived within six seconds of that write start. An OFF reply completed before five
 seconds fails the trial. Each poll also respects the remaining observation
 window. When the window closes without a valid observation, the script fails
 and enters the existing OFF cleanup immediately. A communication failure in
@@ -761,8 +763,10 @@ confirmed OFF.
 在兩檔 CC 範圍內的正電流（預設 0.1 A、上限 2 A），以及獨立的硬體
 停損。限時必須不超過 10 秒，且計時不得晚於 SCPI Input ON 寫入開始。
 在 Timer Input ON 提示確認上述條件，10 秒上限僅適用這組核准條件。
-最早可能到期前一秒開始查詢。OFF 查詢必須在寫入開始後至少 5 秒才
-啟動，且在第 6 秒前收到結果。若在第 5 秒前讀到 OFF 即失敗。第 6 秒
+Core 在等待儀器回覆前通知 Script SCPI ON 的寫入起點，因此 ON 子程序與
+後續查詢共用 6 秒期限。ON 確認後，最早從可能到期前 1 秒開始查詢。
+OFF 查詢必須在寫入開始後至少 5 秒才啟動，且在第 6 秒前收到結果。
+若在第 5 秒前讀到 OFF 即失敗。第 6 秒
 仍無有效觀察則立即進入既有 OFF 清理。通訊失信時依既有規則處理。
 CLI 記錄 SCPI 寫入、ON 確認及 Input 查詢起訖，`-DebugArtifacts` 將觀察
 資料存於私有目錄。明確確認 OFF、獨立停用 Timer 並讀回最終狀態後，
@@ -1373,11 +1377,14 @@ completion of a voltage condition at 1 V or above. `measurement-extensions`
 queries native Min/Max and Discharge values and verifies Average set to 8.
 The Average case leaves the count set to 8 after operator confirmation.
 `auxiliary-controls` can query VON and Short state, and `list-cc` can read
-an already configured, selected LIST with Input OFF. The LIST preview repeats
-each indexed query for the step count read from the instrument. Full and any
-selection that includes Protection must start in Fixed CC, CV or CW. They leave
-the LIST CC readback `NOT RUN` with a reason. Use `-Modes list-cc` separately
-with LIST selected for that readback. Powered
+an already configured, selected LIST with Input OFF. The LIST preview shows an
+indexed query for each step field, repeated for the step count read from the
+instrument. Full and selections with a trial that can change the load mode
+leave the LIST CC readback `NOT RUN` with a reason and preserve its preview.
+Start those trials in their required mode with LIST deselected. Protection
+requires Fixed CC, CV or CW. Use `-Modes list-cc -LiveExtensions` separately with
+LIST selected and Input OFF, or combine it with readback, system query and
+other contributor extension modes that preserve the LIST selection. Powered
 workflows, VON/Short/Slew changes and the LIST CC configuration and slot
 cycle require their own approved operating procedures. If a selected case
 has no executable procedure, it stays `NOT RUN` with a reason and the
@@ -1392,10 +1399,13 @@ Input OFF 時，`workflow` 驗證定時取樣兩次及電壓達到 1 V 的條件
 `measurement-extensions` 查詢原生 Min/Max 與放電讀值，經操作者
 確認後將 Average 設為 8、驗證讀回並保留設定。`auxiliary-controls`
 可觀察 VON 和 Short 狀態，`list-cc` 可在 Input OFF 時讀回已設定並
-選取的 LIST。LIST 預覽的索引查詢依儀器讀出的步數逐步執行。Full 或含
-Protection 的混選從 Fixed CC、CV 或 CW 開始，LIST CC 讀回會保留為
-`NOT RUN` 並列原因。要讀回該案例，請在 LIST 已選取時單獨執行
-`-Modes list-cc`。CC 帶載流程、VON／Short／Slew 設定變更和 LIST CC
+選取的 LIST。LIST 預覽列出每個步進欄位的索引查詢，依儀器讀出的步數逐步
+執行。Full 或含任何會切換負載模式的混選將 LIST CC 讀回列為 `NOT RUN`，
+保留原因及預覽。其餘試驗須依各自要求的模式起始，並確認未選取 LIST。
+Protection 要求 Fixed CC、CV 或 CW。請在已選取 LIST 且 Input OFF 時
+單獨執行 `-Modes list-cc -LiveExtensions`，也可與不會切換 LIST 選取的
+Readback、System Query 或其他 Contributor 擴充模式混選。CC 帶載流程、
+VON／Short／Slew 設定變更和 LIST CC
 設定與記憶槽操作均需各自核准的操作流程。沒有可執行
 流程的案例會保留為 `NOT RUN` 並列出原因，該次實機驗證維持未完成。
 
