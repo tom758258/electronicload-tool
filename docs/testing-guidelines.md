@@ -53,9 +53,11 @@ boundary changes; it does not require separate PlanOnly and refusal invocations
 in routine CI if the same complete plan is verified before refusal. Keep the
 legacy InputTimerOnly success and refusal entry points, and the non-5-second
 Timer preview and refusal, distinct.
-Check Workflow's standalone PlanOnly without a resource and all optional-resource
-simulation variants; both use the common offline plan. Python Core/CLI/Worker
-tests own command, sequencing and failure behavior; CI does not duplicate these
+Check Workflow's standalone PlanOnly and noninteractive refusal with explicit
+resources and reject missing resources. Separate preflight checks report
+`PASS` only when all applicable checks ran successfully, `FAIL` on failure,
+and `NOT RUN` when none ran. Python Core/CLI/Worker tests own command,
+sequencing and failure behavior; CI does not duplicate these
 as Linux pseudo-terminal operator simulations. Unrelated changes skip the
 PowerShell checks; packaging changes retain the wheel/sdist installation smoke.
 Skipping a CI job does not imply real-instrument validation. Run focused tests from the repository root.

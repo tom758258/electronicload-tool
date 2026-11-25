@@ -1563,10 +1563,14 @@ See the [VISA connections and LIVE support](../../README.md#visa-connections-and
 
 ## Controlled instrument validation
 
-Before any live VISA operation, the script runs offline preflight, displays
-the selected Resource for operator verification, and requires a **single
-interactive Enter confirmation** (Ctrl+C cancels). Noninteractive execution
-and redirected stdin are blocked.
+Before any live VISA operation, the script validates the selected CLI plans,
+runs the applicable offline preflight checks, displays the selected Resource
+for operator verification, and requires a **single interactive Enter
+confirmation** (Ctrl+C cancels). A selection containing only Workflow,
+Measurement Extensions, Auxiliary Controls or LIST CC has no separate
+preflight invocation; the report leaves that check `NOT RUN`. All selected
+CLI plans are still validated. Noninteractive execution and redirected stdin
+are blocked.
 
 | Check before Enter | Operator action |
 | --- | --- |

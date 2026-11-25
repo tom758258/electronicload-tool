@@ -1889,6 +1889,32 @@ function Assert-TraceResult([object]$Result, [hashtable]$Step) {
     }
 }
 
+function Invoke-SelectedPreflight([string[]]$Modes, [string]$PreflightScript) {
+    $preflightModes = [ordered]@{
+        'input-timer'='InputTimerOnly'; trace='TraceOnly'; trigger='TriggerOnly';
+        protection='ProtectionOnly'; 'system-query'='SystemQueryOnly'; readback='ReadbackOnly';
+        sequence='SequenceOnly'; 'cr-led'='CrLedSlowRiseOnly'; 'current-slow-rise'='CrLedSlowRiseOnly'
+    }
+    $preflightChecks = @(foreach ($mode in $Modes) {
+        if ($preflightModes.Contains($mode)) { $preflightModes[$mode] }
+    })
+    $runBase = @($Modes | Where-Object { $_ -in @('cc','cv','cr','cw') -or $_ -like 'transient-*' }).Count -gt 0
+    if (-not $runBase -and -not $preflightChecks.Count) { return }
+
+    # Mark an attempted check as failed until every applicable check succeeds.
+    $script:report.prechecks.preflight = 'FAIL'
+    if ($runBase) {
+        & $PreflightScript -BaseOnly
+        if ($LASTEXITCODE -ne 0) { throw 'Base preflight failed.' }
+    }
+    foreach ($check in ($preflightChecks | Select-Object -Unique)) {
+        $selection = @{ $check = $true }
+        & $PreflightScript @selection
+        if ($LASTEXITCODE -ne 0) { throw "$check preflight failed." }
+    }
+    $script:report.prechecks.preflight = 'PASS'
+}
+
 try {
     if ($requestedModes.Count -eq 0 -or
         @($requestedModes | Where-Object { $_ -notin ($supportedModes + 'full') }).Count -gt 0 -or
@@ -2486,28 +2512,7 @@ try {
         Write-Host 'BLOCKED: controlled LIVE validation requires an interactive console.'
         exit 2
     }
-    $preflightScript = Join-Path $PSScriptRoot 'preflight-cli.ps1'
-    $preflightModes = [ordered]@{
-        'input-timer'='InputTimerOnly'; trace='TraceOnly'; trigger='TriggerOnly';
-        protection='ProtectionOnly'; 'system-query'='SystemQueryOnly'; readback='ReadbackOnly';
-        sequence='SequenceOnly'; 'cr-led'='CrLedSlowRiseOnly'; 'current-slow-rise'='CrLedSlowRiseOnly'
-    }
-    $preflightChecks = @(foreach ($mode in $selectedModes) {
-        if ($preflightModes.Contains($mode)) { $preflightModes[$mode] }
-    })
-    if (@($selectedModes | Where-Object { $_ -in @('cc','cv','cr','cw') -or $_ -like 'transient-*' }).Count) {
-        & $preflightScript -BaseOnly
-        if ($LASTEXITCODE -ne 0) { throw 'Base preflight failed.' }
-    }
-    foreach ($check in ($preflightChecks | Select-Object -Unique)) {
-        $selection = @{ $check = $true }
-        & $preflightScript @selection
-        if ($LASTEXITCODE -ne 0) {
-            $report.prechecks.preflight = 'FAIL'
-            throw "$check preflight failed."
-        }
-    }
-    $report.prechecks.preflight = 'PASS'
+    Invoke-SelectedPreflight -Modes $selectedModes -PreflightScript (Join-Path $PSScriptRoot 'preflight-cli.ps1')
     Write-Host "Operator resource check (LIVE): Target: $Target; Resource: $Resource; Backend: $Backend"
     Write-Host 'Physical checks before pressing Enter:'
     $connectedModes = @('cc','cv','cr','cw','transient-cc','transient-cv','transient-cr','transient-cw',
@@ -2813,7 +2818,7 @@ try {
     if ($report.status -eq 'OBSERVED ONLY') {
         Write-Host 'Readback complete. Only comparisons with supplied expected values were verified.'
     } else {
-        Write-Host 'PASS: applicable CLI LIVE cases and selected offline cases.'
+        Write-Host 'PASS: applicable CLI LIVE cases.'
     }
     exit 0
 } catch {

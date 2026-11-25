@@ -81,7 +81,7 @@ def run_script(tmp_path):
                 "'Assert-ReadbackFields','Fail-Case','Invoke-TimerExpiry','Invoke-LiveCommand',"
                 "'Get-TimerMonotonicNs','Get-TimerRemainingMs','Get-TimerObservationDeadlineNs',"
                 "'Confirm-TimerExpiry','Confirm-WorkflowLoad','Assert-Runtime','Save-Report',"
-                "'New-CliProcessInfo','New-LiveCliProcess')) {\n"
+                "'New-CliProcessInfo','New-LiveCliProcess','Invoke-SelectedPreflight')) {\n"
                 "        Invoke-Expression $node.Extent.Text\n"
                 "    }\n}\n" + harness, encoding='utf-8')
             args = [str(harness_path)]
@@ -620,12 +620,15 @@ def test_input_timer_offline_preflight(run_script):
     assert result.stdout.rstrip().endswith('PASS: Input Timer preflight')
 
 
-@pytest.mark.parametrize('planned', [True, False])
-def test_input_timer_script_plan_and_live_refusal(run_script, planned):
-    # Exercise the actual Timer entry on Windows PowerShell 5.1, not just preflight.
-    # The abbreviated -Mode parameter must parse without opening VISA.
-    result = run_script(['-Mode', 'input-timer', '-PlanOnly'] if planned else ['-InputTimerOnly'],
-                        windows_powershell=planned)
+@pytest.mark.parametrize('mode_args,planned,windows_powershell', [
+    (['-Mode', 'input-timer'], True, True),
+    (['-InputTimerOnly'], True, False),
+    (['-InputTimerOnly'], False, False),
+])
+def test_input_timer_script_plan_and_live_refusal(run_script, mode_args, planned, windows_powershell):
+    # Keep the legacy shortcut and exercise the real abbreviated entry on Windows PowerShell 5.1.
+    result = run_script([*mode_args, *(['-PlanOnly'] if planned else [])],
+                        windows_powershell=windows_powershell)
     assert result.returncode == (0 if planned else 2), result.stdout + result.stderr
     if not planned:
         assert 'requires an interactive console' in result.stdout
@@ -635,6 +638,7 @@ def test_input_timer_script_plan_and_live_refusal(run_script, planned):
     report = json.loads(text)
     assert report['overall_status'] == ('PLAN ONLY' if planned else 'BLOCKED')
     assert report['prechecks']['plan'] == 'PASS'
+    assert report['prechecks']['preflight'] == 'NOT RUN'
     assert report['modes'] == ['input-timer']
     assert report['hardware_touched'] is False
     assert report['summary_counts']['passed'] == report['summary_counts']['failed'] == 0
@@ -1232,6 +1236,57 @@ Save-Report
     assert '0.536' not in report_text and not (report_dir / 'private').exists()
 
 
+def test_selected_modes_report_actual_checks(run_script, tmp_path):
+    # Exercise the real preflight dispatch with a harmless child script, not an interactive VISA run.
+    stub = tmp_path / 'check.ps1'
+    stub.write_text(
+        "param([switch]$BaseOnly, [switch]$ReadbackOnly, [switch]$CrLedSlowRiseOnly)\n"
+        "$check = @($PSBoundParameters.Keys)[0]\n"
+        "Add-Content -LiteralPath $env:CHECK_LOG -Value $check\n"
+        "if ($check -ceq $env:FAIL_CHECK) { exit 1 }\n"
+        "exit 0\n", encoding='utf-8')
+    result = run_script([], extra_env={'CHECK_SCRIPT': str(stub), 'CHECK_LOG': str(tmp_path / 'calls.txt')},
+                        harness="""
+$results = @(foreach ($scenario in @(
+    @{modes=@('workflow'); fail=''},
+    @{modes=@('measurement-extensions'); fail=''},
+    @{modes=@('auxiliary-controls'); fail=''},
+    @{modes=@('list-cc'); fail=''},
+    @{modes=@('workflow','measurement-extensions','auxiliary-controls','list-cc'); fail=''},
+    @{modes=@('cc','workflow'); fail=''},
+    @{modes=@('readback','list-cc'); fail=''},
+    @{modes=@('cc','readback'); fail=''},
+    @{modes=@('cc','readback'); fail='BaseOnly'},
+    @{modes=@('cc','readback'); fail='ReadbackOnly'},
+    @{modes=@('cr-led','current-slow-rise'); fail=''}
+)) {
+    $script:report = @{prechecks=@{preflight='NOT RUN'}}
+    [IO.File]::WriteAllText($env:CHECK_LOG, '')
+    $env:FAIL_CHECK = $scenario.fail
+    $failed = $false
+    try {
+        Invoke-SelectedPreflight -Modes $scenario.modes -PreflightScript $env:CHECK_SCRIPT
+    } catch {
+        $failed = $true
+    }
+    [ordered]@{status=$script:report.prechecks.preflight; failed=$failed;
+        calls=@(Get-Content -LiteralPath $env:CHECK_LOG)}
+})
+ConvertTo-Json -InputObject $results -Depth 5 -Compress
+""")
+    assert result.returncode == 0, result.stdout + result.stderr
+    results = json.loads(result.stdout)
+    assert results == [
+        *[{'status': 'NOT RUN', 'failed': False, 'calls': []} for _ in range(5)],
+        {'status': 'PASS', 'failed': False, 'calls': ['BaseOnly']},
+        {'status': 'PASS', 'failed': False, 'calls': ['ReadbackOnly']},
+        {'status': 'PASS', 'failed': False, 'calls': ['BaseOnly', 'ReadbackOnly']},
+        {'status': 'FAIL', 'failed': True, 'calls': ['BaseOnly']},
+        {'status': 'FAIL', 'failed': True, 'calls': ['BaseOnly', 'ReadbackOnly']},
+        {'status': 'PASS', 'failed': False, 'calls': ['CrLedSlowRiseOnly']},
+    ]
+
+
 def test_trace_validation_preflight_only(run_script):
     checked = run_script(['-TraceOnly'], preflight=True)
     assert checked.returncode == 0, checked.stdout + checked.stderr
@@ -1399,6 +1454,23 @@ def test_configuration_readback_script_plan_and_noninteractive_refusal(run_scrip
         if status == 'BLOCKED':
             assert 'requires an interactive console' in result.stdout
 
+    mixed = run_script(['-Modes', 'readback,auxiliary-controls', '-ExpectedRiseSlew', '0.1'])
+    assert mixed.returncode == 2 and 'requires an interactive console' in mixed.stdout
+    mixed_path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', mixed.stdout)[-1])
+    mixed_report = json.loads(mixed_path.read_text(encoding='utf-8-sig'))
+    assert mixed_report['overall_status'] == 'BLOCKED' and not mixed_report['hardware_touched']
+    assert mixed_report['prechecks']['plan'] == 'PASS'
+    assert mixed_report['prechecks']['preflight'] == 'NOT RUN'
+    mixed_cases = {case['name']: case for case in mixed_report['cases']}
+    assert list(mixed_cases) == [*expected, 'auxiliary-controls-von', 'auxiliary-controls-short',
+                                 'auxiliary-controls-slew']
+    assert all(case['status'] == 'NOT RUN' for case in mixed_cases.values())
+    assert mixed_cases['fixed-slew-status']['command'] == 'fixed-slew-status'
+    for name in ('auxiliary-controls-von', 'auxiliary-controls-short', 'auxiliary-controls-slew'):
+        case = mixed_cases[name]
+        assert case['command'] == 'contributor-settings' and case['execution'] == 'live'
+        assert 'reuse_from' not in case and '--readback-trial' not in case['arguments']
+
 
 def test_sequence_plan_or_noninteractive_refusal(run_script):
     result = run_script(["-Modes", "sequence"])
@@ -1516,6 +1588,7 @@ def test_selected_modes_never_use_simulation(run_script, mode, connection, resou
     assert report['validation_mode'] == ('plan-only' if plan_only else 'live')
     assert not report['hardware_touched'] and report['resource'] == '<redacted>'
     assert report['prechecks']['plan'] == 'PASS'
+    assert report['prechecks']['preflight'] == 'NOT RUN'
     assert report['connection'] == connection
     cases = {case['name']: case for case in report['cases']}
     selected = FULL_MODES if mode == 'full' else [name for name in FULL_MODES if name in mode.split(',')]
