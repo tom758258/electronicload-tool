@@ -5,11 +5,9 @@ Default: the established validation modes, with common read-only safety precheck
 trigger and input-timer. Omitted -Modes selects all default modes.
 -Modes protection selects the separate Protection validation procedure.
 -Modes sequence selects four bounded Fixed Software Sequence trials.
--Modes readback -LiveExtensions exercises settings with Input OFF and isolated terminals.
+-Modes readback exercises settings with Input OFF and isolated terminals unless explicit Expected values request read-only diagnostics.
 -Modes full (default) selects all trials. USB and ASRL use the same matrix.
--Modes workflow runs only dry-run and simulation, without an instrument.
--Modes measurement-extensions,auxiliary-controls,list-cc selects offline checks.
--LiveExtensions explicitly requests automatic Readback and physical cases for those four modes.
+-Modes workflow,measurement-extensions,auxiliary-controls,list-cc selects the corresponding hardware trials.
 -InputTimerOnly is a backward-compatible shortcut for the input-timer-only trial.
 Requires approved source/DUT limits and interactive confirmation before hardware access.
 -PlanOnly validates every planned CLI request without VISA or hardware access.
@@ -22,7 +20,6 @@ param(
     [ValidateSet('system')][string]$Backend = 'system',
     [string]$Current = '0.1',
     [string[]]$Modes = @(),
-    [switch]$LiveExtensions,
     [ValidateRange(1,7)][int]$ListScratchSlot = 1,
     [double]$SourceCurrentLimitA = 0.8,
     [double]$SourceVoltageLimitV = 5,
@@ -71,10 +68,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $featureModes = @('cr-led', 'current-slow-rise')
-$offlineModes = @('measurement-extensions', 'auxiliary-controls', 'list-cc')
+$extensionModes = @('measurement-extensions', 'auxiliary-controls', 'list-cc')
 $supportedModes = @('cc', 'cv', 'cr', 'cw', 'transient-cc', 'transient-cv', 'transient-cr', 'transient-cw',
                     'trace') + $featureModes + @('trigger', 'input-timer', 'protection', 'system-query',
-                                              'readback', 'sequence', 'workflow') + $offlineModes
+                                              'readback', 'sequence', 'workflow') + $extensionModes
 if ($InputTimerOnly) {
     if ($PSBoundParameters.ContainsKey('Modes')) { throw 'InputTimerOnly cannot be combined with Modes.' }
     $Modes = @('input-timer')
@@ -94,8 +91,6 @@ $readbackSelected = 'readback' -in $selectedModes
 $sequenceSelected = 'sequence' -in $selectedModes
 $asrlSelected = $Connection -eq 'asrl'
 $workflowSelected = 'workflow' -in $selectedModes
-$extensionModes = $offlineModes + 'workflow'
-$offlineOnly = -not $LiveExtensions -and @($selectedModes | Where-Object { $_ -notin $extensionModes }).Count -eq 0
 $systemQuerySelected = 'system-query' -in $selectedModes
 $serialFlags = [ordered]@{
     SerialBaudRate = '--serial-baud-rate'; SerialDataBits = '--serial-data-bits'
@@ -191,7 +186,7 @@ $report = [ordered]@{
         current = 'NOT RUN'; input_off = 'NOT RUN'
     }
     artifact_mode = $(if ($DebugArtifacts) { 'debug' } else { 'minimal' })
-    validation_mode = $(if ($PlanOnly) { 'plan-only' } elseif ($offlineOnly) { 'simulate' } else { 'live' })
+    validation_mode = $(if ($PlanOnly) { 'plan-only' } else { 'live' })
     product_live = 'IT8812C USB/System VISA read-only and fixed CC/Input LIVE open'
     per_command_deadline_ms = $perCommandDeadlineMs
     total_deadline_ms = $totalDeadlineMs
@@ -321,9 +316,6 @@ function Save-Report {
             }
             if ($entry.command -eq 'scpi-error-next') {
                 $case.scpi_error_code = $entry.response.result.error_code
-            }
-            if ($entry.execution -eq 'simulate' -and $entry.response.result.input_state) {
-                $case.input_state = $entry.response.result.input_state
             }
             if ($entry.command -eq 'measure') {
                 $case.values = [ordered]@{
@@ -490,81 +482,15 @@ function Invoke-OfflineProcess([string[]]$Arguments) {
     }
 }
 
-function Invoke-OfflineCommand([string]$Command, [string[]]$ExtraArgs = @(), [switch]$NoConnection, [switch]$Simulate) {
-    $mode = if ($Simulate) { '--simulate' } else { '--dry-run' }
+function Invoke-OfflineCommand([string]$Command, [string[]]$ExtraArgs = @()) {
     $arguments = @('-c', 'from electronicload_tool_cli.cli import main; raise SystemExit(main())',
-        $Command, $mode, '--json') + $ExtraArgs
-    if ($NoConnection) { $arguments += @('--model', $Target) }
-    else { $arguments += $script:connectionArgs }
+        $Command, '--dry-run', '--json') + $ExtraArgs + $script:connectionArgs
     $execution = Invoke-OfflineProcess $arguments
     $plan = $execution.stdout | ConvertFrom-Json -ErrorAction Stop
     if ($execution.exit_code -ne 0 -or $plan.ok -ne $true) {
         throw "Offline command failed for $Command ($($plan.error.code))."
     }
     return $plan
-}
-
-function Invoke-OfflineTests($Step, $Entry) {
-    $base = Join-Path $script:reportDirectory "$($Step.name)-pytest"
-    $resultsFile = Join-Path $base 'results.xml'
-    # JUnit records results for selected tests only. Check the complete collection before running it.
-    $launcher = @'
-import pytest
-
-
-class CompleteOfflineSelection:
-    def __init__(self):
-        self.collected = set()
-
-    def pytest_itemcollected(self, item):
-        self.collected.add(item.nodeid)
-
-    @pytest.hookimpl(trylast=True)
-    def pytest_collection_finish(self, session):
-        excluded = self.collected.difference(item.nodeid for item in session.items)
-        if excluded:
-            pytest.exit(
-                f'{len(excluded)} tests excluded from the offline test selection',
-                returncode=pytest.ExitCode.NO_TESTS_COLLECTED,
-            )
-
-
-raise SystemExit(pytest.main(plugins=[CompleteOfflineSelection()]))
-'@
-    $arguments = @('-c',$launcher,'-q','-rs','-p','no:cacheprovider',
-        '--basetemp',$base,'--junitxml',$resultsFile) + $Step.args
-    try {
-        $execution = Invoke-OfflineProcess $arguments
-        if ($DebugArtifacts) {
-            $privateDir = Join-Path $script:reportDirectory 'private'
-            [void][IO.Directory]::CreateDirectory($privateDir)
-            [IO.File]::WriteAllText((Join-Path $privateDir "$($Step.name).txt"),
-                ($execution.stdout + $execution.stderr), [Text.UTF8Encoding]::new($false))
-        }
-        if ($execution.exit_code -notin @(0, 5)) {
-            Fail-Case $Step.name 'offline_checks_failed' "Offline Simulator checks failed ($($execution.exit_code))."
-        }
-        $suite = if (Test-Path -LiteralPath $resultsFile -PathType Leaf) {
-            $results = [xml](Get-Content -LiteralPath $resultsFile -Raw)
-            $results.testsuites.testsuite
-        }
-        if ($execution.exit_code -eq 5 -or [int]$suite.tests -le 0) {
-            $Entry.status = 'NOT RUN'
-            $Entry['error_code'] = 'offline_checks_not_run'
-            throw 'Offline Simulator checks have no recorded test executions.'
-        }
-        if ([int]$suite.failures -gt 0 -or [int]$suite.errors -gt 0) {
-            Fail-Case $Step.name 'offline_checks_failed' 'Offline Simulator checks recorded failures or errors.'
-        }
-        if ([int]$suite.skipped -gt 0) {
-            $Entry.status = 'SKIP'
-            $Entry['error_code'] = 'offline_checks_skipped'
-            throw "Offline Simulator checks skipped $($suite.skipped) of $($suite.tests) tests."
-        }
-        $Entry.status = 'PASS'
-    } finally {
-        Remove-Item -LiteralPath $resultsFile -Force -ErrorAction SilentlyContinue
-    }
 }
 
 function Save-CommandArtifacts($Artifact) {
@@ -1116,8 +1042,8 @@ function Invoke-TimerExpiry($Step) {
                 $entry.observed_at_ms - [Math]::Floor(($entry.observed_at_ns - $query.query_completed_ns) / 1000000)
             } else { $null }
             $observations += [ordered]@{
-                elapsed_ms = if ($null -ne $observedMs) { $observedMs - $script:timerOnStartMs }
-                since_on_confirmed_ms = if ($null -ne $observedMs) { $observedMs - $script:timerOnConfirmedMs }
+                elapsed_ms = $(if ($null -ne $observedMs) { $observedMs - $script:timerOnStartMs })
+                since_on_confirmed_ms = $(if ($null -ne $observedMs) { $observedMs - $script:timerOnConfirmedMs })
                 query_started_ns = $query.query_started_ns
                 query_completed_ns = $query.query_completed_ns
                 seconds = $status.seconds
@@ -1963,6 +1889,32 @@ function Assert-TraceResult([object]$Result, [hashtable]$Step) {
     }
 }
 
+function Invoke-SelectedPreflight([string[]]$Modes, [string]$PreflightScript) {
+    $preflightModes = [ordered]@{
+        'input-timer'='InputTimerOnly'; trace='TraceOnly'; trigger='TriggerOnly';
+        protection='ProtectionOnly'; 'system-query'='SystemQueryOnly'; readback='ReadbackOnly';
+        sequence='SequenceOnly'; 'cr-led'='CrLedSlowRiseOnly'; 'current-slow-rise'='CrLedSlowRiseOnly'
+    }
+    $preflightChecks = @(foreach ($mode in $Modes) {
+        if ($preflightModes.Contains($mode)) { $preflightModes[$mode] }
+    })
+    $runBase = @($Modes | Where-Object { $_ -in @('cc','cv','cr','cw') -or $_ -like 'transient-*' }).Count -gt 0
+    if (-not $runBase -and -not $preflightChecks.Count) { return }
+
+    # Mark an attempted check as failed until every applicable check succeeds.
+    $script:report.prechecks.preflight = 'FAIL'
+    if ($runBase) {
+        & $PreflightScript -BaseOnly
+        if ($LASTEXITCODE -ne 0) { throw 'Base preflight failed.' }
+    }
+    foreach ($check in ($preflightChecks | Select-Object -Unique)) {
+        $selection = @{ $check = $true }
+        & $PreflightScript @selection
+        if ($LASTEXITCODE -ne 0) { throw "$check preflight failed." }
+    }
+    $script:report.prechecks.preflight = 'PASS'
+}
+
 try {
     if ($requestedModes.Count -eq 0 -or
         @($requestedModes | Where-Object { $_ -notin ($supportedModes + 'full') }).Count -gt 0 -or
@@ -1972,28 +1924,20 @@ try {
     if ($serialArgs.Count -and -not $asrlSelected) {
         throw 'Serial parameters require -Connection asrl.'
     }
-    $workflowLoadSelected = $LiveExtensions -and $workflowSelected
     if ($SourceVoltageLimitV -ne 5 -or $SourceCurrentLimitA -ne 0.8) {
         if ($sequenceSelected -or $protectionSelected) {
             throw 'Sequence and Protection require a dedicated 5 V / 0.8 A source.'
         }
-        if ($workflowLoadSelected) {
+        if ($workflowSelected) {
             throw 'Contributor Workflow load trials require a dedicated 5 V / 0.8 A source.'
         }
     }
-    if ($LiveExtensions -and -not @($selectedModes | Where-Object { $_ -in ($extensionModes + 'readback') }).Count) {
-        throw '-LiveExtensions requires a selection including Readback, an extension or Workflow mode.'
-    }
-    if (-not $Target -or (-not $Resource -and -not $offlineOnly)) {
-        Write-Host 'BLOCKED: explicit -Target and, for hardware cases, -Resource are required.'
+    if (-not $Target -or -not $Resource) {
+        Write-Host 'BLOCKED: explicit -Target and -Resource are required.'
         exit 2
     }
     if (-not (Test-Path -LiteralPath $python) -or -not (Test-Path -LiteralPath $cli)) {
         throw 'Sync the repository .venv with uv before running validation.'
-    }
-    if ($offlineOnly -and ($Resource -or $serialArgs.Count)) {
-        # Validate any supplied connection without including it in Workflow commands.
-        $null = Invoke-OfflineCommand 'identify'
     }
     if ('cc' -in $selectedModes -or $traceSelected -or $timerSelected -or $featureSelected) {
         # Preserve the original token; both manual trials and the script ceiling must pass.
@@ -2003,10 +1947,8 @@ try {
         }
         $report.prechecks.current = 'PASS'
     }
-    if (-not $offlineOnly) {
-        $report.script_current_ceiling_a = if ($selectedModes.Count -eq 1 -and $protectionSelected) { 0.20 }
-            elseif ($selectedModes.Count -eq 1 -and $sequenceSelected) { 0.10 } else { $scriptCurrentCeilingA }
-    }
+    $report.script_current_ceiling_a = if ($selectedModes.Count -eq 1 -and $protectionSelected) { 0.20 }
+        elseif ($selectedModes.Count -eq 1 -and $sequenceSelected) { 0.10 } else { $scriptCurrentCeilingA }
     if ($timerSelected) {
         & $python -c 'import sys; from electronicload_tool_core.control import validate_input_timer; value=validate_input_timer(int(sys.argv[1])); sys.exit(0 if 3 <= value <= 10 else 2)' $TimerSeconds
         if ($LASTEXITCODE -ne 0) { throw 'Timer validation seconds must be an integer from 3 through 10.' }
@@ -2044,14 +1986,13 @@ try {
         @{name='input-state';command='input-state';args=@()},
         @{name='measure-off';command='measure';args=@()}
     )
-    if ($offlineOnly) { $planned = @() }
     if ($systemQuerySelected) {
         foreach ($command in @('scpi-version','display-mode','scpi-error-next')) {
             $planned += @{name=$command;command=$command;args=@('--hardware-validation','system-query')}
         }
     }
     $isolated = @()
-    $legacyReadback = -not $LiveExtensions -or @(@('ExpectedRiseSlew','ExpectedFallSlew','ExpectedVonThreshold','ExpectedVonLatch',
+    $legacyReadback = @(@('ExpectedRiseSlew','ExpectedFallSlew','ExpectedVonThreshold','ExpectedVonLatch',
         'ExpectedShort','ExpectedAverageCount') | Where-Object { $PSBoundParameters.ContainsKey($_) }).Count -gt 0
     if ($readbackSelected -and $legacyReadback) {
         $baselineParameters = @{
@@ -2123,62 +2064,60 @@ try {
             $isolated += $step
         }
     }
-    if ($LiveExtensions) {
-        if ($workflowSelected) {
-            $scope = @('--hardware-validation','workflow')
-            $planned += @(
-                @{name='workflow-measure-log';command='measure-log';args=$scope + @('--interval-s','0.1','--count','2');
-                  expected=@{stop_reason='completed';sample_count=2;input_state='OFF'};execution='live'},
-                @{name='workflow-measure-until';command='measure-until';args=$scope + @('--interval-s','0.1',
-                  '--metric','voltage','--operator','ge','--threshold','1','--timeout-s','2');
-                  expected=@{stop_reason='condition_met';input_state='OFF'};execution='live';
-                  condition='Observed voltage at least 1 V with Input OFF'}
-            )
-            $ccArgs = $scope + @('--current','0.1','--range','low','--confirm')
-            $planned += @(
-                @{name='workflow-cc-timed-load';command='cc-timed-load';args=$ccArgs + @('--duration-s','5');
-                  execution='live';workflow_load=$true;expected=@{stop_reason='duration_elapsed';input_state='OFF'};
-                  condition='5 V / 0.8 A source, Fixed CC Low, 5 s at 0.1 A with bounded current/Input sampling before scheduled OFF; at most 1 s sample uncertainty; independent cutoff within 10 s of SCPI Input ON including OFF confirmation'},
-                @{name='workflow-cc-discharge';command='cc-discharge';args=$ccArgs + @('--interval-s','0.5',
-                  '--cutoff-capacity-ah','0.00010','--cutoff-voltage','4.5','--timeout-s','6');
-                  execution='live';workflow_load=$true;expected=@{stop_reason='capacity_cutoff';input_state='OFF'};
-                  condition='Controlled 5 V / 0.8 A source, 0.1 A discharge, independent cutoff within 10 s including OFF confirmation'}
-            )
-        }
-        if ('measurement-extensions' -in $selectedModes) {
-            $scope = @('--hardware-validation','measurement-extensions')
-            $planned += @(
-                @{name='measurement-extensions-min-max';command='measure-min-max';args=$scope;execution='live'},
-                @{name='measurement-extensions-discharge';command='measure-discharge';args=$scope;execution='live'},
-                @{name='measurement-extensions-average';command='set-average';args=$scope + @('--count','8','--confirm');
-                  expected=@{average_count=8};execution='live';condition='Input OFF and operator approves leaving Average at 8'}
-            )
-        }
-        if ('auxiliary-controls' -in $selectedModes) {
-            $isolated += @(foreach ($trial in @('von','short','slew')) {
-                @{name="auxiliary-controls-$trial";command='contributor-settings';
-                  args=@('--trial',$trial,'--confirm-isolated');execution='live';isolated=$true;
-                  expected=@{input_state='OFF';restored=$true};
-                  condition='Source and DUT physically disconnected, Fixed CC with Input, Short, Transient and Timer OFF; verify and restore settings.'}
-            })
-        }
-        if ('list-cc' -in $selectedModes) {
-            $isolated += @{name='list-cc-settings';command='contributor-settings';
-                args=@('--trial','list-cc','--slot',[string]$ListScratchSlot,'--confirm-isolated');
-                execution='live';isolated=$true;deadline_ms=300000;
-                expected=@{input_state='OFF';restored=$true;recall_confirmed=$true;exited_list=$true};
-                condition="Source and DUT isolated, Fixed CC with Input, Short, Transient and Timer OFF. Authorize overwriting slot $ListScratchSlot once for the isolated batch. Establish and verify B as the slot baseline, then Save A, verify Recall A and restore the original working buffer. Refuse before setting writes if verification and restoration cannot fit the remaining 300 s budget."}
-        }
-        # Isolated cases are appended after source-connected and Trigger trials.
-        # Reuse successful readback trials for identical Auxiliary cases.
-        if ($readbackSelected -and -not $legacyReadback) {
-            $reuse = @{'auxiliary-controls-von'='von-status'; 'auxiliary-controls-short'='short-status';
-                       'auxiliary-controls-slew'='fixed-slew-status'}
-            foreach ($step in $isolated) {
-                if ($reuse.ContainsKey($step.name)) {
-                    $step.reuse_from = $reuse[$step.name]
-                    $step.condition = "Reuse successful $($step.reuse_from) evidence in this isolated batch."
-                }
+    if ($workflowSelected) {
+        $scope = @('--hardware-validation','workflow')
+        $planned += @(
+            @{name='workflow-measure-log';command='measure-log';args=$scope + @('--interval-s','0.1','--count','2');
+              expected=@{stop_reason='completed';sample_count=2;input_state='OFF'};execution='live'},
+            @{name='workflow-measure-until';command='measure-until';args=$scope + @('--interval-s','0.1',
+              '--metric','voltage','--operator','ge','--threshold','1','--timeout-s','2');
+              expected=@{stop_reason='condition_met';input_state='OFF'};execution='live';
+              condition='Observed voltage at least 1 V with Input OFF'}
+        )
+        $ccArgs = $scope + @('--current','0.1','--range','low','--confirm')
+        $planned += @(
+            @{name='workflow-cc-timed-load';command='cc-timed-load';args=$ccArgs + @('--duration-s','5');
+              execution='live';workflow_load=$true;expected=@{stop_reason='duration_elapsed';input_state='OFF'};
+              condition='5 V / 0.8 A source, Fixed CC Low, 5 s at 0.1 A with bounded current/Input sampling before scheduled OFF; at most 1 s sample uncertainty; independent cutoff within 10 s of SCPI Input ON including OFF confirmation'},
+            @{name='workflow-cc-discharge';command='cc-discharge';args=$ccArgs + @('--interval-s','0.5',
+              '--cutoff-capacity-ah','0.00010','--cutoff-voltage','4.5','--timeout-s','6');
+              execution='live';workflow_load=$true;expected=@{stop_reason='capacity_cutoff';input_state='OFF'};
+              condition='Controlled 5 V / 0.8 A source, 0.1 A discharge, independent cutoff within 10 s including OFF confirmation'}
+        )
+    }
+    if ('measurement-extensions' -in $selectedModes) {
+        $scope = @('--hardware-validation','measurement-extensions')
+        $planned += @(
+            @{name='measurement-extensions-min-max';command='measure-min-max';args=$scope;execution='live'},
+            @{name='measurement-extensions-discharge';command='measure-discharge';args=$scope;execution='live'},
+            @{name='measurement-extensions-average';command='set-average';args=$scope + @('--count','8','--confirm');
+              expected=@{average_count=8};execution='live';condition='Input OFF and operator approves leaving Average at 8'}
+        )
+    }
+    if ('auxiliary-controls' -in $selectedModes) {
+        $isolated += @(foreach ($trial in @('von','short','slew')) {
+            @{name="auxiliary-controls-$trial";command='contributor-settings';
+              args=@('--trial',$trial,'--confirm-isolated');execution='live';isolated=$true;
+              expected=@{input_state='OFF';restored=$true};
+              condition='Source and DUT physically disconnected, Fixed CC with Input, Short, Transient and Timer OFF; verify and restore settings.'}
+        })
+    }
+    if ('list-cc' -in $selectedModes) {
+        $isolated += @{name='list-cc-settings';command='contributor-settings';
+            args=@('--trial','list-cc','--slot',[string]$ListScratchSlot,'--confirm-isolated');
+            execution='live';isolated=$true;deadline_ms=300000;
+            expected=@{input_state='OFF';restored=$true;recall_confirmed=$true;exited_list=$true};
+            condition="Source and DUT isolated, Fixed CC with Input, Short, Transient and Timer OFF. Authorize overwriting slot $ListScratchSlot once for the isolated batch. Establish and verify B as the slot baseline, then Save A, verify Recall A and restore the original working buffer. Refuse before setting writes if verification and restoration cannot fit the remaining 300 s budget."}
+    }
+    # Isolated cases are appended after source-connected and Trigger trials.
+    # Reuse successful readback trials for identical Auxiliary cases.
+    if ($readbackSelected -and -not $legacyReadback) {
+        $reuse = @{'auxiliary-controls-von'='von-status'; 'auxiliary-controls-short'='short-status';
+                   'auxiliary-controls-slew'='fixed-slew-status'}
+        foreach ($step in $isolated) {
+            if ($reuse.ContainsKey($step.name)) {
+                $step.reuse_from = $reuse[$step.name]
+                $step.condition = "Reuse successful $($step.reuse_from) evidence in this isolated batch."
             }
         }
     }
@@ -2434,73 +2373,14 @@ try {
     foreach ($step in ($planned | Where-Object { $_.ContainsKey('cr_handoff_after') })) {
         $step.condition = "$($step.cr_handoff_after) refused a resistance origin before remote"
     }
-    $workflowPlans = @()
-    if ($workflowSelected -and -not $LiveExtensions) {
-        $workflowPlans = @(
-            @{name='workflow-measure-log';command='measure-log';args=@('--interval-s','0.01','--count','1');
-              stop_reason='completed';sample_count=1},
-            @{name='workflow-measure-until';command='measure-until';args=@('--interval-s','0.01','--metric','voltage',
-              '--operator','ge','--threshold','1','--timeout-s','1');stop_reason='condition_met';sample_count=1},
-            @{name='workflow-cc-timed-load';command='cc-timed-load';args=@('--current','0.1','--duration-s','0.01','--confirm');
-              stop_reason='duration_elapsed';confirm_off=$true},
-            @{name='workflow-cc-discharge';command='cc-discharge';args=@('--current','0.1','--cutoff-voltage','3',
-              '--cutoff-capacity-ah','0.00000001','--interval-s','0.01','--timeout-s','2','--confirm');
-              stop_reason='capacity_cutoff';confirm_off=$true}
-        )
-    }
-    $extensionPlans = @()
-    if ('measurement-extensions' -in $selectedModes -and -not $LiveExtensions) {
-        $extensionPlans += @(
-            @{name='measurement-extensions-min-max';command='measure-min-max';args=@();execution='dry-run'},
-            @{name='measurement-extensions-discharge';command='measure-discharge';args=@();execution='dry-run'},
-            @{name='measurement-extensions-average';command='set-average';args=@('--count','8');execution='dry-run'},
-            @{name='measurement-extensions-simulation';command='pytest';execution='simulate';args=@(
-                'tests/test_readonly_cli.py::test_native_measurement_cli_selection',
-                'tests/test_readonly_cli.py::test_native_measurement_cli_invalid_metric',
-                'tests/test_readonly_core.py::test_native_measurement_failure_has_query_and_no_fallback',
-                'tests/test_control_core.py::test_average_native_write_readback_and_query_while_on',
-                'tests/test_control_core.py::test_average_requires_confirmed_off_without_writes',
-                'tests/test_control_cli.py::test_average_cli_invalid_count')}
-        )
-    }
-    if ('auxiliary-controls' -in $selectedModes -and -not $LiveExtensions) {
-        $extensionPlans += @(
-            @{name='auxiliary-controls-von';command='set-von';args=@('--voltage','10','--latch','on');execution='dry-run'},
-            @{name='auxiliary-controls-short-on';command='short-on';args=@();execution='dry-run'},
-            @{name='auxiliary-controls-short-off';command='short-off';args=@();execution='dry-run'},
-            @{name='auxiliary-controls-slew';command='set-cc';args=@('--current','1','--range','low',
-                '--rise-slew','0.1','--fall-slew','0.2');execution='dry-run'},
-            @{name='auxiliary-controls-simulation';command='pytest';execution='simulate';args=@(
-                'tests/test_control_core.py::test_von_requires_input_off_and_is_retained_across_fixed_modes',
-                'tests/test_control_core.py::test_short_fixed_modes_keep_input_and_settings_independent',
-                'tests/test_control_core.py::test_fixed_cc_slew_setup_and_preview',
-                'tests/test_control_cli.py::test_fixed_slew_von_short_cli_refusal')}
-        )
-    }
-    if ('list-cc' -in $selectedModes -and -not $LiveExtensions) {
-        $listDocument = '{"range":"auto","repeat_count":1,"steps":[{"current_a":1,"slew_a_per_us":0.1,"width_s":0.001},{"current_a":2,"slew_a_per_us":0.2,"width_s":0.002}]}'
-        $extensionPlans += @(
-            @{name='list-cc-setup';command='set-list-cc';args=@('--arguments-json',$listDocument);execution='dry-run'},
-            @{name='list-cc-save';command='list-save';args=@('--slot','1');execution='dry-run'},
-            @{name='list-cc-recall';command='list-recall';args=@('--slot','1');execution='dry-run'},
-            @{name='list-cc-exit';command='list-exit';args=@();execution='dry-run'},
-            @{name='list-cc-simulation';command='pytest';execution='simulate';args=@(
-                'tests/test_list_core.py::test_list_cycle_save_recall_overwrite_and_snapshot_isolation',
-                'tests/test_list_core.py::test_list_invalid_slots_are_rejected',
-                'tests/test_list_core.py::test_list_setup_requires_confirmed_off',
-                'tests/test_list_cli.py::test_list_inline_and_utf8_file_have_same_result',
-                'tests/test_list_cli.py::test_list_standalone_simulation_keeps_fresh_state')}
-        )
-    }
     # Capture Trigger before any legacy Transient can write HOLD.
-    $allSteps = $extensionPlans + $workflowPlans + @($planned | Select-Object -First 3) +
+    $allSteps = @($planned | Select-Object -First 3) +
         @($triggerPlans | Select-Object -First 1) +
         @($planned | Select-Object -Skip 3 -First ([Math]::Max(0, $protectionIndex - 3))) +
         $protectionPlans + @($planned | Select-Object -Skip $protectionIndex | Where-Object { -not $_.isolated }) +
         $slowRiseCleanup + @($triggerPlans | Select-Object -Skip 1) + $isolated
     $report.results = @($allSteps | ForEach-Object {
         $entry = [ordered]@{name=$_.name;command=$_.command;arguments=$_.args;status='NOT RUN'}
-        if ($_.name -like 'workflow-*') { $entry['execution'] = 'simulate' }
         if ($_.ContainsKey('execution')) { $entry['execution'] = $_.execution }
         if ($_.ContainsKey('reuse_from')) { $entry['reuse_from'] = $_.reuse_from }
         if ($_.ContainsKey('expected_error')) { $entry['expected_error'] = $_.expected_error }
@@ -2513,13 +2393,11 @@ try {
     $plannedRanges = @{}
     $offlinePlans = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
     foreach ($step in $allSteps) {
-        if ($step.command -in @('operator-observation','automatic-observation','pytest')) { continue }
+        if ($step.command -in @('operator-observation','automatic-observation')) { continue }
         $extras = @($step.args)
-        $noConnection = $step.execution -in @('dry-run','simulate') -or
-            ($step.name -like 'workflow-*' -and $step.execution -cne 'live')
-        $key = ConvertTo-Json -InputObject (@($noConnection, $step.command) + $extras) -Compress
+        $key = ConvertTo-Json -InputObject (@($step.command) + $extras) -Compress
         if (-not $offlinePlans.ContainsKey($key)) {
-            $offlinePlans[$key] = Invoke-OfflineCommand $step.command $extras -NoConnection:$noConnection
+            $offlinePlans[$key] = Invoke-OfflineCommand $step.command $extras
         }
         $plan = $offlinePlans[$key]
         if ($step.execution -ceq 'live') {
@@ -2556,14 +2434,13 @@ try {
     [void][IO.Directory]::CreateDirectory($reportDirectory)
     Write-Host "ElectronicLoad Tool - CLI Validation"
     Write-Host "Target: $Target | Connection: $Connection | Backend: $Backend | Resource: <redacted>"
-    Write-Host "Mode: $(if ($PlanOnly) { 'PLAN ONLY' } elseif ($offlineOnly) { 'SIMULATE' } else { 'LIVE' })"
+    Write-Host "Mode: $(if ($PlanOnly) { 'PLAN ONLY' } else { 'LIVE' })"
     Write-Host "Selected modes: $($selectedModes -join ', ')."
-    if (-not $offlineOnly) { Write-Host 'Plan: Identify, confirm Input OFF and measure before physical trials.' }
-    if ($workflowPlans.Count) { Write-Host 'Workflow: four simulated cases with no VISA or source access.' }
+    Write-Host 'Plan: Identify, confirm Input OFF and measure before physical trials.'
     if ($systemQuerySelected) { Write-Host 'System Query: read version, display mode and one Error Queue entry.' }
     if ($readbackSelected) {
         if ($legacyReadback) {
-            Write-Host 'Read-only diagnostics: use -LiveExtensions without Expected parameters for automatic isolated Readback.'
+            Write-Host 'Read-only diagnostics requested by Expected parameters; omit them for automatic isolated Readback.'
         } else {
             Write-Host 'Readback automatically sets known values, compares independent readbacks, and restores settings in the isolated batch.'
         }
@@ -2603,67 +2480,23 @@ try {
         Write-Host 'Transient: Continuous/Pulse/Toggle, Low/High/Auto, repeated triggers, control status and separate disable.'
         Write-Host 'Trigger/status/measure do not establish waveform shape, timing or completion.'
     }
-    if (-not $offlineOnly) {
-        Write-Host "External source (operator-managed): $SourceVoltageLimitV V / $SourceCurrentLimitA A current limit."
-        Write-Host 'The script does not configure, measure or verify the external source.'
-    }
+    Write-Host "External source (operator-managed): $SourceVoltageLimitV V / $SourceCurrentLimitA A current limit."
+    Write-Host 'The script does not configure, measure or verify the external source.'
     foreach ($step in $allSteps) {
         $condition = $(if ($step.condition) { " [if $($step.condition)]" } else { '' })
         Write-Verbose ("  {0}: {1} {2}{3}" -f $step.name, $step.command, ($step.args -join ' '), $condition)
     }
     if ('cc' -in $selectedModes) { Write-Host "CC Current=$currentText A." }
-    if (-not $offlineOnly) {
-        Write-Host "Script ceiling=$($report.script_current_ceiling_a) A; $Connection System VISA."
-        Write-Host 'No reset, automatic local switch, or implicit Input ON.'
-        Write-Host 'An Input ON attempt requires an explicit OFF cleanup; session close does not turn Input OFF.'
-        Write-Host 'V/I/P measure queries are separate; power freshness is not guaranteed.'
-    }
+    Write-Host "Script ceiling=$($report.script_current_ceiling_a) A; $Connection System VISA."
+    Write-Host 'No reset, automatic local switch, or implicit Input ON.'
+    Write-Host 'An Input ON attempt requires an explicit OFF cleanup; session close does not turn Input OFF.'
+    Write-Host 'V/I/P measure queries are separate; power freshness is not guaranteed.'
     if ($PlanOnly) {
         $report.status = 'PLAN ONLY'
         Save-Report
         Show-Summary
         Write-Host 'PLAN ONLY COMPLETE: no hardware accessed.'
         exit 0
-    }
-    foreach ($step in $extensionPlans) {
-        $phase = 'cases'
-        $entry = $report.results | Where-Object { $_.name -ceq $step.name }
-        $entry.status = 'FAIL'
-        if ($step.command -ceq 'pytest') { Invoke-OfflineTests $step $entry }
-        else { $entry.status = 'PASS' }
-    }
-    $phase = 'plan'
-    if ($offlineOnly -or (-not [Console]::IsInputRedirected -and [Environment]::UserInteractive)) {
-        foreach ($step in $workflowPlans) {
-            $phase = 'cases'
-            $entry = $report.results | Where-Object { $_.name -ceq $step.name }
-            try {
-                $result = Invoke-OfflineCommand $step.command $step.args -NoConnection -Simulate
-                if ($result.result.stop_reason -cne $step.stop_reason -or
-                    ($step.ContainsKey('sample_count') -and $result.result.sample_count -ne $step.sample_count) -or
-                    ($step.confirm_off -and ($result.result.input_state -cne 'OFF' -or
-                                            -not $result.result.cleanup.off_confirmed))) {
-                    Fail-Case $step.name 'workflow_result_mismatch' 'Simulation did not match the expected completion.'
-                }
-                $entry['response'] = $result
-                $entry.status = 'PASS'
-            } catch {
-                $entry.status = 'FAIL'
-                throw
-            }
-        }
-        if ($offlineOnly) {
-            $report.status = 'PASS'
-            Save-Report
-            Show-Summary
-            if ($workflowSelected -and -not $extensionPlans.Count) {
-                Write-Host 'PASS: Workflow offline validation.'
-            } else {
-                Write-Host 'PASS: selected offline validation.'
-            }
-            exit 0
-        }
-        $phase = 'plan'
     }
     if ($timerSelected -and [int]$TimerSeconds -ne 5) {
         $report.status = 'BLOCKED'
@@ -2679,33 +2512,12 @@ try {
         Write-Host 'BLOCKED: controlled LIVE validation requires an interactive console.'
         exit 2
     }
-    $preflightScript = Join-Path $PSScriptRoot 'preflight-cli.ps1'
-    $preflightModes = [ordered]@{
-        'input-timer'='InputTimerOnly'; trace='TraceOnly'; trigger='TriggerOnly';
-        protection='ProtectionOnly'; 'system-query'='SystemQueryOnly'; readback='ReadbackOnly';
-        sequence='SequenceOnly'; 'cr-led'='CrLedSlowRiseOnly'; 'current-slow-rise'='CrLedSlowRiseOnly'
-    }
-    $preflightChecks = @(foreach ($mode in $selectedModes) {
-        if ($preflightModes.Contains($mode)) { $preflightModes[$mode] }
-    })
-    if (@($selectedModes | Where-Object { $_ -in @('cc','cv','cr','cw') -or $_ -like 'transient-*' }).Count) {
-        & $preflightScript -BaseOnly
-        if ($LASTEXITCODE -ne 0) { throw 'Base preflight failed.' }
-    }
-    foreach ($check in ($preflightChecks | Select-Object -Unique)) {
-        $selection = @{ $check = $true }
-        & $preflightScript @selection
-        if ($LASTEXITCODE -ne 0) {
-            $report.prechecks.preflight = 'FAIL'
-            throw "$check preflight failed."
-        }
-    }
-    $report.prechecks.preflight = 'PASS'
+    Invoke-SelectedPreflight -Modes $selectedModes -PreflightScript (Join-Path $PSScriptRoot 'preflight-cli.ps1')
     Write-Host "Operator resource check (LIVE): Target: $Target; Resource: $Resource; Backend: $Backend"
     Write-Host 'Physical checks before pressing Enter:'
     $connectedModes = @('cc','cv','cr','cw','transient-cc','transient-cv','transient-cr','transient-cw',
         'trace','trigger','input-timer','protection','sequence')
-    $connectedTrials = $workflowLoadSelected -or @($selectedModes | Where-Object { $_ -in $connectedModes }).Count -gt 0
+    $connectedTrials = $workflowSelected -or @($selectedModes | Where-Object { $_ -in $connectedModes }).Count -gt 0
     if ($connectedTrials -or -not $isolated.Count) {
         Write-Host "- Confirm the external source is manually set to $SourceVoltageLimitV V with a $SourceCurrentLimitA A current limit."
     }
@@ -2717,15 +2529,15 @@ try {
     if ($protectionSelected) {
         Write-Host '- Confirm Timer, Short, Slow Rise and Transient OFF for Protection. The script can prepare Fixed CC from Fixed CV or CW while Input is OFF.'
     }
-    if ($LiveExtensions -and 'measurement-extensions' -in $selectedModes) {
+    if ('measurement-extensions' -in $selectedModes) {
         Write-Host '- Confirm the Average count may be set to 8 and left at that setting.'
     }
     if ($triggerSelected) {
         Write-Host '- Confirm external On/Off and analog programming are disabled and external trigger wiring was reviewed while de-energized.'
-    } elseif ($workflowLoadSelected -or @($planned | Where-Object isolated).Count) {
+    } elseif ($workflowSelected -or @($planned | Where-Object isolated).Count) {
         Write-Host '- Confirm external On/Off and analog programming are disabled.'
     }
-    if ($workflowLoadSelected -or @($selectedModes | Where-Object { $_ -notin (@('readback','system-query','workflow') + $offlineModes + $featureModes) }).Count) {
+    if ($workflowSelected -or @($selectedModes | Where-Object { $_ -notin (@('readback','system-query','workflow') + $extensionModes + $featureModes) }).Count) {
         Write-Host '- Selected trials may deliberately turn Input ON; the script explicitly commands and verifies OFF, but cannot guarantee OFF after communication failures.'
     }
     $ack = if ($protectionSelected) {
@@ -3006,7 +2818,7 @@ try {
     if ($report.status -eq 'OBSERVED ONLY') {
         Write-Host 'Readback complete. Only comparisons with supplied expected values were verified.'
     } else {
-        Write-Host 'PASS: applicable CLI LIVE cases and selected offline cases.'
+        Write-Host 'PASS: applicable CLI LIVE cases.'
     }
     exit 0
 } catch {

@@ -40,8 +40,9 @@ Windows PowerShell 5.1 boundary; Trigger also retains the existing pwsh check.
 A missing required PowerShell executable fails CI.
 Keep the default preflight's included checks and distinct focused-switch
 entry points; overlapping CLI work alone does not make the entry points
-equivalent. Retain default Full USB/ASRL plan equivalence and both full
-LiveExtensions transport plans with real offline CLI processes. For a focused
+equivalent. Retain default and explicit Full USB/ASRL plan equivalence with
+real offline CLI processes. Exercise the actual hardware validation script
+with Windows PowerShell 5.1 as well as PowerShell 7. For a focused
 mode whose noninteractive refusal follows successful planning, verify the
 complete plan, NOT RUN cases, privacy and refusal in the same invocation rather
 than repeat the plan just to obtain PLAN ONLY. Keep representative successful
@@ -52,9 +53,11 @@ boundary changes; it does not require separate PlanOnly and refusal invocations
 in routine CI if the same complete plan is verified before refusal. Keep the
 legacy InputTimerOnly success and refusal entry points, and the non-5-second
 Timer preview and refusal, distinct.
-Check Workflow's standalone PlanOnly without a resource and all optional-resource
-simulation variants; both use the common offline plan. Python Core/CLI/Worker
-tests own command, sequencing and failure behavior; CI does not duplicate these
+Check Workflow's standalone PlanOnly and noninteractive refusal with explicit
+resources and reject missing resources. Separate preflight checks report
+`PASS` only when all applicable checks ran successfully, `FAIL` on failure,
+and `NOT RUN` when none ran. Python Core/CLI/Worker tests own command,
+sequencing and failure behavior; CI does not duplicate these
 as Linux pseudo-terminal operator simulations. Unrelated changes skip the
 PowerShell checks; packaging changes retain the wheel/sdist installation smoke.
 Skipping a CI job does not imply real-instrument validation. Run focused tests from the repository root.
@@ -108,9 +111,9 @@ for the complete matrix. Use `-Modes` to focus checks on affected behavior.
 Hardware modes retain the common read-only safety prechecks and any explicit
 Input ON/OFF flow. Test `-PlanOnly` and unattended LIVE refusal with a fictional
 resource matching the selected connection. Verify noninteractive hardware
-requests are refused before opening VISA or sending SCPI. Workflow cases run
-offline in dry-run and simulation, including when a valid connection is
-supplied to a Workflow-only invocation. The script supplies the CLI's per-command
+requests are refused before opening VISA or sending SCPI. All selected modes
+require an explicit resource, including PlanOnly, and never substitute
+simulation or pytest for a hardware case. The script supplies the CLI's per-command
 `input-on --confirm` during approved interactive execution. CC defaults to 0.1 A, with a 2 A script-only hard ceiling and a
 default operator-declared source limit of 0.8 A at 5 V.
 Verify redacted shareable case totals and normal mode's lack of private raw
@@ -470,7 +473,10 @@ mismatches for LIST and Transient write verification.
 Select existing help/version tests when changing CLI arguments. Exercise
 `-Modes readback -PlanOnly` and noninteractive refusal, and the directly
 affected Fixed, Transient, TRACE and Trigger script plans. Verify that the
-automatic readback plan requires -LiveExtensions, exercises known settings and verifies restoration including a supported enabled Transient baseline; without the flag and with explicit legacy diagnostics, distinguish a missing comparison baseline. Use a fictional USB Resource and block VISA in child processes.
+automatic readback plan is the default without Expected parameters, exercises
+known settings and verifies restoration including a supported enabled
+Transient baseline; with explicit legacy diagnostics, distinguish a missing
+comparison baseline. Use a fictional USB Resource and block VISA in child processes.
 Real-instrument validation requires the separate interactive approval and
 reports physical cases as `NOT RUN` in PlanOnly.
 
@@ -560,10 +566,10 @@ authorized [ASRL procedure](cli/README.md#physical-validation-procedure).
 Select the affected PowerShell cases in `tests/test_live_validation_script.py`.
 Use fictional resources with VISA blocked to verify the extension modes alone,
 duplicate selections, mixed noninteractive refusal and Full PlanOnly for USB
-and ASRL. The extension modes run focused Core and CLI tests for native
-measurements and Average, VON/Short/CC Slew, or LIST CC setup/Save/Recall/Exit.
-Check `-LiveExtensions` for explicit single, mixed and Full selection and
-verify that it never falls back to the offline cases. Exercise the contributor
+and ASRL. Verify that each selected mode plans its hardware cases without
+an extra activation switch, refuses missing resources and unattended
+execution, and never substitutes dry-run, simulation or pytest results for
+hardware evidence. Exercise the contributor
 read-only sampling and measurements and the Input OFF guards for Workflow and
 Average with recording Fake VISA. For the CC trials, verify the write-start
 clock, capacity/voltage outcomes, confirmed OFF within the 10-second limit,
@@ -593,24 +599,6 @@ deadline and that the script opens no new VISA session during cleanup.
 Select affected Fake VISA cases in `tests/test_input_timer.py`. Physical expiry
 remains a separately authorized check with an independent hardware cutoff.
 
-離線檢查使用虛構 Resource 並阻擋實體 VISA。以 Fake VISA 驗證 Workflow
-和 Average 的 Input OFF 前置。CC 案例核對 SCPI 寫入起點、容量及電壓截止、
-10 秒內確認 OFF、Stop 的清理及通訊失信時的獨立停損提示。Timed Load 模擬
-觀察到的提前掉載、取樣涵蓋不足及有界未取樣區間，納入實際查詢延遲及整數奈秒排程；維持第 5 秒 OFF，不在期限後增加查詢。功能驗收限於核准的 1 秒解析度，不宣稱連續帶載校正。隔離設定核對無法還原原值
-時拒絕寫入、寫入前顯示私有復原基準，以及通訊失信後停止寫入。Short 不開啟
-Input。LIST 核對從不同工作值 Recall B 建立基準，再 Save A 並從 B 召回 A；
-不需人工提供舊寬度，涵蓋 Save 或 Recall 未生效。
-PlanOnly 核對安全查詢及條件式清理。混選先執行需接電源的試驗及 Trigger，
-再進入一次隔離及槽位授權批次；以 Fake VISA 驗證 Readback 自動設定與還原，
-獨立設定保留原 Fixed CC／Transient OFF 守衛，只有 Scratch Slot 適用 300 秒例外。
-兩種 LIST 試驗核對長緩衝及剩餘時間不足時在設定寫入前拒絕，以及納入查詢延遲的
-短緩衝正常還原。前置試驗留下非 CC Fixed 功能的混選計畫須在獨立設定前安排隔離交接，
-維持原互鎖且不改設定值。Timer 核對單一唯讀 Session 持續查詢並納入模擬查詢延遲，使用可控制的
-時鐘驗證明確過早 OFF、首次 OFF 區間超過 1 秒不得通過，以及在核准 1 秒觀察區間內不可區分的正常與提前事件依相同證據驗收，清理後才自動確認。以 Fake VISA 模擬延遲的
-ON 回覆，驗證 ON 子程序尚在執行時已受 SCPI 寫入起點的期限約束。用收到
-終止要求後仍在執行的程序替身，確認提示在觀察期限到達時發出，且清理時
-未另開 VISA Session。實機到期驗證仍需另行授權及獨立的硬體停損。
-
 For automatic Contributor Trigger observation, exercise the affected
 `test_trigger.py` waveform cases and `test_live_validation_script.py` plan,
 refusal, deadline and cleanup cases. Check level order, timing brackets,
@@ -618,7 +606,3 @@ missing or sparse samples, finite LIST RUN completion versus a stuck final
 dwell, rejection of infeasible timing before VISA, and source-specific dispatch with a final Input ON guard (no extra software trigger for TIMER or EXTERNAL). Only EXTERNAL retains physical signal
 preparation; sampled instrument evidence is not independent calibration.
 
-Contributor Trigger 自動驗收僅測試直接受影響的取樣、電平順序、時間區間、
-資料不足、有限 LIST RUN 完結與卡在末段的區別、不可取樣時的 PlanOnly 拒絕、
-觸發派送前最後 Input ON 互鎖及清理。TIMER／EXTERNAL 不額外
-送出軟體觸發，僅 EXTERNAL 保留實體訊號準備；取樣不等於獨立波形校正。
