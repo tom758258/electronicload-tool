@@ -20,19 +20,44 @@ do not duplicate those checks in a second permanent test suite.
 ## CI test boundaries
 
 CI uses the same Linux/Windows Python-version names as the other Tool projects.
-The fast no-hardware matrix runs Core, CLI, Worker and Fake VISA contracts on
-Linux Python 3.10–3.13 and Windows Python 3.10, 3.12 and 3.13. It excludes
-`tests/test_live_validation_script.py`, which exercises real PowerShell
-processes and is not part of routine Python-version compatibility testing.
+Linux Python 3.13 runs the complete no-hardware Core, CLI, Worker and Fake VISA
+suite, excluding the PowerShell script tests. Linux Python 3.10–3.12 and
+Windows Python 3.10, 3.12 and 3.13 run the same selected compatibility and
+critical safety contracts, including Windows-relevant subprocess, HTTP/JSONL,
+UTF-8 input, file and CSV behavior. The workflow lists existing files or pytest
+node IDs explicitly; the complete suite retains all other cases.
 
-Changes to validation scripts, their direct CLI/Core boundaries or their
-script tests run the PowerShell PlanOnly, refusal and report contracts once on
-Windows Python 3.13. Windows offline preflight runs separately on the same
-affected boundary. Python Core/CLI/Worker tests own command, sequencing and
-failure behavior; CI does not duplicate these as Linux pseudo-terminal operator
-simulations. Unrelated changes skip the PowerShell checks; packaging changes
-retain the wheel/sdist installation smoke. Skipping a CI job does not imply
-real-instrument validation. Run focused tests from the repository root.
+Changes to validation scripts, their direct CLI/Core command dependencies,
+the shared test fixture or the tests invoked by the script run the PowerShell
+contracts on Windows Python 3.13. The validation filter lists these dependencies
+explicitly, including the module owning the manifest command; unrelated Worker
+client changes do not trigger PowerShell validation.
+The existing two Windows jobs partition `test_live_validation_script.py` using
+`-k preflight` and `-k "not preflight"`. Preflight-only test names include
+`preflight`; plan, refusal, report and safety harness tests do not. Both groups
+use the child-process VISA blocker. Default and Trigger preflight retain the
+Windows PowerShell 5.1 boundary; Trigger also retains the existing pwsh check.
+A missing required PowerShell executable fails CI.
+Keep the default preflight's included checks and distinct focused-switch
+entry points; overlapping CLI work alone does not make the entry points
+equivalent. Retain default Full USB/ASRL plan equivalence and both full
+LiveExtensions transport plans with real offline CLI processes. For a focused
+mode whose noninteractive refusal follows successful planning, verify the
+complete plan, NOT RUN cases, privacy and refusal in the same invocation rather
+than repeat the plan just to obtain PLAN ONLY. Keep representative successful
+PlanOnly entry points, single and mixed selection, native mode arrays, explicit
+settings, transport options, and distinct safety, simulation and error paths.
+The focused feature guidance below describes the contracts to verify when that
+boundary changes; it does not require separate PlanOnly and refusal invocations
+in routine CI if the same complete plan is verified before refusal. Keep the
+legacy InputTimerOnly success and refusal entry points, and the non-5-second
+Timer preview and refusal, distinct.
+Check Workflow's standalone PlanOnly without a resource and all optional-resource
+simulation variants; both use the common offline plan. Python Core/CLI/Worker
+tests own command, sequencing and failure behavior; CI does not duplicate these
+as Linux pseudo-terminal operator simulations. Unrelated changes skip the
+PowerShell checks; packaging changes retain the wheel/sdist installation smoke.
+Skipping a CI job does not imply real-instrument validation. Run focused tests from the repository root.
 No CI job is authorized to access physical VISA.
 
 ## Local checks
@@ -410,10 +435,12 @@ Run `tests/test_protection.py`, Protection cases in `tests/test_worker.py`
 and `tests/test_live_validation_script.py`, and the affected help/version
 checks. Run Ruff on modified Python files. Recording Fake VISA covers the
 Input OFF guards, identity, exact readback, partial or uncertain writes and
-Clear's one bounded OFF attempt. The PowerShell tests exercise
-`preflight-cli.ps1 -ProtectionOnly` and `live-cli-check.ps1 -Modes protection`
-in PlanOnly and noninteractive mode, with a fictional Resource and a VISA
-blocker. The shareable report leaves physical cases `NOT RUN`.
+Clear's one bounded OFF attempt. The routine PowerShell tests exercise
+`preflight-cli.ps1 -ProtectionOnly` and the complete plan in the noninteractive
+refusal report for `live-cli-check.ps1 -Modes protection`, with a fictional
+Resource and a VISA blocker. When changing the PlanOnly exit itself, also
+verify the focused successful PlanOnly entry point. The shareable report
+leaves physical cases `NOT RUN`.
 
 For Fixed CC preparation, also check a Fixed CW starting state and verify
 that Input ON, an unsupported mode or a readback mismatch stops the trial
@@ -488,10 +515,11 @@ restrictions. Use recording Fake VISA for the CLI-only validation scope,
 single-session Fixed setup and readback, Stop cleanup, uncertain replies, and
 refusal before VISA in ordinary CLI/Worker LIVE.
 
-Use `scripts/preflight-cli.ps1 -SequenceOnly`, and exercise
-`live-cli-check.ps1 -Modes sequence` with `-PlanOnly` and unattended refusal
-using a fictional resource and blocked VISA. Verify the four fixed plans,
-deadline and report redaction. Run existing help/version, Input/Fixed, and
+Use `scripts/preflight-cli.ps1 -SequenceOnly` and the complete plan in the
+unattended refusal report for `live-cli-check.ps1 -Modes sequence` using a
+fictional resource and blocked VISA. Exercise the focused `-PlanOnly` success
+entry point when changing that exit. Verify the four fixed plans, deadline
+and report redaction. Run existing help/version, Input/Fixed, and
 read-only checks affected by shared execution paths and Ruff on changed
 Python files. Hardware validation requires separate authorization and the
 operator procedure in the [CLI guide](cli/README.md#contributor-software-sequence-validation).
