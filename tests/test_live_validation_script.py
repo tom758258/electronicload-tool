@@ -615,15 +615,19 @@ def test_input_timer_offline_preflight(run_script):
     assert 'PASS: Input Timer preflight' in result.stdout
 
 
-def test_input_timer_script_plan_and_live_refusal(run_script):
-    result = run_script(['-InputTimerOnly'])
-    assert result.returncode == 2, result.stdout + result.stderr
-    assert 'requires an interactive console' in result.stdout
+@pytest.mark.parametrize('planned', [True, False])
+def test_input_timer_script_plan_and_live_refusal(run_script, planned):
+    result = run_script(['-InputTimerOnly', *(['-PlanOnly'] if planned else [])])
+    assert result.returncode == (0 if planned else 2), result.stdout + result.stderr
+    if not planned:
+        assert 'requires an interactive console' in result.stdout
     paths = re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)
     assert paths
     text = Path(paths[-1]).read_text(encoding='utf-8-sig')
     report = json.loads(text)
-    assert report['overall_status'] == 'BLOCKED' and report['prechecks']['plan'] == 'PASS'
+    assert report['overall_status'] == ('PLAN ONLY' if planned else 'BLOCKED')
+    assert report['prechecks']['plan'] == 'PASS'
+    assert report['modes'] == ['input-timer']
     assert report['hardware_touched'] is False
     assert report['summary_counts']['passed'] == report['summary_counts']['failed'] == 0
     assert all(c['status'] == 'NOT RUN' for c in report['cases'])
@@ -638,6 +642,8 @@ def test_input_timer_script_plan_and_live_refusal(run_script):
     assert report['declared_source_limits']['current_a'] == 0.8
     assert report['declared_source_limits']['voltage_v'] == 5
     cases = {case['name']: case for case in report['cases']}
+    args = cases['timer-setup']['arguments']
+    assert args[args.index('--seconds') + 1] == '5'
     assert '10 s cutoff' in cases['timer-on']['condition']
     assert 'SCPI ON write start' in cases['timer-expiry']['condition']
 
@@ -673,6 +679,13 @@ def test_input_timer_is_also_selectable_with_modes(run_script):
     refused = run_script(['-Modes', 'input-timer', '-TimerSeconds', '3'])
     assert refused.returncode == 2, refused.stdout + refused.stderr
     assert 'cutoff applies only to the 5 s Timer trial' in refused.stdout
+    refused_path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', refused.stdout)[-1])
+    refused_report = json.loads(refused_path.read_text(encoding='utf-8-sig'))
+    assert refused_report['overall_status'] == 'BLOCKED'
+    assert refused_report['prechecks']['plan'] == 'PASS'
+    assert refused_report['modes'] == ['input-timer']
+    assert refused_report['hardware_touched'] is False
+    assert all(case['status'] == 'NOT RUN' for case in refused_report['cases'])
 
 
 @pytest.mark.parametrize('scenario,launches,status,code', [
@@ -1341,6 +1354,10 @@ def test_configuration_readback_script_plan_and_noninteractive_refusal(run_scrip
     assert not auto_report['hardware_touched']
     assert auto_report['per_command_deadline_ms'] == 30000
     assert all(case.get('deadline_ms', 30000) == 30000 for case in auto_report['cases'])
+    for case in auto_report['cases'][3:]:
+        assert {'INP ON', '*TRG'}.isdisjoint(case['planned_writes'])
+        assert all({'INP ON', '*TRG'}.isdisjoint(branch['writes'])
+                   for branch in case.get('conditional_writes', []))
     for options, status in [(['-PlanOnly', *baseline], 'PLAN ONLY'),
                             (['-ExpectedRiseSlew', '0.1'], 'BLOCKED')]:
         result = run_script(['-Modes', 'readback', *options])
@@ -1527,7 +1544,9 @@ def test_explicit_live_extensions_never_use_simulation(run_script, mode, connect
         assert {write.split()[0] for write in restoration} == {
             'LIST:RANG', 'LIST:COUN', 'LIST:STEP', 'LIST:LEV', 'LIST:SLEW', 'LIST:WID',
         }
-        assert not {'INP ON', '*TRG'}.intersection(trial['planned_writes'], restoration)
+        assert {'INP ON', '*TRG'}.isdisjoint(trial['planned_writes'])
+        assert all({'INP ON', '*TRG'}.isdisjoint(branch['writes'])
+                   for branch in trial['conditional_writes'])
         assert 'error_code' not in trial
         if mode == 'full':
             assert list(cases).index('trigger-restore') < list(cases).index('list-cc-settings')
