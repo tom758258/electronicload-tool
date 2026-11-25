@@ -13,6 +13,12 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 RESOURCE = 'USB0::0xFFFF::0x0001::SYNTHETIC::INSTR'
 ASRL = 'ASRL999::INSTR'
+FULL_MODES = [
+    'cc', 'cv', 'cr', 'cw', 'transient-cc', 'transient-cv', 'transient-cr', 'transient-cw',
+    'trace', 'cr-led', 'current-slow-rise', 'trigger', 'input-timer', 'protection',
+    'system-query', 'readback', 'sequence', 'workflow', 'measurement-extensions',
+    'auxiliary-controls', 'list-cc',
+]
 
 
 @pytest.fixture
@@ -218,11 +224,13 @@ def test_default_offline_preflight(run_script):
 def test_fixed_auto_offline_preflight(run_script):
     result = run_script(['-FixedAutoOnly'], preflight=True)
     assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.rstrip().endswith('PASS: Fixed Auto required Range, manual High, LIVE refusal and Manifest')
 
 
 def test_protection_offline_preflight(run_script):
     preflight = run_script(['-ProtectionOnly'], preflight=True)
-    assert preflight.returncode == 0 and 'PASS: Protection preflight' in preflight.stdout
+    assert preflight.returncode == 0, preflight.stdout + preflight.stderr
+    assert preflight.stdout.rstrip().endswith('PASS: Protection preflight')
 
 
 def test_protection_explicit_mode_report_without_visa(run_script):
@@ -400,7 +408,7 @@ $defaults = $script:report.results | Where-Object { $_.name -like 'protection-de
 def test_cr_led_slow_rise_offline_preflight(run_script):
     result = run_script(['-CrLedSlowRiseOnly'], preflight=True)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert 'PASS: CR-LED and Current Slow Rise preflight' in result.stdout
+    assert result.stdout.rstrip().endswith('PASS: CR-LED and Current Slow Rise preflight')
 
 
 @pytest.mark.parametrize('modes', [('cr-led',), ('current-slow-rise',), ('cr-led', 'current-slow-rise')])
@@ -414,7 +422,7 @@ def test_cr_led_slow_rise_script_plans_and_refuses_unattended(run_script, modes)
 def test_fixed_slew_von_short_offline_preflight(run_script):
     result = run_script(['-FixedSlewVonShortOnly'], preflight=True)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert 'PASS: Fixed CC Slew, VON and Short preflight' in result.stdout
+    assert result.stdout.rstrip().endswith('PASS: Fixed CC Slew, VON and Short preflight')
 
 
 @pytest.mark.parametrize('current', ['0', '3', '0.1000000000000000001'])
@@ -501,10 +509,7 @@ def test_default_usb_and_explicit_asrl_full_plan_share_the_matrix(run_script):
                     arguments[index + 1] = json.loads(arguments[index + 1])
         reports.append(report)
 
-    expected = ['cc', 'cv', 'cr', 'cw', 'transient-cc', 'transient-cv', 'transient-cr',
-                'transient-cw', 'trace', 'cr-led', 'current-slow-rise', 'trigger', 'input-timer',
-                'protection', 'system-query', 'readback', 'sequence', 'workflow',
-                'measurement-extensions', 'auxiliary-controls', 'list-cc']
+    expected = FULL_MODES
     assert reports[0]['modes'] == reports[1]['modes'] == expected
     cases = reports[0]['cases']
     assert cases == reports[1]['cases']
@@ -593,6 +598,8 @@ def test_hardware_script_current_respects_source_limit(run_script, selection, ex
 def test_transient_offline_preflight(run_script):
     result = run_script(['-TransientOnly'], preflight=True)
     assert result.returncode == 0, result.stdout + result.stderr
+    assert 'PASS: Software Sequence offline preflight' not in result.stdout
+    assert 'PASS: identify simulate JSON' not in result.stdout
     for mode in ('cv', 'cr', 'cw'):
         assert f'PASS: set-transient-{mode}' in result.stdout
 
@@ -612,7 +619,7 @@ def test_new_transient_script_refuses_invalid_setup(run_script, scope, args):
 def test_input_timer_offline_preflight(run_script):
     result = run_script(['-InputTimerOnly'], preflight=True)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert 'PASS: Input Timer preflight' in result.stdout
+    assert result.stdout.rstrip().endswith('PASS: Input Timer preflight')
 
 
 @pytest.mark.parametrize('planned', [True, False])
@@ -1227,7 +1234,7 @@ Save-Report
 def test_trace_validation_preflight_only(run_script):
     checked = run_script(['-TraceOnly'], preflight=True)
     assert checked.returncode == 0, checked.stdout + checked.stderr
-    assert 'PASS: TRACE-only offline preflight' in checked.stdout
+    assert checked.stdout.rstrip().endswith('PASS: TRACE-only offline preflight; no VISA opened.')
 
 
 def test_trace_validation_script_plan_only_and_noninteractive_refusal(run_script):
@@ -1324,12 +1331,13 @@ def test_trigger_validation_script_plan_and_noninteractive_refusal(run_script):
 def test_trigger_offline_preflight(run_script, windows_powershell):
     preflight = run_script(['-TriggerOnly'], preflight=True, windows_powershell=windows_powershell)
     assert preflight.returncode == 0, preflight.stdout + preflight.stderr
+    assert preflight.stdout.rstrip().endswith('PASS: Trigger Setup preflight')
 
 
 def test_readback_offline_preflight(run_script):
     preflight = run_script(['-ReadbackOnly'], preflight=True)
     assert preflight.returncode == 0, preflight.stdout + preflight.stderr
-    assert 'PASS: Readback preflight' in preflight.stdout
+    assert preflight.stdout.rstrip().endswith('PASS: Readback preflight')
 
 
 def test_configuration_readback_script_plan_and_noninteractive_refusal(run_script):
@@ -1346,7 +1354,11 @@ def test_configuration_readback_script_plan_and_noninteractive_refusal(run_scrip
     auto = run_script(['-Modes', 'readback', '-LiveExtensions', '-PlanOnly'])
     assert auto.returncode == 0, auto.stdout + auto.stderr
     auto_path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', auto.stdout)[-1])
-    auto_report = json.loads(auto_path.read_text(encoding='utf-8-sig'))
+    auto_text = auto_path.read_text(encoding='utf-8-sig')
+    auto_report = json.loads(auto_text)
+    assert auto_report['overall_status'] == 'PLAN ONLY'
+    assert auto_report['prechecks']['plan'] == 'PASS' and auto_report['modes'] == ['readback']
+    assert RESOURCE not in auto_text and not (auto_path.parents[1] / 'private').exists()
     assert [case['name'] for case in auto_report['cases']] == expected
     assert all(case['command'] == 'contributor-settings' and '--confirm-isolated' in case['arguments']
                and '--readback-trial' in case['arguments'] for case in auto_report['cases'][3:])
@@ -1411,6 +1423,7 @@ def test_sequence_plan_or_noninteractive_refusal(run_script):
 def test_sequence_focused_preflight(run_script):
     checked = run_script(["-SequenceOnly"], preflight=True)
     assert checked.returncode == 0, checked.stdout + checked.stderr
+    assert checked.stdout.rstrip().endswith('PASS: Software Sequence offline preflight')
 
 
 @pytest.mark.parametrize('plan_only,serial', [
@@ -1451,6 +1464,7 @@ def test_asrl_mixed_mode_plan_and_noninteractive_refusal(run_script, plan_only, 
 def test_system_query_offline_preflight(run_script):
     preflight = run_script(['-SystemQueryOnly'], preflight=True)
     assert preflight.returncode == 0, preflight.stdout + preflight.stderr
+    assert preflight.stdout.rstrip().endswith('PASS: System Query and ASRL offline preflight')
 
 
 def test_system_query_focused_plan(run_script):
@@ -1512,24 +1526,52 @@ def test_explicit_live_extensions_never_use_simulation(run_script, mode, connect
     result = run_script([*flags, *(['-PlanOnly'] if plan_only else [])], resource=resource)
     assert result.returncode == (0 if plan_only else 2), result.stdout + result.stderr
     path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)[-1])
-    report = json.loads(path.read_text(encoding='utf-8-sig'))
+    report_text = path.read_text(encoding='utf-8-sig')
+    report = json.loads(report_text)
+    summary = path.with_name('summary.md').read_text(encoding='utf-8-sig')
+    assert resource not in report_text + summary + result.stdout and str(ROOT) not in report_text
+    assert not (path.parents[1] / 'private').exists()
     assert report['overall_status'] == ('PLAN ONLY' if plan_only else 'BLOCKED')
     assert not report['hardware_touched'] and report['resource'] == '<redacted>'
     assert report['prechecks']['plan'] == 'PASS'
     assert report['connection'] == connection
     cases = {case['name']: case for case in report['cases']}
-    if mode == 'full':
-        assert len(report['modes']) == 21
-    else:
-        assert set(report['modes']) == set(mode.split(','))
+    selected = FULL_MODES if mode == 'full' else [name for name in FULL_MODES if name in mode.split(',')]
+    assert report['modes'] == selected
+    assert len(cases) == len(report['cases'])
+    assert report['summary_counts'] == {
+        'total': len(cases), 'passed': 0, 'failed': 0, 'skipped': 0, 'not_run': len(cases),
+    }
+    expected_extensions = {
+        'workflow': ('workflow-measure-log', 'workflow-measure-until',
+                     'workflow-cc-timed-load', 'workflow-cc-discharge'),
+        'measurement-extensions': ('measurement-extensions-min-max', 'measurement-extensions-discharge',
+                                   'measurement-extensions-average'),
+        'auxiliary-controls': ('auxiliary-controls-von', 'auxiliary-controls-short', 'auxiliary-controls-slew'),
+        'list-cc': ('list-cc-settings',),
+        'readback': ('fixed-status-cc', 'fixed-status-cv', 'fixed-status-cr', 'fixed-status-cw',
+                     'transient-status', 'list-status', 'fixed-slew-status', 'von-status',
+                     'short-status', 'average-status'),
+    }
+    for feature, names in expected_extensions.items():
+        if feature in selected:
+            assert all(cases[name]['execution'] == 'live' for name in names)
+    for feature in ('readback', 'auxiliary-controls', 'list-cc'):
+        if feature in selected:
+            for name in expected_extensions[feature]:
+                case = cases[name]
+                assert case['command'] == 'contributor-settings'
+                assert {'INP ON', '*TRG'}.isdisjoint(case['planned_writes'])
+                assert all({'INP ON', '*TRG'}.isdisjoint(branch['writes'])
+                           for branch in case.get('conditional_writes', []))
     if not plan_only:
         assert 'requires an interactive console' in result.stdout
     assert all(case['status'] == 'NOT RUN' for case in cases.values())
     assert all(case.get('execution') in (None, 'live') for case in cases.values())
-    if mode == 'full' or 'measurement-extensions' in mode.split(','):
+    if 'measurement-extensions' in selected:
         assert 'MEAS:VOLT:MIN?' in cases['measurement-extensions-min-max']['queries']
         assert 'SENS:AVER:COUN 8' in cases['measurement-extensions-average']['planned_writes']
-    if 'list-cc-settings' in cases:
+    if 'list-cc' in selected:
         trial = cases['list-cc-settings']
         assert trial['deadline_ms'] == 300000
         assert all(not any(write.startswith('FUNC <original>') for write in branch['writes'])
@@ -1544,15 +1586,12 @@ def test_explicit_live_extensions_never_use_simulation(run_script, mode, connect
         assert {write.split()[0] for write in restoration} == {
             'LIST:RANG', 'LIST:COUN', 'LIST:STEP', 'LIST:LEV', 'LIST:SLEW', 'LIST:WID',
         }
-        assert {'INP ON', '*TRG'}.isdisjoint(trial['planned_writes'])
-        assert all({'INP ON', '*TRG'}.isdisjoint(branch['writes'])
-                   for branch in trial['conditional_writes'])
         assert 'error_code' not in trial
         if mode == 'full':
             assert list(cases).index('trigger-restore') < list(cases).index('list-cc-settings')
             assert list(cases).index('workflow-cc-discharge') < list(cases).index('protection-start-state')
             assert list(cases).index('trigger-restore') < list(cases).index('average-status')
-    if 'auxiliary-controls-von' in cases:
+    if 'auxiliary-controls' in selected:
         if mode == 'full':
             for name, prior in (('von', 'von-status'), ('short', 'short-status'), ('slew', 'fixed-slew-status')):
                 alias = cases[f'auxiliary-controls-{name}']
@@ -1582,7 +1621,7 @@ def test_explicit_live_extensions_never_use_simulation(run_script, mode, connect
             assert names.index('sequence-cw') < names.index('isolated-fixed-cc-handoff')
         if 'readback' in mode:
             assert names.index('average-status') < names.index('isolated-fixed-cc-handoff')
-    if 'workflow-measure-log' in cases:
+    if 'workflow' in selected:
         assert cases['workflow-measure-log']['queries'][:2] == ['*IDN?', 'INP:STAT?']
         assert cases['workflow-measure-until']['queries'] == ['*IDN?', 'INP:STAT?', 'MEAS:VOLT?']
         for name in ('workflow-cc-timed-load', 'workflow-cc-discharge'):
