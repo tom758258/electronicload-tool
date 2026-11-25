@@ -1556,6 +1556,9 @@ def test_explicit_live_extensions_never_use_simulation(run_script, mode, connect
     for feature, names in expected_extensions.items():
         if feature in selected:
             assert all(cases[name]['execution'] == 'live' for name in names)
+        else:
+            assert set(names).isdisjoint(cases)
+    assert ('readback' in cases) == ('readback' in selected)
     for feature in ('readback', 'auxiliary-controls', 'list-cc'):
         if feature in selected:
             for name in expected_extensions[feature]:
