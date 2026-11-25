@@ -1247,7 +1247,8 @@ def test_selected_modes_report_actual_checks(run_script, tmp_path):
         "exit 0\n", encoding='utf-8')
     result = run_script([], extra_env={'CHECK_SCRIPT': str(stub), 'CHECK_LOG': str(tmp_path / 'calls.txt')},
                         harness="""
-$results = @(foreach ($scenario in @(
+# The shared harness has a typed [string]$Scenario parameter (case-insensitive).
+$results = @(foreach ($checkCase in @(
     @{modes=@('workflow'); fail=''},
     @{modes=@('measurement-extensions'); fail=''},
     @{modes=@('auxiliary-controls'); fail=''},
@@ -1262,10 +1263,10 @@ $results = @(foreach ($scenario in @(
 )) {
     $script:report = @{prechecks=@{preflight='NOT RUN'}}
     [IO.File]::WriteAllText($env:CHECK_LOG, '')
-    $env:FAIL_CHECK = $scenario.fail
+    $env:FAIL_CHECK = $checkCase.fail
     $failed = $false
     try {
-        Invoke-SelectedPreflight -Modes $scenario.modes -PreflightScript $env:CHECK_SCRIPT
+        Invoke-SelectedPreflight -Modes $checkCase.modes -PreflightScript $env:CHECK_SCRIPT
     } catch {
         $failed = $true
     }
