@@ -558,13 +558,6 @@ its maximum. A test that changes the range requires a separately approved
 Contributor procedure.
 [Programming Guide, printed p. 47](https://assets.testequity.com/te1/Documents/pdf/itech/ITECH_IT8800-Programming-Guide-EN.pdf#page=57)
 
-`fixed-slew-status` 依儀器回報的 CC Range 檢查正、負 Slew。遇到第一個超界
-讀值就停止，並回報查詢、觀測值、Range 與上下限。請在維持目前設定的情況下，
-將這些資訊與儀器面板的目前讀值比對。Programming Guide 的 `CURR:RANG`
-說明指出，切檔可能影響即時、暫態、觸發電流設定及 Slew，超出新檔範圍的設定
-會調整至新檔上限。涉及切檔的測試須依另行核准的 Contributor 程序進行。
-[Programming Guide，第 47 頁](https://assets.testequity.com/te1/Documents/pdf/itech/ITECH_IT8800-Programming-Guide-EN.pdf#page=57)
-
 For CV, CR and LIST, a valid numeric Range selector without a known label is
 returned as its raw readback with `range: null`. The IT8812C has a single 250 W
 CW range, so CW reports `range: null` and reads the power setpoint without a
@@ -781,26 +774,6 @@ A possible ON attempt gets one bounded OFF cleanup
 attempt under the existing communication rules. Timer-disable cleanup follows
 confirmed OFF.
 
-`-PlanOnly` 可預覽 3–10 秒，實機試驗使用 5 秒。使用已核准的限流來源、
-在兩檔 CC 範圍內的正電流（預設 0.1 A、上限 2 A），以及獨立的硬體
-停損。限時必須不超過 10 秒，且計時不得晚於 SCPI Input ON 寫入開始。
-在 Timer Input ON 提示確認上述條件，10 秒上限僅適用這組核准條件。
-Core 在等待儀器回覆前通知 Script SCPI ON 的寫入起點，因此 ON 子程序與
-後續觀察共用 6 秒期限。ON 確認後立即啟動單一唯讀 CLI 程序，開啟並識別一次
-VISA Session，持續取得 Timer／Input 快照至首次 OFF 或觀察期限，
-不為每筆取樣重新啟動 Python 或開啟 VISA。
-須有具時間證據的 ON 查詢，再於第 6 秒前取得首次 OFF。從 ON 查詢起點至
-OFF 查詢完成的保守區間最多 1 秒，且不得在第 5 秒前結束。明確提前 OFF、
-缺乏 ON 證據或區間過寬均失敗，不得以後續 OFF 查詢覆蓋。此為有界功能驗收，
-不是精確時間校正。第 6 秒仍無有效觀察則判定失敗並開始 OFF
-清理。若 CLI 子程序在截止時仍在執行，Script 會先提示立即使用獨立硬體
-停損，再等待子程序退出。子程序已退出且既有通訊規則允許時，才執行
-VISA 清理。混選含 Trigger 且通訊失信時，由現場獨立處理。
-CLI 記錄 SCPI 寫入、ON 確認及 Input 查詢起訖，`-DebugArtifacts` 將觀察
-資料存於私有目錄。依時間與 ON/OFF 證據自動判定，並確認 OFF、停用 Timer
-及讀回最終狀態。操作者須確保獨立停損不在觀察期間動作，除安全需要外不得介入；
-儀器取樣證據並非獨立的因果證明。
-
 The validation-only Core/CLI scope uses `INP:TIM:DEL <seconds>`, `INP:TIM 0|1`,
 `INP:TIM:DEL?` and `INP:TIM?` from the
 [IT8800 Programming Guide V2.1, printed pp.45–46](https://assets.testequity.com/te1/Documents/pdf/itech/ITECH_IT8800-Programming-Guide-EN.pdf),
@@ -911,7 +884,7 @@ Input OFF checks, complete expected settings/readback and deliberate ON
 confirmation. It grants no normal Product or Worker LIVE permission.
 
 The existing `preflight-cli.ps1 -TransientOnly` covers all four functions offline.
-`live-cli-check.ps1` defaults to `cc,cv,cr,cw,transient-cc,transient-cv,transient-cr,transient-cw`;
+`live-cli-check.ps1` defaults to FULL;
 `-Modes` retains subset selection. `-PlanOnly` validates each request without
 VISA and reports physical cases as NOT RUN. New Transient trial defaults are
 `-VoltageLevelA 3`, `-VoltageLevelB 4` (V), `-ResistanceLevelA 10`,
@@ -1235,9 +1208,6 @@ before read-only sampling. See the
 The simulator uses a fixed 12 V source, so a discharge simulation with a
 3 V cutoff ends at the timeout, capacity cutoff, or sample limit.
 
-兩個 Contributor 量測指令都在取樣的同一個 Session 驗明身分，
-並確認 Input OFF 後才開始唯讀量測。
-
 | Command | Required options | Optional options |
 | --- | --- | --- |
 | `measure-log` | `--interval-s`, exactly one of `--count` or `--duration-s` | `--csv` |
@@ -1355,47 +1325,35 @@ legacy Transient write and restores them after its trials when safe.
 | `input-timer` | Fixed CC timer, expiry and disable |
 | `protection` | Current and power trips, hardware power limit and defaults |
 | `system-query` | SCPI version, display mode and one Error Queue entry |
-| `readback` | Existing Fixed CC/CV/CR/CW, CC Slew, Transient, LIST, VON, Short and Average |
+| `readback` | Automatic Fixed CC/CV/CR/CW, CC Slew, Transient, LIST, VON, Short and Average settings/readback/restoration |
 | `sequence` | Four bounded Fixed CC/CV/CR/CW trials |
-| `workflow` | Four CLI Workflows in dry-run and simulation, with Contributor live measurement and bounded CC trials |
+| `workflow` | Contributor live measurement and bounded CC Timed Load/Discharge trials |
 | `measurement-extensions` | Native Min/Max, Discharge and Average setting |
 | `auxiliary-controls` | VON setting, Short ON/OFF interlocks and Fixed CC Slew |
 | `list-cc` | LIST CC setup, Save, Recall and Exit |
 
 The System Query case reads one Error Queue entry and records the numeric
-code, including zero for an empty queue. The default Workflow cases run in
-simulation. An offline Workflow-only run needs only `-Target` and `-Modes workflow`.
+code, including zero for an empty queue. Every selected mode uses its hardware
+validation procedure. `-PlanOnly` validates the CLI requests without VISA
+and leaves hardware cases `NOT RUN`; it does not execute simulation or pytest
+as a substitute for physical validation. Use the separate offline CLI or
+preflight/test commands for offline verification.
 
-By default, the three extension modes use CLI dry-runs and focused Simulator or Fake VISA
-tests from the contributor environment. Run any of them alone or together
-with only `-Target itech-it8812c` and `-Modes`. For example:
-
-```powershell
-.\scripts\live-cli-check.ps1 -Target itech-it8812c -Modes measurement-extensions,auxiliary-controls,list-cc
-```
-
-In a mixed selection, the extension checks run before the physical approval
-gate. If that gate blocks execution, physical cases remain `NOT RUN`.
-`-PlanOnly` validates dry-run requests and leaves case results `NOT RUN`.
-All pytest cases specified by the mode must run successfully for an extension
-to pass. If pytest deselects any of those cases, the script stops the group
-before running it. The report records `NOT RUN` when no test ran and `SKIP`
-when tests were skipped. Either result leaves the run incomplete.
-
-With `-LiveExtensions` and no Expected parameters, Readback uses the isolated settings batch to automatically select
-functions, exercise known settings, compare independent readbacks and verify
-restoration. No panel values or repeated manual function selection are required.
-Without `-LiveExtensions` Readback is read-only. For legacy diagnostics with known panel settings, use `-ExpectedRiseSlew` and
-`-ExpectedFallSlew` together (A/µs), `-ExpectedVonThreshold` (V) and
-`-ExpectedVonLatch` (`on` or `off`) together, `-ExpectedShort` (`on` or
-`off`), and `-ExpectedAverageCount` (2–16). Incomplete baselines leave the case
-`NOT RUN` with observed values and the overall result `OBSERVED ONLY`.
-Fixed, Transient, Trigger and TRACE also keep their own post-setup comparisons.
+Without Expected parameters, Readback uses the isolated settings batch to
+automatically select functions, exercise known settings, compare independent
+readbacks and verify restoration. No panel values or repeated manual function
+selection are required. For explicit read-only diagnostics with known panel
+settings, use `-ExpectedRiseSlew` and `-ExpectedFallSlew` together (A/µs),
+`-ExpectedVonThreshold` (V) and `-ExpectedVonLatch` (`on` or `off`) together,
+`-ExpectedShort` (`on` or `off`), and `-ExpectedAverageCount` (2–16).
+Incomplete baselines leave the case `NOT RUN` with observed values and the
+overall result `OBSERVED ONLY`. Fixed, Transient, Trigger and TRACE also keep
+their own post-setup comparisons.
 
 ### Contributor extension selection
 
-Select `-LiveExtensions` with Readback, one or more extension modes or `-Modes full`
-to request the contributor hardware cases. Provide an explicit `-Resource`
+Select Readback, any extension mode or `-Modes full` to request the
+corresponding contributor hardware cases. Provide an explicit `-Resource`
 and matching `-Connection`. Use `-PlanOnly` to review CLI operations and
 the extension SCPI previews without opening VISA. Execution requires the
 interactive physical validation procedure.
@@ -1475,76 +1433,19 @@ Both LIST trials check the actual remaining command budget against the buffer
 length, configured query delay, observed snapshot cost and restoration reserve
 before writing. Large buffers or slow exchanges may be refused without settings
 writes. A later unexpected transport stall still requires the existing manual
-recovery procedure; time budgeting is not a hardware guarantee. Without LiveExtensions or
-with explicit legacy Expected parameters, Readback remains a read-only
-diagnostic, not automatic acceptance.
-
-使用 `-LiveExtensions` 搭配單選、多選或 `-Modes full`，明確選擇
-Contributor 實機項目。指定與 `-Connection` 相符的 `-Resource`，
-可用 `-PlanOnly` 先檢視 CLI 操作與擴充模式的 SCPI 預覽，預覽不會開啟 VISA。
-執行時需遵循互動式實機驗證流程，硬體項目會標記 `execution: live`。
-
-Input OFF 時，`workflow` 驗證定時取樣兩次及電壓達到 1 V 的條件。兩個
-CC 案例自動設定 Fixed CC Low，使用專用的 5 V、限流 0.8 A 電源，負載
-設定為 0.1 A。Timed Load 在第 5 秒要求 OFF，不在期限後增加查詢。放電每 0.5 秒取樣，須達到
-0.00010 Ah 才通過，電壓降至 4.5 V 以下（含）或第 6 秒容量仍未達標時即停止。
-兩項都從 SCPI `INP ON` 寫入起算。每次確認前先備妥獨立硬體停損，確保從
-寫入至 OFF 確認不超過 10 秒。通訊失信時立即使用停損。現場無法確保期限時，
-不執行實機測試。Timed Load 在 5 秒 OFF 排程前自動取樣儀器電流及 Input 狀態，
-核對 0.09 至 0.11 A、取樣涵蓋程度及整數奈秒 OFF 時間。放電在容量取樣時核對電流。
-Timed Load 採有界功能驗收：相鄰電流及 Input 觀察區間、最後電流查詢起點至 OFF
-寫入均最多 1 秒，保留既有初始 ON 確認時間。有效排程及有界取樣可通過功能驗收，
-不代表最後未取樣區間持續帶載或精確校正；觀察到提前掉載或涵蓋不足即失敗，
-不要求人工判讀。
-除安全需要外，不得人工介入或讓獨立停損在預定觀察期間動作。CC 案例結束後，Fixed CC
-設定保留 0.1 A，Input 為 OFF。
-
-`measurement-extensions` 查詢原生 Min/Max 與放電讀值，經操作者確認後
-將 Average 設為 8、驗證讀回並保留設定。
-
-`auxiliary-controls` 與 `list-cc` 須物理隔離來源及待測物，
-獨立試驗須在 Fixed CC 且 Input、Short、Transient 與 Input Timer 皆為 OFF，
-不切換起始功能或模式；其他起始狀態在設定寫入前拒絕。VON 與同檔 Slew
-保存原值、確認測試值讀回，再還原並比對原值。Short 只在端子隔離時驗證 ON／OFF
-狀態並確認 Input OFF。隔離設定批次只需確認一次實體隔離。選取 LIST 時，
-只有容許覆寫指定槽位才輸入 `OVERWRITE <槽號>`，否則不含 LIST 的批次輸入
-`ISOLATED`。LIST 以不同第一步寬度區分 A 與 B。試驗將 B 存至
-`-ListScratchSlot`、將工作緩衝改為 A，再確認 Recall 還原 B。接著儲存 A、
-把工作緩衝改為 B，確認 Recall 還原 A。兩次均比對完整 LIST 設定，
-不需人工提供槽位舊寬度。試驗成功後該槽保留 A。
-
-試驗會在寫入前顯示私有復原基準，LIST 基準包含原始工作緩衝及 Fixed CC 設定。
-請私下保留終端紀錄。單獨執行 CLI 時，基準會由 stderr 輸出。腳本的可分享報告
-不包含基準。LIST 最後退出至 Fixed CC 並驗證原工作緩衝。只有可安全還原原值時
-才執行設定寫入。寫入後若無法確認還原，維持端子隔離，依記錄的基準在儀器上還原。
-
-需接電源的試驗（含 Trigger 與 Protection）先執行，再進入隔離設定批次。
-Full 或混選在切換至隔離批次時只提示一次；操作者須實體斷開來源及待測物。
-Readback 加上 `-LiveExtensions` 且未提供 Expected 參數時，不需提供面板值或手動選擇功能；
-Input OFF 時自動測試已知設定並還原原始設定及功能，LIST 讀回不需儲存槽位。
-已啟用 Transient 的起始狀態須可確認並還原原設定及 HOLD 來源；不安全或不可還原的
-狀態在寫入前拒絕。僅自動 Readback 流程（含 VON／Slew／Short）授權此暫時切換；
-獨立 Auxiliary Controls 與 LIST CC 保留原 Fixed CC 及 Transient OFF 守衛，
-混選亦須符合此條件才執行獨立試驗；共用 Auxiliary 案例可重用 Readback 證據。
-若前置接電試驗留下非 CC 的 Fixed 功能，混選計畫在首個獨立試驗前安排明確的隔離
-Fixed CC 交接，不更動設定值，並要求 Fixed 模式及既有互鎖皆為 OFF；
-不擴大獨立試驗的模式切換權限。只有 Scratch Slot 試驗適用 300 秒單命令例外，
-自動 LIST Readback 維持 30 秒。兩者在寫入前依緩衝長度、設定的查詢延遲、
-實際快照成本及還原預留檢查剩餘期限；較長緩衝或較慢通訊可能在設定寫入前拒絕。
-之後若通訊意外停滯，仍須依既有人工復原程序處理，時間預算並非硬體保證。
-未加 LiveExtensions 或明確提供舊有 Expected 參數時為唯讀診斷，
-不代表自動驗收。
+recovery procedure; time budgeting is not a hardware guarantee. Explicit
+legacy Expected parameters request read-only diagnostics, not automatic
+Readback acceptance.
 
 ### Script parameters
 
 | Parameter | Required / default | Purpose |
 | --- | --- | --- |
 | `-Target` | Required: `itech-it8812c` | Exact registered model ID |
-| `-Resource` | Required for hardware modes, including PlanOnly | Explicit USB INSTR or ASRL INSTR resource matching `-Connection` |
+| `-Resource` | Required, including PlanOnly | Explicit USB INSTR or ASRL INSTR resource matching `-Connection` |
 | `-Connection` | `usb` | `usb` for USB INSTR or `asrl` for RS-232 ASRL INSTR |
 | `-Backend` | `system` | System VISA (`@ivi`) only |
 | `-Modes` | `full` | FULL, a single mode or a comma-separated selection |
-| `-LiveExtensions` | Off | Request automatic Readback and contributor hardware cases for Workflow and extension modes |
 | `-ListScratchSlot` | 1 | LIST test slot (1–7) with per-run overwrite confirmation |
 | `-InputTimerOnly` | Off | Backward-compatible Timer-only shortcut, incompatible with `-Modes` |
 | `-SourceVoltageLimitV` | **5 V** | Operator-declared external source voltage, override >0 to 18 V |
@@ -1759,10 +1660,6 @@ their bounds are recorded in the private command stderr. Invalid replies
 stop the trial before a defaults write. A numeric MAX outside the allowed
 bounds leaves the defaults case `NOT RUN` with a refusal reason, preserves
 the trip results and performs no restore write for the unmodified group.
-Protection 硬體功率上限為 250 W。超界的數值 MAX 會在設定寫入前
-拒絕，Defaults 記為 `NOT RUN` 並附原因。同一輪的 Trip 結果會保留，
-未寫入的 Defaults 群組不執行還原寫入。`-DebugArtifacts` 會把原始
-MAX 讀值與接受界線存入私有診斷紀錄。
 
 The contributor scope does not open Product or Worker LIVE.
 
@@ -1843,19 +1740,6 @@ snapshot, contributor `trigger-configure` can supply both Source and interval
 for any source. The Product and Worker LIVE paths reject Trigger Setup.
 The CLI-only `trigger-observe` command accepts the exact validation
 configuration and a bounded observation deadline. It does not enable Input.
-
-HOLD／BUS／TIMER 在初始安全授權後自動取得儀器電流取樣、核對電平順序及
-時間區間，不需人工觀察或回答 Yes／No；HOLD／BUS 派送前再次確認 Input ON。
-有限 BUS／EXTERNAL LIST 另以既有唯讀 `STAT:QUES:COND?` 的 RUN bit 7
-確認從未執行、執行中到首次停止（IT8800 Programming Guide V2.1 印刷頁 15、29），
-最後一段停留時間以首次停止為結束區間；卡在末段且 RUN 未結束不得通過，
-不假設終端電流必定回到零。
-若脈衝或停留時間短到既有 VISA 查詢延遲無法取樣，PlanOnly 即拒絕。
-擷取受單一命令 30 秒與既有 500 ms 返回預留限制，必須在較短的觀察窗內容納事件與最低必要查詢耗時；實際 VISA 延遲仍可能使證據不足。
-EXTERNAL 只保留設備準備及收到擷取
-就緒提示後提供實體訊號。程式在確認 OFF 後才完成波形驗收。取樣不足、期限超過
-或還原失敗均不得 PASS。這是儀器自身取樣的功能證據，不是獨立波形校正。
-既有 ON／OFF 期限及 Product／Worker LIVE 權限不變。
 
 ### Reports
 

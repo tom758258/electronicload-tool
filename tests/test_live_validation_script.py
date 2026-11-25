@@ -296,8 +296,7 @@ def test_protection_explicit_mode_report_without_visa(run_script):
     ('workflow', 'Contributor Workflow load trials require a dedicated 5 V / 0.8 A source.'),
 ])
 def test_source_precheck_rejects_overrides(run_script, mode, expected, extra):
-    opt_in = ['-LiveExtensions'] if mode == 'workflow' else []
-    result = run_script(['-Modes', mode, '-PlanOnly', *opt_in, *extra])
+    result = run_script(['-Modes', mode, '-PlanOnly', *extra])
     assert result.returncode == 2
     assert expected in result.stdout
 
@@ -524,18 +523,17 @@ def test_default_usb_and_explicit_asrl_full_plan_share_the_matrix(run_script):
                  'trigger-hold-on', 'trigger-external-on', 'trigger-restore'):
         assert name in names
     assert names.index('trigger-snapshot') < names.index('scpi-version') < names.index('readback')
-    assert names.index('average-status') < names.index('protection-start-state')
+    assert names.index('protection-start-state') < names.index('trigger-restore') < names.index('average-status')
     assert names.index('protection-prepare-cc-readback') < names.index('protection-software-current-original')
     assert names.index('protection-default-hardware-power-final') < names.index('sequence-cc')
     assert names.index('sequence-cw') < names.index('set-cc-high')
-    for mode in expected[-3:]:
-        assert names.count(f'{mode}-simulation') == 1
-        assert names.index(f'{mode}-simulation') < names.index('input-state')
+    assert all(case.get('execution') in (None, 'live') for case in cases)
+    assert all(case['command'] != 'pytest' for case in cases)
     by_name = {case['name']: case for case in cases}
     for name in ('fixed-slew-status', 'von-status', 'short-status', 'average-status'):
         case = by_name[name]
-        assert case['readback_comparison'] == 'NOT RUN'
-        assert 'expected_readback' not in case and case['condition']
+        assert case['command'] == 'contributor-settings' and case['execution'] == 'live'
+        assert '--readback-trial' in case['arguments'] and '--confirm-isolated' in case['arguments']
 
 
 def test_hardware_script_powershell_mode_array(run_script):
@@ -624,7 +622,10 @@ def test_input_timer_offline_preflight(run_script):
 
 @pytest.mark.parametrize('planned', [True, False])
 def test_input_timer_script_plan_and_live_refusal(run_script, planned):
-    result = run_script(['-InputTimerOnly', *(['-PlanOnly'] if planned else [])])
+    # Exercise the actual Timer entry on Windows PowerShell 5.1, not just preflight.
+    # The abbreviated -Mode parameter must parse without opening VISA.
+    result = run_script(['-Mode', 'input-timer', '-PlanOnly'] if planned else ['-InputTimerOnly'],
+                        windows_powershell=planned)
     assert result.returncode == (0 if planned else 2), result.stdout + result.stderr
     if not planned:
         assert 'requires an interactive console' in result.stdout
@@ -1351,7 +1352,7 @@ def test_configuration_readback_script_plan_and_noninteractive_refusal(run_scrip
     settings = {'fixed-slew-status': {'rise_slew_a_per_us': 0.1, 'fall_slew_a_per_us': 0.2},
                 'von-status': {'threshold_v': 0, 'latch': 'off'}, 'short-status': {'short_state': 'ON'},
                 'average-status': {'average_count': 8}}
-    auto = run_script(['-Modes', 'readback', '-LiveExtensions', '-PlanOnly'])
+    auto = run_script(['-Modes', 'readback', '-PlanOnly'])
     assert auto.returncode == 0, auto.stdout + auto.stderr
     auto_path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', auto.stdout)[-1])
     auto_text = auto_path.read_text(encoding='utf-8-sig')
@@ -1370,7 +1371,7 @@ def test_configuration_readback_script_plan_and_noninteractive_refusal(run_scrip
         assert {'INP ON', '*TRG'}.isdisjoint(case['planned_writes'])
         assert all({'INP ON', '*TRG'}.isdisjoint(branch['writes'])
                    for branch in case.get('conditional_writes', []))
-    for options, status in [(['-PlanOnly', *baseline], 'PLAN ONLY'),
+    for options, status in [([], 'BLOCKED'), (['-PlanOnly', *baseline], 'PLAN ONLY'),
                             (['-ExpectedRiseSlew', '0.1'], 'BLOCKED')]:
         result = run_script(['-Modes', 'readback', *options])
         assert result.returncode == (0 if status == 'PLAN ONLY' else 2), result.stdout + result.stderr
@@ -1380,6 +1381,11 @@ def test_configuration_readback_script_plan_and_noninteractive_refusal(run_scrip
         assert report['prechecks']['plan'] == 'PASS'
         assert [case['command'] for case in report['cases'][:1]] == ['input-state']
         assert [case['name'] for case in report['cases']] == expected
+        if not options:
+            assert report['validation_mode'] == 'live'
+            assert report['cases'] == auto_report['cases']
+            assert 'requires an interactive console' in result.stdout
+            continue
         assert [case['command'] for case in report['cases'][3:7]] == ['fixed-status'] * 4
         assert all(case['arguments'] == ['--hardware-validation', 'readback']
                    for case in report['cases'][2:])
@@ -1477,33 +1483,9 @@ def test_system_query_focused_plan(run_script):
     assert all(case['arguments'] == ['--hardware-validation', 'system-query'] for case in cases)
 
 
-@pytest.mark.parametrize('plan_only,connection,resource', [
-    (True, 'usb', None),
-    (False, 'usb', None), (False, 'usb', RESOURCE), (False, 'asrl', ASRL),
-])
-def test_workflow_only_stays_offline_with_optional_connection(run_script, plan_only, connection, resource):
-    result = run_script(['-Connection', connection, '-Modes', 'workflow',
-                         *(['-PlanOnly'] if plan_only else [])], resource=resource)
-    assert result.returncode == 0, result.stdout + result.stderr
-    path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)[-1])
-    report = json.loads(path.read_text(encoding='utf-8-sig'))
-    assert report['overall_status'] == ('PLAN ONLY' if plan_only else 'PASS')
-    assert report['validation_mode'] == ('plan-only' if plan_only else 'simulate')
-    assert report['hardware_touched'] is False
-    cases = report['cases']
-    assert [case['command'] for case in cases] == [
-        'measure-log', 'measure-until', 'cc-timed-load', 'cc-discharge',
-    ]
-    assert all(case['execution'] == 'simulate' for case in cases)
-    assert all(case['status'] == ('NOT RUN' if plan_only else 'PASS') for case in cases)
-    if not plan_only:
-        assert [case['stop_reason'] for case in cases] == [
-            'completed', 'condition_met', 'duration_elapsed', 'capacity_cutoff',
-        ]
-        assert all(case['input_state'] == 'OFF' for case in cases[2:])
-
-
 @pytest.mark.parametrize('mode,connection,resource,plan_only', [
+    ('workflow', 'usb', RESOURCE, True),
+    ('workflow', 'asrl', ASRL, False),
     ('measurement-extensions', 'usb', RESOURCE, True),
     ('auxiliary-controls', 'usb', RESOURCE, True),
     ('list-cc', 'usb', RESOURCE, False),
@@ -1516,10 +1498,9 @@ def test_workflow_only_stays_offline_with_optional_connection(run_script, plan_o
     ('list-cc,auxiliary-controls', 'asrl', ASRL, True),
     ('workflow,auxiliary-controls,list-cc,measurement-extensions', 'asrl', ASRL, False),
     ('full', 'usb', RESOURCE, True),
-    ('full', 'asrl', ASRL, True),
 ])
-def test_explicit_live_extensions_never_use_simulation(run_script, mode, connection, resource, plan_only):
-    flags = ['-Modes', mode, '-LiveExtensions', '-Connection', connection]
+def test_selected_modes_never_use_simulation(run_script, mode, connection, resource, plan_only):
+    flags = ['-Modes', mode, '-Connection', connection]
     slot = 2 if mode == 'list-cc,auxiliary-controls' else 1
     if slot != 1:
         flags += ['-ListScratchSlot', str(slot)]
@@ -1532,6 +1513,7 @@ def test_explicit_live_extensions_never_use_simulation(run_script, mode, connect
     assert resource not in report_text + summary + result.stdout and str(ROOT) not in report_text
     assert not (path.parents[1] / 'private').exists()
     assert report['overall_status'] == ('PLAN ONLY' if plan_only else 'BLOCKED')
+    assert report['validation_mode'] == ('plan-only' if plan_only else 'live')
     assert not report['hardware_touched'] and report['resource'] == '<redacted>'
     assert report['prechecks']['plan'] == 'PASS'
     assert report['connection'] == connection
@@ -1571,6 +1553,7 @@ def test_explicit_live_extensions_never_use_simulation(run_script, mode, connect
         assert 'requires an interactive console' in result.stdout
     assert all(case['status'] == 'NOT RUN' for case in cases.values())
     assert all(case.get('execution') in (None, 'live') for case in cases.values())
+    assert all(case['command'] != 'pytest' for case in cases.values())
     if 'measurement-extensions' in selected:
         assert 'MEAS:VOLT:MIN?' in cases['measurement-extensions-min-max']['queries']
         assert 'SENS:AVER:COUN 8' in cases['measurement-extensions-average']['planned_writes']
@@ -1634,56 +1617,15 @@ def test_explicit_live_extensions_never_use_simulation(run_script, mode, connect
             assert 'error_code' not in cases[name]
 
 
-@pytest.mark.parametrize('mode,commands', [
-    ('measurement-extensions', ['measure-min-max', 'measure-discharge', 'set-average']),
-    ('auxiliary-controls', ['set-von', 'short-on', 'short-off', 'set-cc']),
-    ('list-cc', ['set-list-cc', 'list-save', 'list-recall', 'list-exit']),
+@pytest.mark.parametrize('mode,plan_only', [
+    ('workflow', False), ('workflow', True), ('readback', False),
+    ('measurement-extensions', False), ('auxiliary-controls', False), ('list-cc', False),
 ])
-def test_new_modes_run_independently_without_a_resource(run_script, mode, commands):
-    result = run_script(['-Modes', mode], resource=None)
-    assert result.returncode == 0, result.stdout + result.stderr
-    path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)[-1])
-    report = json.loads(path.read_text(encoding='utf-8-sig'))
-    assert report['overall_status'] == 'PASS'
-    assert report['validation_mode'] == 'simulate' and report['hardware_touched'] is False
-    assert report['modes'] == [mode]
-    assert [case['command'] for case in report['cases']] == [*commands, 'pytest']
-    assert [case['execution'] for case in report['cases']] == ['dry-run'] * len(commands) + ['simulate']
-    assert all(case['status'] == 'PASS' for case in report['cases'])
-    assert not (path.parents[1] / 'private').exists()
-    assert not list(path.parents[1].rglob('results.xml'))
-
-
-@pytest.mark.parametrize('scenario,status,diagnostic', [
-    ('collect-only', 'NOT RUN', 'tests collected'),
-    ('partly-deselected', 'NOT RUN', 'excluded from the offline test selection'),
-    ('one-skipped', 'SKIP', 'offline test skip probe'),
-])
-def test_new_modes_report_incomplete_simulator_checks(run_script, tmp_path, scenario, status, diagnostic):
-    if scenario == 'collect-only':
-        overrides = {'PYTEST_ADDOPTS': '--collect-only'}
-    elif scenario == 'partly-deselected':
-        overrides = {'PYTEST_ADDOPTS': (
-            '--deselect=tests/test_control_core.py::test_average_native_write_readback_and_query_while_on'
-        )}
-    else:
-        (tmp_path / 'skip_one.py').write_text(
-            'import pytest\n'
-            'def pytest_collection_modifyitems(items):\n'
-            '    items[0].add_marker(pytest.mark.skip(reason="offline test skip probe"))\n',
-            encoding='utf-8')
-        overrides = {'PYTEST_PLUGINS': 'skip_one'}
-    result = run_script(['-Modes', 'measurement-extensions', '-DebugArtifacts'], resource=None,
-                        extra_env=overrides)
-    assert result.returncode == 3, result.stdout + result.stderr
-    path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)[-1])
-    report = json.loads(path.read_text(encoding='utf-8-sig'))
-    assert report['overall_status'] == 'FAIL' and report['hardware_touched'] is False
-    case = report['cases'][-1]
-    assert case['command'] == 'pytest' and case['status'] == status
-    log = (path.parents[1] / 'private' / f"{case['name']}.txt").read_text(encoding='utf-8-sig')
-    assert diagnostic in log
-    assert not list(path.parents[1].rglob('results.xml'))
+def test_hardware_modes_require_resource(run_script, mode, plan_only):
+    result = run_script(['-Modes', mode, *(['-PlanOnly'] if plan_only else [])], resource=None)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert 'explicit -Target and -Resource are required' in result.stdout
+    assert 'Report:' not in result.stdout
 
 
 def test_new_modes_deduplicate_and_leave_physical_cases_not_run(run_script):
@@ -1694,8 +1636,9 @@ def test_new_modes_deduplicate_and_leave_physical_cases_not_run(run_script):
     assert report['overall_status'] == 'BLOCKED' and report['hardware_touched'] is False
     assert report['modes'] == ['readback', 'measurement-extensions', 'list-cc']
     assert len({case['name'] for case in report['cases']}) == len(report['cases'])
-    assert {case['status'] for case in report['cases'] if case.get('execution') in ('simulate', 'dry-run')} == {'PASS'}
-    assert {case['status'] for case in report['cases'] if case.get('execution') in (None, 'live')} == {'NOT RUN'}
+    assert report['validation_mode'] == 'live'
+    assert all(case.get('execution') in (None, 'live') for case in report['cases'])
+    assert all(case['status'] == 'NOT RUN' and case['command'] != 'pytest' for case in report['cases'])
 
 
 @pytest.mark.parametrize('extra,resource', [
