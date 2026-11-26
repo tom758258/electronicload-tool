@@ -81,7 +81,10 @@ def run_script(tmp_path):
                 "'Assert-ReadbackFields','Fail-Case','Invoke-TimerExpiry','Invoke-LiveCommand',"
                 "'Get-TimerMonotonicNs','Get-TimerRemainingMs','Get-TimerObservationDeadlineNs',"
                 "'Confirm-TimerExpiry','Confirm-WorkflowLoad','Assert-Runtime','Save-Report',"
-                "'New-CliProcessInfo','New-LiveCliProcess','Invoke-SelectedPreflight')) {\n"
+                "'New-CliProcessInfo','New-LiveCliProcess','Invoke-SelectedPreflight',"
+                "'Test-SourceConnectedTrials','Confirm-OperatorStart','Confirm-IsolatedBatch',"
+                "'Confirm-ProtectionOperator','Invoke-PoweredProtectionTrial','Restore-Protection',"
+                "'Get-ProtectionSetArgs','Invoke-TriggerTrial','Assert-TriggerOff')) {\n"
                 "        Invoke-Expression $node.Extent.Text\n"
                 "    }\n}\n" + harness, encoding='utf-8')
             args = [str(harness_path)]
@@ -265,6 +268,7 @@ def test_protection_explicit_mode_report_without_visa(run_script):
         prefix = f'protection-{trial}'
         assert cases[f'{prefix}-cc']['arguments'][:2] == ['--current', '0.20']
         assert cases[f'{prefix}-on']['command'] == 'operator-observation'
+        assert cases[f'{prefix}-on']['condition']
         assert cases[f'{prefix}-trial']['arguments'] == [
             '--hardware-validation', 'protection', '--confirm', '--protection-trial', trial,
         ]
@@ -277,6 +281,7 @@ def test_protection_explicit_mode_report_without_visa(run_script):
         else:
             assert f'{prefix}-clear' not in cases
             assert cases[f'{prefix}-baseline-on']['command'] == 'operator-observation'
+            assert cases[f'{prefix}-baseline-on']['condition']
             assert cases[f'{prefix}-baseline-trial']['arguments'] == [
                 '--hardware-validation', 'protection', '--confirm', '--protection-trial',
                 'hardware-power-baseline',
@@ -1288,6 +1293,462 @@ ConvertTo-Json -InputObject $results -Depth 5 -Compress
     ]
 
 
+@pytest.mark.parametrize('windows_powershell', [False, True] if os.name == 'nt' else [False])
+def test_selected_modes_confirm_preparation_before_start(run_script, windows_powershell):
+    # PlanOnly and redirected-input refusal exit before the interactive
+    # boundary. Exercise the real start/transition functions without VISA.
+    result = run_script([], windows_powershell=windows_powershell, extra_env={
+        'FULL_MODES': ','.join(FULL_MODES),
+    }, harness="""
+$Target = 'itech-it8812c'
+$Resource = 'synthetic'
+$Backend = 'system'
+$SourceVoltageLimitV = 5
+$SourceCurrentLimitA = 0.8
+$TriggerExternalSetup = 'reviewed fixture'
+$ListScratchSlot = 3
+$extensionModes = @('measurement-extensions','auxiliary-controls','list-cc')
+$featureModes = @('cr-led','current-slow-rise')
+function Write-Host([string]$Text) { $script:notices += $Text }
+function Read-Host([string]$Prompt) {
+    $script:answers += @{name='identify';prompt=$Prompt;notices=@($script:notices)}
+    return $script:reply
+}
+function Read-ValidationAnswer([string]$Prompt, [string]$CaseName, [switch]$DiscardPendingKeys) {
+    $script:answers += @{name=$CaseName;prompt=$Prompt;notices=@($script:notices)}
+    if ($CaseName -ceq 'identify') { return $script:reply }
+    return $script:transitionReply
+}
+$all = @($env:FULL_MODES -split ',')
+$selections = @(foreach ($mode in $all) { @{modes=@($mode);legacy=$false} })
+$selections += @(
+    @{modes=$all;legacy=$false},
+    @{modes=@('readback','auxiliary-controls','list-cc');legacy=$false},
+    @{modes=@('cc','readback');legacy=$false},
+    @{modes=@('readback');legacy=$true},
+    @{modes=@('cc','readback');legacy=$true},
+    @{modes=@('readback','auxiliary-controls');legacy=$true},
+    @{modes=@('input-timer','workflow');legacy=$false},
+    @{modes=@('system-query','cr-led','current-slow-rise');legacy=$false}
+)
+$results = @(foreach ($selectionCase in $selections) {
+    $modes = $selectionCase.modes
+    $isolated = @(if ('readback' -in $modes -and -not $selectionCase.legacy) { @{name='fixed-status-cc'} }
+                  if ('auxiliary-controls' -in $modes) { @{name='auxiliary-controls-von'} }
+                  if ('list-cc' -in $modes) { @{name='list-cc-settings'} })
+    $script:notices = @()
+    $script:answers = @()
+    $script:reply = ''
+    $script:transitionReply = ''
+    $connected = Test-SourceConnectedTrials $modes
+    $ack = Confirm-OperatorStart $modes $isolated $connected
+    if ($null -eq $ack -or $ack -cne '') { throw 'Initial Enter did not authorize the run.' }
+    $confirmed = $false
+    foreach ($item in $isolated) {
+        $confirmed = Confirm-IsolatedBatch $confirmed $connected $item.name
+        if (-not $confirmed) { throw 'Isolation authorization missing.' }
+    }
+    @{modes=$modes;legacy=$selectionCase.legacy;answers=@($script:answers);connected=$connected}
+})
+# Cancellation must fail at the physical transition and not authorize settings.
+$script:transitionReply = 'cancel'
+$script:report = @{results=@([ordered]@{name='fixed-status-cc';status='NOT RUN'})}
+try {
+    $null = Confirm-IsolatedBatch $false $true 'fixed-status-cc'
+    throw 'Cancelled transition accepted.'
+} catch {
+    if ($script:report.results[0].error_code -cne 'operator_confirmation_required') { throw }
+}
+ConvertTo-Json -InputObject $results -Depth 8 -Compress
+""")
+    assert result.returncode == 0, result.stdout + result.stderr
+    selections = json.loads(result.stdout)
+    assert len(selections) == len(FULL_MODES) + 8
+    assert [item['modes'] for item in selections[:len(FULL_MODES)]] == [[mode] for mode in FULL_MODES]
+    for item in selections:
+        modes = set(item['modes'])
+        answers = item['answers']
+        connected = bool(modes & (set(FULL_MODES[:9]) | {
+            'trigger', 'input-timer', 'protection', 'sequence', 'workflow',
+        }))
+        isolated = bool(modes & {'auxiliary-controls', 'list-cc'} or
+                        'readback' in modes and not item['legacy'])
+        assert item['connected'] is connected
+        assert len(answers) == 1 + int(connected and isolated)
+        assert answers[0]['name'] == 'identify'
+        notices = '\n'.join(answers[0]['notices'])
+        assert ('Confirm the external source is manually set' in notices) is connected
+        assert ('Input Timer:' in notices) == ('input-timer' in modes)
+        assert ('Workflow:' in notices) == ('workflow' in modes)
+        assert ('10 s hardware cutoff' in notices) == bool(modes & {'input-timer', 'workflow'})
+        assert ('Sequence:' in notices) == ('sequence' in modes)
+        assert ('EXTERNAL Trigger equipment' in notices) == ('trigger' in modes)
+        assert ('Protection:' in notices) == ('protection' in modes)
+        assert ('Average count' in notices) == ('measurement-extensions' in modes)
+        assert ('Scratch Slot 3' in notices) == ('list-cc' in modes)
+        assert ('Automatic Readback temporarily' in notices) == (
+            'readback' in modes and not item['legacy']
+        )
+        assert ('Physically disconnect the source and DUT before pressing Enter' in notices) == (
+            isolated and not connected
+        )
+        if connected and isolated:
+            assert 'Physically disconnect the source and DUT now' in answers[1]['prompt']
+            assert 'OVERWRITE' not in answers[1]['prompt'] and 'ISOLATED' not in answers[1]['prompt']
+
+
+def test_protection_prompts_only_for_physical_source_transitions(run_script):
+    # Use the real Protection orchestrator and powered-trial function with
+    # fake command results. No VISA, console or elapsed loading is involved.
+    result = run_script([], harness="""
+$script:protectionTrials = @(
+    @{name='software-current';settings=@{current=1};flags=@('OC','PS')},
+    @{name='software-power';settings=@{power=1};flags=@('OP','PS')},
+    @{name='hardware-power';settings=@{limit=1};flags=@()}
+)
+$names = @('start-state','prepare-cc','prepare-cc-readback',
+    'software-current-source-off','software-power-source-off',
+    'hardware-power-baseline-on','hardware-power-baseline-trial','hardware-power-baseline-off')
+foreach ($trial in $script:protectionTrials) {
+    foreach ($suffix in @('cc','restore-cc','on','trial','off')) {
+        $names += "$($trial.name)-$suffix"
+    }
+}
+function Read-ValidationAnswer([string]$Prompt, [string]$CaseName, [switch]$DiscardPendingKeys) {
+    $script:calls += "prompt:$CaseName"
+    if ($CaseName -ceq $script:cancelAt) { return 'cancel' }
+    return ''
+}
+function Restore-Protection {}
+function Invoke-ProtectionStep([string]$Name, [switch]$Cleanup, [switch]$AllowDefaultRefusal) {
+    $script:calls += $Name
+    if ($Name -like '*-original') {
+        return @{result=@{fixed_cc=@{range='low';current_a='0.20'}}}
+    }
+    if ($Name -ceq 'protection-software-current-trial') {
+        return @{result=@{input_state='OFF';condition=@{flags=@('OC','PS')}}}
+    }
+    if ($Name -ceq 'protection-software-power-trial') {
+        return @{result=@{input_state='OFF';condition=@{flags=@('OP','PS')}}}
+    }
+    if ($Name -ceq 'protection-hardware-power-baseline-trial') {
+        return @{result=@{input_state='ON';condition=@{flags=@()};voltage_v=5;current_a=0.20;calculated_power_w=1}}
+    }
+    if ($Name -ceq 'protection-hardware-power-trial') {
+        return @{result=@{input_state='ON';condition=@{flags=@()};voltage_v=5;calculated_power_w=0.50}}
+    }
+    return @{ok=$true;result=@{input_state='OFF'}}
+}
+$results = @(foreach ($cancelCase in @('', 'protection-software-current-source-off', 'protection-software-power-on')) {
+    $script:cancelAt = $cancelCase
+    $script:report = @{protection_trials=@{};protection_input_off_unconfirmed=$false;
+        results=@(foreach ($name in $names) { [ordered]@{name="protection-$name";status='NOT RUN'} })}
+    $script:protectionTrusted = $true
+    $script:calls = @()
+    try {
+        Invoke-ProtectionValidation @{active_mode='fixed';function='CC';input_state='OFF';short_state='OFF'}
+        if ($cancelCase) { throw 'Cancelled source transition accepted.' }
+    } catch {
+        $failed = $script:report.results | Where-Object { $_.name -ceq $cancelCase }
+        if (-not $cancelCase -or $failed.error_code -cne 'confirmation_required') { throw }
+    }
+    @{cancel=$cancelCase;calls=$script:calls;trials=$script:report.protection_trials;
+      observations=@($script:report.results | Where-Object { $_.name -like '*-on' -or $_.name -like '*-source-off' })}
+})
+ConvertTo-Json -InputObject $results -Depth 6 -Compress
+""")
+    assert result.returncode == 0, result.stdout + result.stderr
+    evidence, cancelled_off, cancelled_on = json.loads(result.stdout)
+    assert 'protection-software-current-clear' not in cancelled_off['calls']
+    assert 'protection-software-power-trial' not in cancelled_off['calls']
+    assert 'protection-software-power-trial' not in cancelled_on['calls']
+    assert 'protection-hardware-power-baseline-trial' not in cancelled_on['calls']
+    calls = evidence['calls']
+    assert [call for call in calls if call.startswith('prompt:')] == [
+        'prompt:protection-software-current-source-off',
+        'prompt:protection-software-power-on',
+        'prompt:protection-software-power-source-off',
+        'prompt:protection-hardware-power-baseline-on',
+    ]
+    for trial in ('software-current', 'software-power'):
+        prefix = f'protection-{trial}'
+        assert calls.index(f'{prefix}-trial') < calls.index(f'prompt:{prefix}-source-off')
+        assert calls.index(f'prompt:{prefix}-source-off') < calls.index(f'{prefix}-clear')
+    assert calls.index('prompt:protection-software-power-on') < calls.index('protection-software-power-trial')
+    assert calls.index('prompt:protection-hardware-power-baseline-on') < calls.index(
+        'protection-hardware-power-baseline-trial')
+    assert calls.index('protection-hardware-power-baseline-off') < calls.index('protection-hardware-power-trial')
+    assert evidence['trials'] == dict.fromkeys(('software-current', 'software-power', 'hardware-power'), 'PASS')
+    assert {entry['name']: entry['status'] for entry in evidence['observations']} == {
+        'protection-software-current-on': 'SKIP', 'protection-software-current-source-off': 'PASS',
+        'protection-software-power-on': 'PASS', 'protection-software-power-source-off': 'PASS',
+        'protection-hardware-power-baseline-on': 'PASS', 'protection-hardware-power-on': 'SKIP',
+    }
+
+
+def test_protection_cancel_restores_original_settings(run_script):
+    # Exercise the real Protection finally/restore path after the operator
+    # cancels the physical source-isolation confirmation. All instrument
+    # exchanges are controlled fakes; no VISA or powered load is involved.
+    result = run_script([], harness="""
+$script:protectionTrials = @(
+    @{name='software-current';settings=[ordered]@{current=1};flags=@('OC','PS')}
+)
+$script:protectionScope = @('--hardware-validation','protection')
+$script:protectionTrusted = $true
+$script:report = @{
+    protection_trials=@{}
+    protection_input_off_unconfirmed=$false
+    protection_restore_unconfirmed=$false
+    results=@(foreach ($name in @(
+        'start-state','prepare-cc','prepare-cc-readback',
+        'software-current-original','software-current-cc','software-current-on',
+        'software-current-set','software-current-trial','software-current-off','software-current-events',
+        'software-current-source-off','software-current-clear',
+        'software-current-restore-guard','software-current-restore-settings',
+        'software-current-restore-cc','software-current-final'
+    )) { [ordered]@{name="protection-$name";status='NOT RUN'} })
+}
+$script:calls = @()
+function Read-ValidationAnswer([string]$Prompt, [string]$CaseName, [switch]$DiscardPendingKeys) {
+    $script:calls += "prompt:$CaseName"
+    return 'cancel'
+}
+function Invoke-ProtectionStep([string]$Name, [string[]]$ArgsOverride,
+                               [switch]$Cleanup, [switch]$AllowDefaultRefusal) {
+    $script:calls += $Name
+    if ($PSBoundParameters.ContainsKey('ArgsOverride')) {
+        $script:restoreArguments = @($ArgsOverride)
+    }
+    $entry = $script:report.results | Where-Object { $_.name -ceq $Name }
+    $settings = [pscustomobject]@{current='0.30'}
+    $fixedCc = [pscustomobject]@{range='low';current_a='0.20'}
+    $payload = switch ($Name) {
+        'protection-software-current-original' {
+            @{input_state='OFF';fixed_cc=$fixedCc;settings=$settings}
+        }
+        'protection-software-current-set' {
+            @{input_state='OFF';settings=[pscustomobject]@{current='1'}}
+        }
+        'protection-software-current-trial' {
+            @{input_state='OFF';current_a=0.20;condition=@{flags=@('OC','PS')}}
+        }
+        'protection-software-current-events' {
+            @{input_state='OFF';events=@()}
+        }
+        'protection-software-current-restore-guard' {
+            @{input_state='OFF'}
+        }
+        'protection-software-current-restore-settings' {
+            @{input_state='OFF';settings=$settings}
+        }
+        'protection-software-current-final' {
+            @{input_state='OFF';fixed_cc=$fixedCc;settings=$settings}
+        }
+        default { throw "Unexpected Protection exchange: $Name" }
+    }
+    $entry.status = 'PASS'
+    $entry.protection_state = $payload.input_state
+    $script:report.protection_input_off_unconfirmed = $payload.input_state -cne 'OFF'
+    return @{ok=$true;result=$payload}
+}
+try {
+    Invoke-ProtectionValidation @{
+        active_mode='fixed';function='CC';input_state='OFF';short_state='OFF'
+    }
+    throw 'Expected the source-isolation cancellation to stop Protection.'
+} catch {
+    $script:caught = $_.Exception.Message
+}
+$sourceOff = $script:report.results | Where-Object { $_.name -ceq 'protection-software-current-source-off' }
+$clear = $script:report.results | Where-Object { $_.name -ceq 'protection-software-current-clear' }
+$restoreNames = @('protection-software-current-restore-guard',
+                  'protection-software-current-restore-settings',
+                  'protection-software-current-final')
+$restoreStatuses = @{}
+foreach ($name in $restoreNames) {
+    $entry = $script:report.results | Where-Object { $_.name -ceq $name }
+    $restoreStatuses[$name] = $entry.status
+}
+@{
+    caught=$script:caught
+    source_off_status=$sourceOff.status
+    source_off_error=$sourceOff.error_code
+    clear_status=$clear.status
+    restore_unconfirmed=$script:report.protection_restore_unconfirmed
+    restore_input_off_unconfirmed=$script:report.protection_input_off_unconfirmed
+    restore_statuses=$restoreStatuses
+    restore_arguments=$script:restoreArguments
+    calls=$script:calls
+} | ConvertTo-Json -Depth 8 -Compress
+""")
+    assert result.returncode == 0, result.stdout + result.stderr
+    evidence = json.loads(result.stdout.splitlines()[-1])
+    assert evidence['caught'] == 'The operator did not confirm the Protection step.'
+    assert evidence['source_off_status'] == 'FAIL'
+    assert evidence['source_off_error'] == 'confirmation_required'
+    assert evidence['clear_status'] == 'NOT RUN'
+    assert evidence['restore_unconfirmed'] is False
+    assert evidence['restore_input_off_unconfirmed'] is False
+    assert evidence['restore_statuses'] == {
+        'protection-software-current-restore-guard': 'PASS',
+        'protection-software-current-restore-settings': 'PASS',
+        'protection-software-current-final': 'PASS',
+    }
+    assert evidence['restore_arguments'] == [
+        '--hardware-validation', 'protection', '--confirm', '--current', '0.30',
+    ]
+    assert evidence['calls'][-3:] == [
+        'protection-software-current-restore-guard',
+        'protection-software-current-restore-settings',
+        'protection-software-current-final',
+    ]
+
+
+def test_selected_execution_loop_has_no_repeated_operator_prompts(run_script):
+    # Execute the real selected-mode loop with controlled CLI responses.
+    # Timer, both Workflow loads and Sequence must proceed after the initial
+    # authorization without another Read-Host/Read-ValidationAnswer call.
+    result = run_script([], harness="""
+$source = (Join-Path (Get-Location) 'scripts/live-cli-check.ps1')
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    $source, [ref]$null, [ref]$null)
+$loop = $ast.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.ForStatementAst] -and
+        $node.Extent.Text.StartsWith('for ($i = 1; $i -le $planned.Count; $i++)')
+}, $true)
+if ($null -eq $loop) { throw 'Selected-mode execution loop was not found.' }
+
+$planned = @(
+    @{name='identify';command='identify';args=@()},
+    @{name='input-state';command='input-state';args=@()},
+    @{name='measure-off';command='measure';args=@()},
+    @{name='timer-setup';command='set-input-timer';args=@()},
+    @{name='timer-enable';command='input-timer-enable';args=@()},
+    @{name='timer-status-off';command='input-timer-status';args=@()},
+    @{name='timer-on';command='input-on';args=@()},
+    @{name='timer-expiry';command='input-timer-status';args=@()},
+    @{name='timer-off';command='input-off';args=@()},
+    @{name='timer-disable';command='input-timer-disable';args=@()},
+    @{name='timer-status-disabled';command='input-timer-status';args=@()},
+    @{name='timer-final-state';command='input-state';args=@()},
+    @{name='workflow-cc-timed-load';command='cc-timed-load';args=@();workflow_load=$true},
+    @{name='workflow-cc-discharge';command='cc-discharge';args=@();workflow_load=$true},
+    @{name='sequence';command='sequence';args=@()}
+)
+$script:report = @{
+    results=@(foreach ($step in $planned[1..($planned.Count - 1)]) {
+        [ordered]@{name=$step.name;status='NOT RUN'}
+    })
+    prechecks=@{input_off='NOT RUN'}
+    sequence_input_off_unconfirmed=$false
+}
+$script:calls = @()
+$script:answers = @()
+$timerSelected = $true
+$workflowSelected = $true
+$sequenceSelected = $true
+$traceSelected = $false
+$triggerSelected = $false
+$protectionSelected = $false
+$readbackSelected = $false
+$watch = [Diagnostics.Stopwatch]::StartNew()
+$TimerSeconds = '5'
+$perCommandDeadlineMs = 30000
+$traceStartDeadlineMs = 120000
+$readbackSelection = $null
+$isolatedBatchConfirmed = $false
+$triggerCompleted = $false
+$inputOnAttempted = $false
+$timerEnableAttempted = $false
+$timerPowered = $false
+$transientEnableAttempted = $false
+$slowRiseEnableAttempted = $false
+$activeTransientScope = $null
+$slowRiseCleanup = @()
+function Write-Host([string]$Text) {}
+function Read-Host([string]$Prompt) { throw "Unexpected extra Read-Host prompt: $Prompt" }
+function Read-ValidationAnswer([string]$Prompt, [string]$CaseName, [switch]$DiscardPendingKeys) {
+    throw "Unexpected extra operator confirmation: $CaseName"
+}
+function Assert-Runtime($Response, [string]$Name) {
+    if ($Response.ok -ne $true) { throw "Unexpected command failure: $Name" }
+}
+function Assert-InputOff($Response, [string]$Name) {
+    if ($Response.result.input_state -cne 'OFF') { throw "Input was not OFF: $Name" }
+}
+function Assert-ReadbackFields($Response, $Expected, [string]$Name) {}
+function Invoke-TimerExpiry($Step) {
+    $script:calls += 'timer-expiry'
+    ($script:report.results | Where-Object { $_.name -ceq $Step.name }).status = 'PASS'
+}
+function Confirm-TimerExpiry { $script:calls += 'timer-final-confirmed' }
+function Confirm-WorkflowLoad([string]$CaseName) { $script:calls += "workflow:$CaseName" }
+function Save-SequenceEvidence($Entry, $Result) {
+    $script:calls += 'sequence-evidence'
+    $script:report.sequence_input_off_unconfirmed = -not (
+        $Result.input_state -ceq 'OFF' -and $Result.cleanup.off_confirmed -eq $true
+    )
+}
+function Invoke-LiveCommand([string]$Command, [string]$CaseName, [string[]]$ExtraArgs,
+                            [int]$DeadlineMs, [string]$ExpectedError, [switch]$AllowCrHandoff) {
+    $script:calls += "command:$CaseName"
+    $payload = @{input_state='OFF'}
+    switch ($CaseName) {
+        'timer-status-off' {
+            $payload.seconds = 5
+            $payload.enabled = $true
+        }
+        'timer-on' {
+            $payload.input_state = 'ON'
+            $payload.timer_timing = @{on_write_started_ns=1000000000L;on_confirmed_ns=1100000000L}
+        }
+        'timer-status-disabled' {
+            $payload.seconds = 5
+            $payload.enabled = $false
+        }
+        'sequence' {
+            $payload = @{
+                input_state='OFF'
+                completed_steps=7
+                measurements=@(@{voltage_v=5;current_a=0.1;power_w=0.5})
+                input_states=@{input_state=@('ON','OFF')}
+                cleanup=@{off_confirmed=$true;attempted=$true}
+                failed_step=$null
+                original_error=@{code=$null}
+            }
+        }
+    }
+    return @{ok=$true;result=$payload}
+}
+Invoke-Expression $loop.Extent.Text
+@{
+    calls=$script:calls
+    answers=$script:answers
+    timer_powered=$timerPowered
+    timer_enabled=$timerEnableAttempted
+    input_on_attempted=$inputOnAttempted
+    sequence_off_unconfirmed=$script:report.sequence_input_off_unconfirmed
+} | ConvertTo-Json -Depth 8 -Compress
+""")
+    assert result.returncode == 0, result.stdout + result.stderr
+    evidence = json.loads(result.stdout.splitlines()[-1])
+    assert evidence['answers'] == []
+    assert evidence['timer_powered'] is False
+    assert evidence['timer_enabled'] is False
+    assert evidence['input_on_attempted'] is False
+    assert evidence['sequence_off_unconfirmed'] is False
+    calls = evidence['calls']
+    assert calls.count('timer-expiry') == 1
+    assert calls.count('timer-final-confirmed') == 1
+    assert calls.count('workflow:workflow-cc-timed-load') == 1
+    assert calls.count('workflow:workflow-cc-discharge') == 1
+    assert calls.count('sequence-evidence') == 1
+    assert 'command:timer-on' in calls and 'command:timer-off' in calls
+    assert 'command:sequence' in calls
+
+
 def test_trace_validation_preflight_only(run_script):
     checked = run_script(['-TraceOnly'], preflight=True)
     assert checked.returncode == 0, checked.stdout + checked.stderr
@@ -1382,6 +1843,68 @@ def test_trigger_validation_script_plan_and_noninteractive_refusal(run_script):
     mixed_names = [case['name'] for case in json.loads(
         mixed_report_path.read_text(encoding='utf-8-sig'))['cases']]
     assert mixed_names.index('trigger-snapshot') < mixed_names.index('transient-continuous-auto-setup')
+
+
+def test_external_trigger_requires_only_physical_pulse_after_start(run_script):
+    # The plan/refusal test cannot reach the EXTERNAL trial's former second
+    # prompt. Run the actual trial with scripted instrument replies and clock.
+    result = run_script([], harness="""
+$script:watch = @{ElapsedMilliseconds=0}
+$script:totalDeadlineMs = 900000
+$script:perCommandDeadlineMs = 30000
+$TriggerMaxOnSeconds = 60
+$TriggerObservationSeconds = 15
+$TriggerListRepeat = 1
+$LevelA = '0.1'; $LevelB = '0.2'
+$RiseSlew = '0.1'; $FallSlew = '0.1'
+$TriggerListWidthA = '2'; $TriggerListWidthB = '2'
+$script:triggerTrusted = $true
+$script:triggerProcessStillRunning = $false
+$script:triggerArtifacts = @()
+$script:report = @{results=@(foreach ($suffix in @('setup','observed','off','release')) {
+    [ordered]@{name="trigger-external-$suffix";status='NOT RUN'}
+})}
+$script:calls = @()
+function Read-ValidationAnswer { throw 'EXTERNAL must not ask for another Enter.' }
+function Read-Host { throw 'EXTERNAL must not ask for another Enter.' }
+function Start-Sleep([int]$Milliseconds) { $script:watch.ElapsedMilliseconds += $Milliseconds }
+function Save-Report {}
+function Get-TimerMonotonicNs { return [long]$script:watch.ElapsedMilliseconds * 1000000L }
+function Invoke-TriggerStep([string]$Name, [int]$DeadlineMs, [int]$TerminationMs,
+                            [long]$ObservationDeadlineNs, [switch]$Cleanup) {
+    $script:calls += $Name
+    switch ($Name) {
+        'trigger-external-source-status' { return @{result=@{input_state='OFF';source='EXTERNAL'}} }
+        'trigger-external-readback' {
+            return @{result=@{state_source='instrument_readback';selected=$true;input_state='OFF';
+                configuration=@{range='low';repeat_count=1;step_count=2;steps=@(
+                    @{current_a=0.1;slew_a_per_us=0.1;width_s=2},
+                    @{current_a=0.2;slew_a_per_us=0.1;width_s=2}
+                )}}}
+        }
+        'trigger-external-on' { return @{result=@{input_state='ON'}} }
+        'trigger-external-observed' {
+            Write-Host 'External capture ready (synthetic evidence)'
+            return @{result=@{validation_only=$true;validation_scope='trigger';trigger_source='EXTERNAL';
+                waveform_completion_known=$true;observation=@{source='instrument_current_samples';
+                    sample_count=10;events_confirmed=1;list_run_completed=$true}}}
+        }
+        default { return @{result=@{input_state='OFF'}} }
+    }
+}
+Invoke-TriggerTrial @{prefix='trigger-external';source='EXTERNAL';isList=$true}
+$entry = $script:report.results | Where-Object { $_.name -ceq 'trigger-external-observed' }
+@{calls=$script:calls;status=$entry.status;off_confirmed=$script:triggerOffConfirmed} | ConvertTo-Json -Compress
+""")
+    assert result.returncode == 0, result.stdout + result.stderr
+    evidence = json.loads(result.stdout.splitlines()[-1])
+    assert evidence['status'] == 'PASS' and evidence['off_confirmed']
+    assert evidence['calls'] == [
+        f'trigger-external-{suffix}' for suffix in (
+            'configure', 'source-status', 'setup', 'readback', 'on', 'observed', 'off', 'release',
+        )
+    ]
+    assert 'capture-ready message' in result.stdout
 
 
 @pytest.mark.parametrize('windows_powershell', [False, True] if os.name == 'nt' else [False])

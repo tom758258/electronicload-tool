@@ -737,8 +737,10 @@ It retains the common approved setup/manual OFF contingency, interactive
 confirmation, runtime checks, process deadlines, redaction and explicit OFF
 cleanup requirements described below. Use an independently armed hardware
 cutoff that limits actual loading to at most 10 seconds. Its clock must start
-no later than the SCPI Input ON write. Confirm the cutoff and the approved
-current-limited source at the Timer Input ON prompt. The 10-second cutoff
+no later than the SCPI Input ON write, not the initial Enter. Prepare the
+cutoff and confirm the approved current-limited source at the initial
+confirmation; no additional Timer readiness prompt is needed. Cancel if
+the cutoff cannot be ready at the actual write. The 10-second cutoff
 applies to this 5-second trial under its approved conditions.
 
 The planned physical trial confirms Input OFF, explicitly disables Timer,
@@ -1181,8 +1183,8 @@ and Worker LIVE are closed for Sequence.
 
 The contributor scope accepts only the four fixed documents, for 0.1 A CC,
 3 V CV, 1000 Ω CR and 0.10 W CW. Each has one ON, a 0.25 s Wait, measurement,
-and verified OFF. The script requires one operator confirmation for the four-trial
-Sequence batch, retaining per-request CLI confirmation, a 30 s command deadline
+and verified OFF. The initial Enter authorizes the four-trial Sequence batch
+without another operator prompt, retaining per-request CLI confirmation, a 30 s command deadline
 and a 900 s total deadline. The Core handles
 trusted cleanup on the existing session. The CLI directs the operator to
 switch off the load independently if a Remote transition during setup or Input ON
@@ -1365,9 +1367,11 @@ Fixed CC Low with a dedicated 5 V source limited to 0.8 A and use a 0.1 A
 setpoint. Timed Load requests OFF at the five-second boundary without adding queries after that boundary. Discharge samples every
 0.5 seconds and must reach 0.00010 Ah. It stops on a voltage of 4.5 V or lower
 or after 6 seconds if capacity is still below the target. Timing starts at
-the SCPI `INP ON` write. For each case, arm an independent hardware cutoff
-before confirming the trial so that load time, including OFF confirmation,
-cannot exceed 10 seconds from the write. If communication is lost, use that
+the SCPI `INP ON` write. Before the initial Enter, prepare an independent
+hardware cutoff for both load trials so that load time, including OFF confirmation,
+cannot exceed 10 seconds from each actual write. It must be ready or rearmed
+automatically as needed for every trial without a repeated readiness prompt.
+Cancel if this cannot be ensured. If communication is lost, use that
 cutoff immediately. Skip physical execution if the site cannot enforce this
 limit. Timed Load automatically samples instrument current and Input state
 before the five-second OFF schedule and checks the current band (0.09–0.11 A),
@@ -1393,9 +1397,10 @@ states are refused before settings writes.
 VON and same-range Slew save the original values, verify test readback, then
 restore and verify the original values. The Short trial checks ON and OFF
 state with isolated terminals and verifies Input OFF. LIST uses different
-first-step widths for A and B. Confirm isolation once for the isolated settings
-batch. Enter `OVERWRITE <slot>` if LIST is selected, only if that slot may be
-overwritten. Otherwise enter `ISOLATED`. The trial saves B to `-ListScratchSlot`,
+first-step widths for A and B. For isolation-only runs, complete the physical
+disconnection before the initial Enter. If LIST is selected, that Enter also
+authorizes overwriting the displayed scratch slot; cancel if it must be
+preserved. There is no separate typed authorization. The trial saves B to `-ListScratchSlot`,
 changes the working buffer to A, and verifies Recall restores B. It then saves A,
 changes the working buffer to B, and verifies Recall restores A. Both comparisons
 cover the complete LIST configuration. No manually supplied prior slot width is
@@ -1411,9 +1416,11 @@ the terminals isolated and use the recorded baseline for recovery at the
 instrument.
 
 The script runs source-connected trials (including Trigger and Protection)
-before the isolated settings batch. Full or mixed selections prompt once
-at the transition to physical isolation; the operator must disconnect both
-source and DUT before authorizing the batch. Automatic Readback needs no panel values
+before the isolated settings batch. Only mixed or Full selections with powered
+trials prompt once at the actual transition to physical isolation. The operator
+must disconnect both source and DUT before continuing; slot authorization
+was already given at the initial Enter. Isolation-only selections proceed
+without another prompt. Automatic Readback needs no panel values
 or manual function selection. With Input OFF it exercises known values and
 restores the original settings and function, including LIST without saving a
 slot. An enabled Transient starting state is supported when its original
@@ -1446,7 +1453,7 @@ Readback acceptance.
 | `-Connection` | `usb` | `usb` for USB INSTR or `asrl` for RS-232 ASRL INSTR |
 | `-Backend` | `system` | System VISA (`@ivi`) only |
 | `-Modes` | `full` | FULL, a single mode or a comma-separated selection |
-| `-ListScratchSlot` | 1 | LIST test slot (1–7) with per-run overwrite confirmation |
+| `-ListScratchSlot` | 1 | LIST test slot (1–7), overwrite authorized at initial Enter |
 | `-InputTimerOnly` | Off | Backward-compatible Timer-only shortcut, incompatible with `-Modes` |
 | `-SourceVoltageLimitV` | **5 V** | Operator-declared external source voltage, override >0 to 18 V |
 | `-SourceCurrentLimitA` | **0.8 A** | Operator-declared external source current limit, override >0 to 2 A |
@@ -1479,7 +1486,7 @@ source limit is not a measured value or a guarantee of DUT safety.
 | `-TriggerIntervalSeconds` | `5` | Seconds, Trigger TIMER source |
 | `-TriggerListWidthA` / `-TriggerListWidthB` | `2` / `2` | Seconds, finite LIST dwell |
 | `-TriggerListRepeat` | `1` | Finite LIST repetitions |
-| `-TriggerExternalSetup` | Optional | Extra external trigger wiring notes; operator still confirms equipment and safety |
+| `-TriggerExternalSetup` | Optional | Extra external trigger wiring notes reviewed before initial Enter |
 
 These are **validation script defaults**, not changes to Core or Product LIVE
 permissions. At 5 V, 10 Ω nominally implies 0.5 A, and 2 W implies 0.4 A;
@@ -1565,8 +1572,16 @@ See the [VISA connections and LIVE support](../../README.md#visa-connections-and
 
 Before any live VISA operation, the script validates the selected CLI plans,
 runs the applicable offline preflight checks, displays the selected Resource
-for operator verification, and requires a **single interactive Enter
-confirmation** (Ctrl+C cancels). A selection containing only Workflow,
+for operator verification, and displays all selected-mode preparation and
+authorization conditions before a **single interactive Enter confirmation**
+(Ctrl+C cancels). After that Enter, settings, readbacks, comparisons and
+cleanup are automatic. Only a required physical operation during a run
+can require another confirmation: source disconnection for a mixed isolated
+batch and Protection source isolation/reconnection. EXTERNAL Trigger uses
+a physical pulse after the capture-ready message, not another Enter.
+Timer and Workflow require a cutoff ready at each actual ON write without
+a repeated readiness prompt; cancel if the physical setup cannot enforce
+the existing deadline. A selection containing only Workflow,
 Measurement Extensions, Auxiliary Controls or LIST CC has no separate
 preflight invocation; the report leaves that check `NOT RUN`. All selected
 CLI plans are still validated. Noninteractive execution and redirected stdin
@@ -1575,7 +1590,7 @@ are blocked.
 | Check before Enter | Operator action |
 | --- | --- |
 | Target, Resource, backend and modes | Correct instrument; no other process controlling the device |
-| External source (**5 V / 0.8 A** by default) | Manually set and verify voltage and current limit |
+| External source (**5 V / 0.8 A** by default, only when selected modes include source-connected trials) | For those trials, manually set and verify voltage and current limit |
 | Load Input, wiring and DUT | Physically OFF and safe for every selected setting |
 | Manual OFF contingency | Independent means of making the circuit safe if communications fail |
 
@@ -1623,7 +1638,11 @@ Input OFF, a dedicated source set at the source to 5 V with a 0.8 A current
 limit, and an independent manual cutoff. The script checks current mode and
 interlocks, saves and restores the original Fixed CC and protection settings,
 and stops at the first failed trial. The temporary Fixed CC setpoint is 0.20 A.
-The operator confirms each Input ON with a fresh Enter.
+The initial Enter authorizes the powered trials with the dedicated source
+ready. The script keeps the individual CLI confirmation gates. After a
+software trip requires physical source isolation, the operator reconnects
+and energizes the same source at the next powered trial's prompt. No
+additional confirmation is requested while the physical setup is unchanged.
 
 The script reuses an available independent Readback snapshot only if no intervening mode-changing Workflow ran; otherwise it reads the current state. From Fixed CV
 or CW it confirms Input and Short are both OFF, prepares Fixed CC at 0.20 A Low,
@@ -1643,13 +1662,14 @@ For Hardware Power, first measure the baseline with the saved protection setting
 The script requires 0.18–0.22 A at the load during the baseline to establish that
 the source and wiring sustain the intended current. After confirming Input OFF,
 the script applies the temporary 0.50 W limit. Keep the same source settings and
-wiring, and press Enter again for the limited observation. The report records
+wiring; the limited observation proceeds automatically. The report records
 V×I for each observation and includes the stored `FETC:POW?` reading for
 reference. The stored reading does not trigger a fresh power measurement and
 the load's power readback accuracy does not support the narrow window at 0.50 W.
 
-For each software trip, verify the physical trip and Input OFF, isolate the
-external source, and confirm again before Clear. The load can momentarily
+The script verifies the software trip and Input OFF automatically. For each
+software trip, turn OFF and isolate the external source when instructed and
+confirm physical fault removal before Clear. The load can momentarily
 re-enable Input during Clear. If its state or communication becomes uncertain,
 use the independent manual cutoff. Restoration requires confirmed Input OFF
 and trusted communication. The script separately checks
@@ -1698,7 +1718,7 @@ independent operator action; the run stays FAIL.
 | `-LevelA`, `-LevelB`, `-RiseSlew`, `-FallSlew`, `-PulseWidth` | Distinct bounded Low-range CC levels, slew rates in A/μs and the Transient pulse width in seconds. Both current levels must fit the declared source limit. |
 | `-TriggerIntervalSeconds` | TIMER interval in seconds. The observation must accommodate two periods plus the pulse width. |
 | `-TriggerListWidthA`, `-TriggerListWidthB`, `-TriggerListRepeat` | LIST CC dwell times in seconds and a finite repeat count. The LIST must fit the observation window. |
-| `-TriggerExternalSetup` | Optional explanatory note; the console still requires physical equipment and wiring confirmation. |
+| `-TriggerExternalSetup` | Optional explanatory note shown before initial equipment and wiring confirmation. |
 
 The Contributor CLI samples instrument current in one session, dispatching the
 software Trigger only for HOLD or BUS after the baseline is observed and Input ON is rechecked. Plans with pulse or dwell too short for configured VISA query delays are rejected. It checks
@@ -1724,8 +1744,9 @@ disabled. [IT8800 User’s Manual V2.7, §§3.1, 3.4, 3.19.2](https://mm.digikey
 
 The script saves the original Trigger Source and interval while Input is OFF.
 After the initial batch safety authorization, HOLD, BUS and TIMER run without
-operator observation prompts. EXTERNAL retains equipment readiness and the
-physical pulse, requested only after the capture-ready message. The script
+operator observation prompts. EXTERNAL equipment readiness is confirmed
+before the initial Enter; only the physical pulse is requested after the
+capture-ready message. The script
 attempts and verifies Input OFF before marking waveform acceptance. The
 existing 900 s total limit and per-trial ON/OFF budget remain. Missing
 evidence, cancellation, deadlines or unsuccessful restoration fail validation;
