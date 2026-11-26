@@ -863,6 +863,9 @@ def test_configuration_readback_list_reads_observed_steps_and_rejects_bad_count(
         "query": "LIST:SLEW? 1", "step": 1, "minimum": "0.0001", "maximum": "0.25",
         "parse_failure": True,
     }
+
+    fake_visa.calls.clear()
+    fake_visa.responses["LIST:SLEW? 1"] = readings["LIST:SLEW? 1"]
     fake_visa.responses["LIST:STEP?"] = "85"
     with pytest.raises(LoadError) as failure:
         control.execute("list-status", resource=RESOURCE, hardware_validation="readback")
@@ -872,6 +875,8 @@ def test_configuration_readback_list_reads_observed_steps_and_rejects_bad_count(
     }
     assert "LIST:LEV? 1" not in fake_visa.calls
 
+    fake_visa.calls.clear()
+    fake_visa.responses["LIST:STEP?"] = readings["LIST:STEP?"]
     fake_visa.responses["LIST:RANG?"] = "61"
     with pytest.raises(LoadError) as failure:
         control.execute("list-status", resource=RESOURCE, hardware_validation="readback")
