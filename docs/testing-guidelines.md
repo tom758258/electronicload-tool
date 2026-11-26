@@ -584,7 +584,9 @@ conditional cleanup writes and the isolated batch after source-connected
 and Trigger trials. Check automatic Readback settings and restoration with
 a recording fake. Check the interactive Script boundary for all 21 single
 modes, mixed selections and Full: selected preparation, cutoff and slot
-overwrite notices precede the initial Enter; no repeat readiness, slot text
+overwrite notices precede the initial Enter; source setup appears only for
+source-connected trials, not read-only or Input-OFF-only selections; no repeat
+readiness, slot text
 or Input OFF confirmation follows it. Isolation-only runs require no second
 Enter; powered-to-isolated runs pause once for the actual disconnection.
 Protection prompts only for actual source isolation before Clear and
