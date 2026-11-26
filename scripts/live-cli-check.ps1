@@ -1357,7 +1357,8 @@ function Test-SourceConnectedTrials([string[]]$Modes) {
 function Confirm-OperatorStart([string[]]$Modes, $Isolated, [bool]$ConnectedTrials) {
     Write-Host "Operator resource check (LIVE): Target: $Target; Resource: $Resource; Backend: $Backend"
     Write-Host 'Physical checks before pressing Enter:'
-    if ($ConnectedTrials -or -not $Isolated.Count) {
+    # Only source-connected trials require the external source to be prepared.
+    if ($ConnectedTrials) {
         Write-Host "- Confirm the external source is manually set to $SourceVoltageLimitV V with a $SourceCurrentLimitA A current limit."
     }
     Write-Host '- Confirm physical load Input OFF, safe wiring/DUT and tolerance of every selected setting (use -Verbose or the report).'
