@@ -1328,7 +1328,8 @@ $selections += @(
     @{modes=@('readback');legacy=$true},
     @{modes=@('cc','readback');legacy=$true},
     @{modes=@('readback','auxiliary-controls');legacy=$true},
-    @{modes=@('input-timer','workflow');legacy=$false}
+    @{modes=@('input-timer','workflow');legacy=$false},
+    @{modes=@('system-query','cr-led','current-slow-rise');legacy=$false}
 )
 $results = @(foreach ($selectionCase in $selections) {
     $modes = $selectionCase.modes
@@ -1362,7 +1363,7 @@ ConvertTo-Json -InputObject $results -Depth 8 -Compress
 """)
     assert result.returncode == 0, result.stdout + result.stderr
     selections = json.loads(result.stdout)
-    assert len(selections) == len(FULL_MODES) + 7
+    assert len(selections) == len(FULL_MODES) + 8
     assert [item['modes'] for item in selections[:len(FULL_MODES)]] == [[mode] for mode in FULL_MODES]
     for item in selections:
         modes = set(item['modes'])
@@ -1376,6 +1377,7 @@ ConvertTo-Json -InputObject $results -Depth 8 -Compress
         assert len(answers) == 1 + int(connected and isolated)
         assert answers[0]['name'] == 'identify'
         notices = '\n'.join(answers[0]['notices'])
+        assert ('Confirm the external source is manually set' in notices) is connected
         assert ('Input Timer:' in notices) == ('input-timer' in modes)
         assert ('Workflow:' in notices) == ('workflow' in modes)
         assert ('10 s hardware cutoff' in notices) == bool(modes & {'input-timer', 'workflow'})
