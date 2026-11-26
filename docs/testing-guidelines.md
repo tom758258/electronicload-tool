@@ -582,7 +582,17 @@ then Save A and Recall from B, including ignored Save or Recall without a
 manually supplied prior slot width. In PlanOnly, check the safety queries,
 conditional cleanup writes and the isolated batch after source-connected
 and Trigger trials. Check automatic Readback settings and restoration with
-a recording fake, and one isolation/slot authorization for the batch. Check
+a recording fake. Check the interactive Script boundary for all 21 single
+modes, mixed selections and Full: selected preparation, cutoff and slot
+overwrite notices precede the initial Enter; no repeat readiness, slot text
+or Input OFF confirmation follows it. Isolation-only runs require no second
+Enter; powered-to-isolated runs pause once for the actual disconnection.
+Protection prompts only for actual source isolation before Clear and
+reconnection before the next powered trial, not for each Input ON. EXTERNAL
+Trigger retains only the physical pulse after capture-ready. Verify cancellation
+and unchanged per-request CLI confirmation, OFF/restore and refusal rules
+without real VISA. Use the existing PowerShell harness and relevant plan tests;
+do not repeat unrelated Core or Worker tests for this Script-only change. Check
 the original Fixed CC/Transient OFF guard for standalone settings, separate
 from automatic Readback mode restoration; only scratch-slot settings retain
 the 300-second command exception. For both LIST trials, check budget refusal
@@ -603,6 +613,6 @@ For automatic Contributor Trigger observation, exercise the affected
 `test_trigger.py` waveform cases and `test_live_validation_script.py` plan,
 refusal, deadline and cleanup cases. Check level order, timing brackets,
 missing or sparse samples, finite LIST RUN completion versus a stuck final
-dwell, rejection of infeasible timing before VISA, and source-specific dispatch with a final Input ON guard (no extra software trigger for TIMER or EXTERNAL). Only EXTERNAL retains physical signal
-preparation; sampled instrument evidence is not independent calibration.
+dwell, rejection of infeasible timing before VISA, and source-specific dispatch with a final Input ON guard (no extra software trigger for TIMER or EXTERNAL). Only EXTERNAL retains the physical signal after initial preparation; sampled
+instrument evidence is not independent calibration.
 

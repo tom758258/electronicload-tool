@@ -1348,6 +1348,85 @@ function New-SequencePlan {
     }
 }
 
+function Test-SourceConnectedTrials([string[]]$Modes) {
+    $connectedModes = @('cc','cv','cr','cw','transient-cc','transient-cv','transient-cr','transient-cw',
+        'trace','trigger','input-timer','protection','sequence','workflow')
+    return (@($Modes | Where-Object { $_ -in $connectedModes }).Count -gt 0)
+}
+
+function Confirm-OperatorStart([string[]]$Modes, $Isolated, [bool]$ConnectedTrials) {
+    Write-Host "Operator resource check (LIVE): Target: $Target; Resource: $Resource; Backend: $Backend"
+    Write-Host 'Physical checks before pressing Enter:'
+    if ($ConnectedTrials -or -not $Isolated.Count) {
+        Write-Host "- Confirm the external source is manually set to $SourceVoltageLimitV V with a $SourceCurrentLimitA A current limit."
+    }
+    Write-Host '- Confirm physical load Input OFF, safe wiring/DUT and tolerance of every selected setting (use -Verbose or the report).'
+    Write-Host '- Confirm no other application controls this instrument and an independent manual Input OFF procedure is available.'
+    if ('input-timer' -in $Modes) {
+        Write-Host '- Input Timer: prepare the independent 10 s hardware cutoff for the actual SCPI Input ON write of the 5 s Timer trial. It must not intervene during the 6 s observation.'
+    }
+    if ('workflow' -in $Modes) {
+        Write-Host '- Workflow: use the dedicated 5 V / 0.8 A source and 0.1 A CC trials. Prepare the independent 10 s hardware cutoff for each Timed Load and Discharge SCPI Input ON write, including OFF confirmation.'
+    }
+    if ('input-timer' -in $Modes -or 'workflow' -in $Modes) {
+        Write-Host '- The cutoff must be armed for every selected Timer/Workflow load trial, including any required automatic rearming between trials. Its clock must start no later than the actual SCPI ON write, not at this Enter, and include OFF confirmation. Do not manually change the source or load or intervene during the observation except for safety. Cancel if this setup cannot enforce the limit for every trial without a readiness pause.'
+    }
+    if ('protection' -in $Modes) {
+        Write-Host '- Protection: confirm a dedicated 5 V / 0.8 A source is ON, no important DUT, manual cutoff ready, and Timer, Short, Slow Rise and Transient OFF. The script can prepare Fixed CC from Fixed CV or CW while Input is OFF.'
+        Write-Host '- Protection: after each software trip, turn OFF and isolate the external source when instructed; reconnect and energize the same source when instructed for the next powered trial. Keep the same source and wiring for the hardware-power baseline and limited observation.'
+    }
+    if ('sequence' -in $Modes) {
+        Write-Host '- Sequence: authorize all four bounded Fixed Sequence Input ON operations (CC, CV, CR, CW) using the dedicated source and reviewed VISA runtime; the script checks the runtime and each trial.'
+    }
+    if ('measurement-extensions' -in $Modes) {
+        Write-Host '- Confirm the Average count may be set to 8 and left at that setting.'
+    }
+    if ('trigger' -in $Modes) {
+        Write-Host '- Confirm external On/Off and analog programming are disabled and external trigger wiring was reviewed while de-energized.'
+        Write-Host "- EXTERNAL Trigger equipment must be ready before starting: $TriggerExternalSetup"
+        Write-Host '- Verify rear TRIG and shared negative wiring and compatible TTL signal levels. Keep the signal inactive until each EXTERNAL capture-ready message, then apply one TTL low pulse (>10 us).'
+    } elseif ('workflow' -in $Modes -or $Isolated.Count) {
+        Write-Host '- Confirm external On/Off and analog programming are disabled.'
+    }
+    if ($Isolated.Count) {
+        if ($ConnectedTrials) {
+            Write-Host '- Keep the source connected for the powered trials. When prompted at the transition, physically disconnect the source and DUT and keep them disconnected for the isolated batch.'
+        } else {
+            Write-Host '- Physically disconnect the source and DUT before pressing Enter and keep them disconnected throughout the isolated settings batch.'
+        }
+        if (@($Isolated | Where-Object { $_.name -ceq 'fixed-status-cc' }).Count) {
+            Write-Host '- Automatic Readback temporarily applies known settings, including Short with isolated terminals, and verifies restoration. Readback itself does not overwrite a LIST slot.'
+        }
+        if (@($Isolated | Where-Object { $_.name -ceq 'list-cc-settings' }).Count) {
+            Write-Host "- LIST CC: pressing Enter authorizes overwriting Scratch Slot $ListScratchSlot in this run. The slot will retain test configuration A after success; the original working buffer is restored. Cancel if this slot must be preserved."
+        }
+        if (@($Isolated | Where-Object { $_.name -ceq 'list-cc-settings' -or
+                ($_.name -like 'auxiliary-controls-*' -and -not $_.ContainsKey('reuse_from')) }).Count) {
+            Write-Host '- For independent Auxiliary/LIST trials, Fixed CC with Short, Transient and Timer OFF is required at the isolated batch; the existing guarded mixed-run handoff applies when planned.'
+        }
+    }
+    if ('workflow' -in $Modes -or @($Modes | Where-Object { $_ -notin (@('readback','system-query','workflow') + $extensionModes + $featureModes) }).Count) {
+        Write-Host '- Selected trials may deliberately turn Input ON; the script explicitly commands and verifies OFF, but cannot guarantee OFF after communication failures.'
+    }
+    if ('protection' -in $Modes) {
+        $script:watch = [Diagnostics.Stopwatch]::StartNew()
+        return (Read-ValidationAnswer 'After completing these checks, press Enter to run selected CLI cases (Ctrl+C to cancel)' 'identify' -DiscardPendingKeys)
+    }
+    return (Read-Host 'After completing these checks, press Enter to run selected CLI cases (Ctrl+C to cancel)')
+}
+
+function Confirm-IsolatedBatch([bool]$AlreadyConfirmed, [bool]$ConnectedTrials, [string]$CaseName) {
+    if (-not $AlreadyConfirmed -and $ConnectedTrials) {
+        # A real physical transition cannot be authorized as already completed
+        # at the start of a powered run. Slot consent was given at startup.
+        $answer = Read-ValidationAnswer 'Physically disconnect the source and DUT now. Keep both disconnected for the isolated settings batch. Press Enter when disconnected (Ctrl+C to cancel)' $CaseName -DiscardPendingKeys
+        if ($null -eq $answer -or $answer -cne '') {
+            Fail-Case $CaseName 'operator_confirmation_required' 'Physical isolation was not confirmed.'
+        }
+    }
+    return $true
+}
+
 function New-ProtectionPlan {
     $set = $script:protectionScope + @('--confirm')
     $status = $script:protectionScope + @('--validation-snapshot')
@@ -1370,14 +1449,16 @@ function New-ProtectionPlan {
         )
         if ($trial.name -ceq 'hardware-power') {
             $script:protectionPlans += @(
-                @{name="$prefix-baseline-on";command='operator-observation';args=@()},
+                @{name="$prefix-baseline-on";command='operator-observation';args=@();
+                   condition='reconnect and energize source after physical isolation, if required'},
                 @{name="$prefix-baseline-trial";command='input-on';args=$set + @('--protection-trial','hardware-power-baseline')},
                 @{name="$prefix-baseline-off";command='input-off';args=@()}
             )
         }
         $script:protectionPlans += @(
             @{name="$prefix-set";command='protection-set';args=$set + $trialArgs},
-            @{name="$prefix-on";command='operator-observation';args=@()},
+            @{name="$prefix-on";command='operator-observation';args=@();
+               condition='reconnect and energize source after physical isolation, if required'},
             @{name="$prefix-trial";command='input-on';args=$set + @('--protection-trial',$trial.name)}
         )
         $off = @{name="$prefix-off";command='input-off';args=@()}
@@ -1466,8 +1547,14 @@ function Confirm-ProtectionOperator([string]$Name, [string]$Prompt) {
     ($script:report.results | Where-Object { $_.name -ceq $Name }).status = 'PASS'
 }
 
-function Invoke-PoweredProtectionTrial([string]$Prefix, [string]$Trial, [switch]$ExplicitOff) {
-    Confirm-ProtectionOperator "$Prefix-on" "Confirm the same dedicated source is ON at 5 V / 0.8 A, Input is OFF and manual cutoff is ready. Press Enter for $Trial at 0.20 A (Ctrl+C to cancel)."
+function Invoke-PoweredProtectionTrial([string]$Prefix, [string]$Trial, [switch]$ExplicitOff,
+                                       [switch]$ReconnectSource) {
+    if ($ReconnectSource) {
+        Confirm-ProtectionOperator "$Prefix-on" "Reconnect and energize the same dedicated 5 V / 0.8 A source with the manual cutoff ready. Press Enter when the physical operation is complete (Ctrl+C to cancel)."
+    } else {
+        # The initial Enter covers the unchanged source. No physical action.
+        ($script:report.results | Where-Object { $_.name -ceq "$Prefix-on" }).status = 'SKIP'
+    }
     $script:protectionPowered = $true
     try {
         return (Invoke-ProtectionStep "$Prefix-trial").result
@@ -1541,6 +1628,7 @@ function Invoke-ProtectionValidation($Selection) {
             current_a=[decimal]0.20;input_state='OFF';state_source='instrument_readback'} 'protection-prepare-cc-readback'
     }
 
+    $sourceIsolated = $false
     foreach ($trial in $script:protectionTrials) {
         $prefix = "protection-$($trial.name)"
         $script:report.protection_trials[$trial.name] = 'FAIL'
@@ -1558,7 +1646,8 @@ function Invoke-ProtectionValidation($Selection) {
                 }
             }
             if ($trial.name -ceq 'hardware-power') {
-                $baseline = Invoke-PoweredProtectionTrial "$prefix-baseline" 'hardware-power-baseline' -ExplicitOff
+                $baseline = Invoke-PoweredProtectionTrial "$prefix-baseline" 'hardware-power-baseline' -ExplicitOff -ReconnectSource:$sourceIsolated
+                $sourceIsolated = $false
                 if ($baseline.input_state -cne 'ON' -or 'PS' -cin $baseline.condition.flags -or
                     $baseline.voltage_v -lt 4.75 -or $baseline.voltage_v -gt 5.25 -or
                     $baseline.current_a -lt 0.18 -or $baseline.current_a -gt 0.22) {
@@ -1567,7 +1656,8 @@ function Invoke-ProtectionValidation($Selection) {
             }
             $fields = @($trial.settings.Keys)
             $null = Invoke-ProtectionStep "$prefix-set"
-            $observed = Invoke-PoweredProtectionTrial $prefix $trial.name -ExplicitOff:($trial.flags.Count -eq 0)
+            $observed = Invoke-PoweredProtectionTrial $prefix $trial.name -ExplicitOff:($trial.flags.Count -eq 0) -ReconnectSource:$sourceIsolated
+            $sourceIsolated = $false
             if ($trial.flags.Count -gt 0) {
                 if ($observed.input_state -cne 'OFF' -or
                     @($trial.flags | Where-Object { $_ -cnotin $observed.condition.flags }).Count -gt 0) {
@@ -1589,7 +1679,8 @@ function Invoke-ProtectionValidation($Selection) {
             }
             $null = Invoke-ProtectionStep "$prefix-events"
             if ($trial.flags.Count -gt 0) {
-                Confirm-ProtectionOperator "$prefix-source-off" 'Verify the trip on the load, turn OFF and isolate the external source, and press Enter only after confirming the fault condition is removed (Ctrl+C to cancel).'
+                Confirm-ProtectionOperator "$prefix-source-off" 'Turn OFF and isolate the external source now. Press Enter only after the source is isolated and the physical fault condition is removed (Ctrl+C to cancel).'
+                $sourceIsolated = $true
                 $null = Invoke-ProtectionStep "$prefix-clear"
             }
         } finally {
@@ -1660,18 +1751,11 @@ function Invoke-TriggerTrial($Trial) {
         switch ($Trial.source) {
             'EXTERNAL' {
                 Write-Host 'Keep the trigger signal inactive until the capture-ready message. Then apply one TTL low pulse (>10 us) to rear TRIG and its shared negative terminal.'
-                Write-Host "Confirm the reviewed equipment and wiring: $TriggerExternalSetup"
             }
             'TIMER' { Write-Host "The script will check at least two Timer pulses at $($Trial.interval) s intervals." }
             default { Write-Host 'The script will send one software trigger after Input ON is confirmed.' }
         }
         $awaitingObservation = $true
-        if ($Trial.source -ceq 'EXTERNAL') {
-            $ack = Read-ValidationAnswer 'With Input OFF, confirm the reviewed external trigger equipment is ready. Press Enter to begin' "$prefix-observed"
-            if ($null -eq $ack -or $ack -cne '') {
-                Fail-Case "$prefix-observed" 'operator_cancelled' 'External trigger equipment was not confirmed.'
-            }
-        }
         $hardStop = $script:watch.ElapsedMilliseconds + $TriggerMaxOnSeconds * 1000
         if ($hardStop -gt $totalDeadlineMs) { throw 'Insufficient total time for a bounded Trigger trial.' }
         # Reserve part of the operator's extra time for OFF and for ending
@@ -2107,7 +2191,7 @@ try {
             args=@('--trial','list-cc','--slot',[string]$ListScratchSlot,'--confirm-isolated');
             execution='live';isolated=$true;deadline_ms=300000;
             expected=@{input_state='OFF';restored=$true;recall_confirmed=$true;exited_list=$true};
-            condition="Source and DUT isolated, Fixed CC with Input, Short, Transient and Timer OFF. Authorize overwriting slot $ListScratchSlot once for the isolated batch. Establish and verify B as the slot baseline, then Save A, verify Recall A and restore the original working buffer. Refuse before setting writes if verification and restoration cannot fit the remaining 300 s budget."}
+            condition="Source and DUT isolated, Fixed CC with Input, Short, Transient and Timer OFF. Authorize overwriting slot $ListScratchSlot at the initial Enter. Establish and verify B as the slot baseline, then Save A, verify Recall A and restore the original working buffer. Refuse before setting writes if verification and restoration cannot fit the remaining 300 s budget."}
     }
     # Isolated cases are appended after source-connected and Trigger trials.
     # Reuse successful readback trials for identical Auxiliary cases.
@@ -2513,39 +2597,8 @@ try {
         exit 2
     }
     Invoke-SelectedPreflight -Modes $selectedModes -PreflightScript (Join-Path $PSScriptRoot 'preflight-cli.ps1')
-    Write-Host "Operator resource check (LIVE): Target: $Target; Resource: $Resource; Backend: $Backend"
-    Write-Host 'Physical checks before pressing Enter:'
-    $connectedModes = @('cc','cv','cr','cw','transient-cc','transient-cv','transient-cr','transient-cw',
-        'trace','trigger','input-timer','protection','sequence')
-    $connectedTrials = $workflowSelected -or @($selectedModes | Where-Object { $_ -in $connectedModes }).Count -gt 0
-    if ($connectedTrials -or -not $isolated.Count) {
-        Write-Host "- Confirm the external source is manually set to $SourceVoltageLimitV V with a $SourceCurrentLimitA A current limit."
-    }
-    if ($isolated.Count) {
-        Write-Host '- Before the isolated settings batch, physically disconnect the source and DUT and leave Input OFF. The script will prompt once.'
-    }
-    Write-Host '- Confirm physical load Input OFF, safe wiring/DUT and tolerance of every selected setting (use -Verbose or the report).'
-    Write-Host '- Confirm no other application controls this instrument and an independent manual Input OFF procedure is available.'
-    if ($protectionSelected) {
-        Write-Host '- Confirm Timer, Short, Slow Rise and Transient OFF for Protection. The script can prepare Fixed CC from Fixed CV or CW while Input is OFF.'
-    }
-    if ('measurement-extensions' -in $selectedModes) {
-        Write-Host '- Confirm the Average count may be set to 8 and left at that setting.'
-    }
-    if ($triggerSelected) {
-        Write-Host '- Confirm external On/Off and analog programming are disabled and external trigger wiring was reviewed while de-energized.'
-    } elseif ($workflowSelected -or @($planned | Where-Object isolated).Count) {
-        Write-Host '- Confirm external On/Off and analog programming are disabled.'
-    }
-    if ($workflowSelected -or @($selectedModes | Where-Object { $_ -notin (@('readback','system-query','workflow') + $extensionModes + $featureModes) }).Count) {
-        Write-Host '- Selected trials may deliberately turn Input ON; the script explicitly commands and verifies OFF, but cannot guarantee OFF after communication failures.'
-    }
-    $ack = if ($protectionSelected) {
-        $watch = [Diagnostics.Stopwatch]::StartNew()
-        Read-ValidationAnswer 'Confirm a dedicated source and no important DUT. Press Enter to start (Ctrl+C to cancel)' 'identify' -DiscardPendingKeys
-    } else {
-        Read-Host 'After completing these checks, press Enter to run selected CLI cases (Ctrl+C to cancel)'
-    }
+    $connectedTrials = Test-SourceConnectedTrials $selectedModes
+    $ack = Confirm-OperatorStart $selectedModes $isolated $connectedTrials
     if ($ack -cne '' -or (($triggerSelected -or $protectionSelected) -and $null -eq $ack)) {
         $report.status = 'BLOCKED'
         Save-Report
@@ -2579,7 +2632,6 @@ try {
     $phase = 'cases'
     $readbackSelection = $null
     $isolatedBatchConfirmed = $false
-    $sequenceBatchConfirmed = $false
     $triggerCompleted = $false
     for ($i = 1; $i -le $planned.Count; $i++) {
         if ($protectionSelected -and $i -eq $protectionIndex) { Invoke-ProtectionValidation $readbackSelection }
@@ -2608,31 +2660,12 @@ try {
         }
         Write-Host "Running $($step.name)..."
         if ($step.name -ceq 'timer-on') {
-            $answer = Read-ValidationAnswer 'Verify the approved current-limited source and arm the independent 10 s hardware cutoff before SCPI Input ON. The cutoff must not intervene during the 6 s observation; if this cannot be assured, cancel. Do not intervene except for safety. Press Enter only when ready' $step.name -DiscardPendingKeys
-            if ($null -eq $answer -or $answer -cne '') {
-                Fail-Case $step.name 'operator_confirmation_required' 'The Timer hardware cutoff was not confirmed.'
-            }
             $timerOnStartMs = $watch.ElapsedMilliseconds
             $timerPowered = $true
         }
-        if ($step.workflow_load) {
-            $prompt = 'Confirm a controlled 5 V source limited to 0.8 A. Arm the independent cutoff so Input cannot remain ON beyond 10 s from the start of the SCPI ON write, including cleanup.'
-            $prompt += ' Ensure the cutoff cannot intervene during the expected trial and do not manually change the source or load except for safety.'
-            $answer = Read-ValidationAnswer "$prompt Press Enter only when ready" $step.name -DiscardPendingKeys
-            if ($null -eq $answer -or $answer -cne '') {
-                Fail-Case $step.name 'operator_confirmation_required' 'The independent Workflow cutoff was not confirmed.'
-            }
-        }
         $liveArgs = $step.args
         if ($step.isolated -and -not $isolatedBatchConfirmed) {
-            $confirmation = if (@($planned | Where-Object { $_.name -ceq 'list-cc-settings' }).Count) {
-                "OVERWRITE $ListScratchSlot"
-            } else { 'ISOLATED' }
-            $answer = Read-ValidationAnswer "Confirm the source and DUT will remain physically disconnected and Input is OFF. Type $confirmation to authorize all isolated settings trials and any indicated slot overwrite in this batch" $step.name -DiscardPendingKeys
-            if ($answer -cne $confirmation) {
-                Fail-Case $step.name 'operator_confirmation_required' 'Isolation or LIST slot overwrite was not confirmed.'
-            }
-            $isolatedBatchConfirmed = $true
+            $isolatedBatchConfirmed = Confirm-IsolatedBatch $isolatedBatchConfirmed $connectedTrials $step.name
         }
         if ($step.ContainsKey('reuse_from')) {
             $prior = $report.results | Where-Object { $_.name -ceq $step.reuse_from }
@@ -2669,13 +2702,6 @@ try {
             $report.protection_input_off_unconfirmed = $true
         }
         if ($step.command -ceq 'sequence') {
-            if (-not $sequenceBatchConfirmed) {
-                $answer = Read-ValidationAnswer 'Confirm dedicated source, reviewed VISA runtime and all four safe Fixed Sequence trials. Press Enter to authorize their four bounded Input ON operations' $step.name -DiscardPendingKeys
-                if ($null -eq $answer -or $answer -cne '') {
-                    Fail-Case $step.name 'operator_confirmation_required' 'Sequence batch was not confirmed.'
-                }
-                $sequenceBatchConfirmed = $true
-            }
             $report.sequence_input_off_unconfirmed = $true
         }
         if ($step.name -eq 'input-state') { $report.prechecks.input_off = 'FAIL' }
