@@ -1503,7 +1503,7 @@ $script:report = @{
     results=@(foreach ($name in @(
         'start-state','prepare-cc','prepare-cc-readback',
         'software-current-original','software-current-cc','software-current-on',
-        'software-current-trial','software-current-off','software-current-events',
+        'software-current-set','software-current-trial','software-current-off','software-current-events',
         'software-current-source-off','software-current-clear',
         'software-current-restore-guard','software-current-restore-settings',
         'software-current-restore-cc','software-current-final'
@@ -1526,6 +1526,9 @@ function Invoke-ProtectionStep([string]$Name, [string[]]$ArgsOverride,
     $payload = switch ($Name) {
         'protection-software-current-original' {
             @{input_state='OFF';fixed_cc=$fixedCc;settings=$settings}
+        }
+        'protection-software-current-set' {
+            @{input_state='OFF';settings=[pscustomobject]@{current='1'}}
         }
         'protection-software-current-trial' {
             @{input_state='OFF';current_a=0.20;condition=@{flags=@('OC','PS')}}
