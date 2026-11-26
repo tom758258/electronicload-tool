@@ -1687,7 +1687,9 @@ can pass its dispatch case even when the separate waveform case fails. A
 preflight or baseline failure before a write leaves dispatch NOT RUN; a
 failed or unconfirmed write blocks the dependent waveform case.
 LIST failures retain selected nested diagnostic fields and Workflow discharge
-failures retain the final measured quantities and elapsed time.
+failures retain the final measured quantities and elapsed time. A late OFF
+reply is recorded as a received-reply timestamp, not as accepted OFF
+confirmation; the failure and manual cutoff requirement remain unchanged.
 The isolated Low CC readback trial also verifies the numeric candidate selector
 within the model programming resolution; an unconfirmed selector fails the trial.
 Arbitrary exception text,

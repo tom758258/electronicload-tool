@@ -57,6 +57,7 @@ class _BoundedCCSession:
         self.deadline = None
         self.on_dispatch = None
         self.off_write_started_ns = None
+        self.off_reply_received_ns = None
         self.timeout_ms = None
         self.sample_deadline = None
 
@@ -79,7 +80,13 @@ class _BoundedCCSession:
 
     def query(self, command):
         self._budget(query=True)
-        return self.session.query(command)
+        response = self.session.query(command)
+        if (self.off_write_started_ns is not None and command == "INP:STAT?"
+                and str(response).strip() == "0"):
+            # Record the received OFF reply, even if Core rejects it as late.
+            # This is diagnostic evidence, never an accepted OFF confirmation.
+            self.off_reply_received_ns = monotonic_ns()
+        return response
 
     def write(self, command):
         if command == "INP ON" and self.on_dispatch is not None:
@@ -359,12 +366,14 @@ def _run_cc(session, settings, stop, result, run_load, *, on_write_started=None)
             observe(control._turn_input_off(session)["input_state"])
             if timed:
                 off_confirmed_ns = monotonic_ns()
-                result.update(off_write_started_ns=session.off_write_started_ns, off_confirmed_ns=off_confirmed_ns)
                 if off_confirmed_ns - result["on_write_started_ns"] > CONTRIBUTOR_MAX_ON_SECONDS * 10**9:
                     raise LoadError("workflow_timeout", "Input OFF was confirmed after the maximum loading time.", 3)
+                result.update(off_write_started_ns=session.off_write_started_ns, off_confirmed_ns=off_confirmed_ns)
         except (Exception, KeyboardInterrupt) as exc:
             if timed and session.off_write_started_ns is not None:
                 result["off_write_started_ns"] = session.off_write_started_ns
+                if session.off_reply_received_ns is not None:
+                    result["off_reply_received_ns"] = session.off_reply_received_ns
             observe("UNKNOWN")
             if isinstance(exc, LoadError):
                 cleanup["error"] = exc.as_dict()

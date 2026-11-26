@@ -546,7 +546,7 @@ function Get-SettingsFailureEvidence($ErrorResult) {
 
 function Get-WorkflowFailureEvidence($Details) {
     $evidence = [ordered]@{}
-    foreach ($field in @('input_state','on_write_started_ns','off_write_started_ns','off_confirmed_ns',
+    foreach ($field in @('input_state','on_write_started_ns','off_write_started_ns','off_confirmed_ns','off_reply_received_ns',
                          'load_duration_confirmed','load_evidence_tail_ns','load_evidence_resolution_ns','current_samples',
                          'sample_count','capacity_ah','initial_voltage_v','stop_reason','elapsed_s')) {
         if ($null -ne $Details.$field) { $evidence[$field] = $Details.$field }
