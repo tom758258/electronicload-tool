@@ -597,8 +597,8 @@ Input ON. EXTERNAL retains its equipment readiness confirmation with Input OFF
 immediately before its trial and the physical pulse after capture-ready.
 Exercise the real Protection restore/clear orchestration with simulated
 command exchanges for success, persistent faults, late clean status,
-uncertain communication and unexpected ON. Check candidate Low CC selector
-readback and current resolution, and classify a confirmed software Trigger
+uncertain communication and unexpected ON. Check candidate Low CC range and
+current resolution, exact original restoration, and classify a confirmed software Trigger
 write separately from failed waveform acceptance. Preserve safe LIST nested
 errors, discharge cutoff evidence and late OFF timestamps without relaxing
 the existing limits. Verify cancellation

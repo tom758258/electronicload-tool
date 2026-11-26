@@ -1104,7 +1104,7 @@ $entry = $script:report.results[0]
     assert sessions.read_text().splitlines() == ['session']
 
 
-@pytest.mark.parametrize('scenario', ['timed', 'early-drop', 'voltage', 'late-off-reply'])
+@pytest.mark.parametrize('scenario', ['timed', 'early-drop', 'voltage', 'late-off-reply', 'discharge-drop'])
 def test_contributor_workflow_script_accepts_bounded_duration_evidence_after_confirmed_off(run_script, tmp_path, scenario):
     with (tmp_path / 'sitecustomize.py').open('a', encoding='utf-8') as preload:
         preload.write("""
@@ -1133,7 +1133,7 @@ def fake_session(_resource):
                 return response
             if self.input:
                 sleep(self.query_delay)
-                if command == 'MEAS:CURR?' and os.environ.get('FAKE_WORKFLOW_SCENARIO') == 'early-drop':
+                if command == 'MEAS:CURR?' and os.environ.get('FAKE_WORKFLOW_SCENARIO') in ('early-drop', 'discharge-drop'):
                     return '0'
                 if command == 'MEAS:VOLT?' and os.environ.get('FAKE_WORKFLOW_SCENARIO') == 'voltage':
                     return '4.4'
@@ -1153,7 +1153,7 @@ workflows.open_session = fake_session
 $python = $env:FAKE_WORKFLOW_PYTHON
 $repo = (Get-Location).Path
 $script:connectionArgs = @('--resource', $env:FAKE_WORKFLOW_RESOURCE)
-$command = if ($env:FAKE_WORKFLOW_SCENARIO -ceq 'voltage') { 'cc-discharge' } else { 'cc-timed-load' }
+$command = if ($env:FAKE_WORKFLOW_SCENARIO -cin @('voltage','discharge-drop')) { 'cc-discharge' } else { 'cc-timed-load' }
 $caseName = "workflow-$command"
 $script:reportDirectory = $env:FAKE_WORKFLOW_REPORT
 $script:report = @{status='NOT RUN';prechecks=@{};artifact_mode='minimal';
@@ -1196,6 +1196,13 @@ Save-Report
         assert diagnostic['stop_reason'] == 'voltage_cutoff'
         assert diagnostic['last_measurement']['voltage_v'] == 4.4
         assert diagnostic['elapsed_s'] >= 0 and diagnostic['cleanup']['off_confirmed']
+        return
+    if scenario == 'discharge-drop':
+        assert case['status'] == 'FAIL' and case['error_code'] == 'workflow_load_unconfirmed'
+        diagnostic = case['error_diagnostics']
+        assert diagnostic['failed_measurement'] == {'voltage_v': 5, 'current_a': 0}
+        assert diagnostic['sample_count'] == 0 and diagnostic['capacity_ah'] == 0
+        assert diagnostic['cleanup']['off_confirmed']
         return
     if scenario == 'early-drop':
         assert evidence['final_status'] == 'FAIL' and evidence['error_code'] == 'workflow_load_unconfirmed'

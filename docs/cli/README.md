@@ -1691,11 +1691,14 @@ phase and first differing field, and the capture guard's authorized LIST
 comparison. Private baseline or unrelated slot values and malformed reply text
 are not published. Known session/identity failures before software dispatch
 leave dispatch NOT RUN; unknown process termination remains uncertain.
-Workflow discharge failures retain the final measured quantities and elapsed time. A late OFF
+Workflow discharge failures retain the final measured quantities and elapsed time.
+A current or Input-state failure preserves the rejected sample separately from
+accepted samples and integrated capacity. A late OFF
 reply is recorded as a received-reply timestamp, not as accepted OFF
 confirmation; the failure and manual cutoff requirement remain unchanged.
-The isolated Low CC readback trial also verifies the numeric candidate selector
-within the model programming resolution; an unconfirmed selector fails the trial.
+The isolated Low CC readback trial verifies the selected Low range and current
+within the model programming resolution, without requiring the candidate numeric
+selector to echo the setpoint. The original selector and setpoint must be restored exactly.
 Arbitrary exception text,
 private recovery snapshots and VISA identifiers are not included in shareable
 error diagnostics. A failed bounded Clear retains its failure even if a later

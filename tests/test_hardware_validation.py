@@ -170,6 +170,7 @@ def test_isolated_auxiliary_trial_restores_or_stops_without_input_on(monkeypatch
     ("transient", "CURR", True, None),
     ("fixed-cc", "VOLT", False, "selector"), ("fixed-cc", "VOLT", False, "within"),
     ("fixed-cc", "VOLT", False, "outside"), ("fixed-cc", "VOLT", False, "zero_selector"),
+    ("fixed-cc", "VOLT", False, "function_changed"),
 ])
 def test_automatic_readback_trials_restore_original_mode_and_settings(
         monkeypatch, capsys, trial, function, enabled, fault):
@@ -186,10 +187,13 @@ def test_automatic_readback_trials_restore_original_mode_and_settings(
     original_range = fake.range
     if fault and fault != "zero_selector":
         def inject(device, command):
-            if command == "CURR:RANG 0.2" and fault == "selector":
-                device.range = 0.1
             if command == "CURR 0.2":
-                device.current = {"selector": 0.2, "within": 0.20004, "outside": 0.20006}[fault]
+                if fault == "selector":
+                    device.range = 6.0  # A Low range reply need not echo the candidate.
+                elif fault == "function_changed":
+                    device.function = "POW"
+                else:
+                    device.current = {"within": 0.20004, "outside": 0.20006}[fault]
 
         fake.after_write = inject
     fake.values.update({"INP:TIM": "0", "TRIG:TIM": "5", "SENS:AVER:COUN": "14"})
@@ -199,7 +203,7 @@ def test_automatic_readback_trials_restore_original_mode_and_settings(
     args = ["contributor-settings", "--trial", trial, "--resource", RESOURCE, "--json"]
     assert cli.main(args) == 2 and not fake.calls
     capsys.readouterr()
-    failed = fault in {"selector", "outside", "zero_selector"}
+    failed = fault in {"outside", "zero_selector", "function_changed"}
     assert cli.main([*args, "--confirm-isolated"]) == (3 if failed else 0)
     output = capsys.readouterr()
     payload = json.loads(output.out)
@@ -210,10 +214,20 @@ def test_automatic_readback_trials_restore_original_mode_and_settings(
         assert all("?" in call for call in fake.calls)
         assert fake.current == current and fake.range == original_range and fake.function == function
         return
+    if fault == "function_changed":
+        assert payload["error"]["code"] == "settings_restore_unconfirmed"
+        details = payload["error"]["details"]
+        assert details["manual_action_required"] and details["original_error"]["code"] == "readback_mismatch"
+        assert details["original_error"]["details"]["query"] == "FUNC?"
+        assert fake.function == "POW" and not fake.input
+        assert [call for call in fake.calls if call.startswith(("CURR:RANG ", "CURR "))] == [
+            "CURR:RANG 0.2", "CURR 0.2"]
+        assert "INP ON" not in fake.calls
+        return
     if failed:
         assert payload["error"]["code"] == "readback_mismatch"
         result = payload["error"]["details"]
-        assert result["query"] == ("CURR:RANG?" if fault == "selector" else "CURR?")
+        assert result["query"] == "CURR?"
     else:
         result = payload["result"]
     assert result["restored"] and result["input_state"] == "OFF"

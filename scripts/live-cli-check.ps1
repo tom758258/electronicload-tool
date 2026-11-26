@@ -555,14 +555,19 @@ function Get-WorkflowFailureEvidence($Details) {
                          'sample_count','capacity_ah','initial_voltage_v','stop_reason','elapsed_s')) {
         if ($null -ne $Details.$field) { $evidence[$field] = $Details.$field }
     }
-    $last = [ordered]@{}
-    foreach ($field in @('voltage_v','current_a','power_w','resistance_ohm')) {
-        if ($null -ne $Details.last_measurement.$field -and
-            [string]$Details.last_measurement.$field -cmatch '^[+-]?[0-9]+(\.[0-9]+)?([Ee][+-]?[0-9]+)?$') {
-            $last[$field] = $Details.last_measurement.$field
+    foreach ($sampleName in @('last_measurement','failed_measurement')) {
+        $sample = [ordered]@{}
+        foreach ($field in @('voltage_v','current_a','power_w','resistance_ohm')) {
+            if ($null -ne $Details.$sampleName.$field -and
+                [string]$Details.$sampleName.$field -cmatch '^[+-]?[0-9]+(\.[0-9]+)?([Ee][+-]?[0-9]+)?$') {
+                $sample[$field] = $Details.$sampleName.$field
+            }
         }
+        if ($sampleName -ceq 'failed_measurement' -and $Details.$sampleName.input_state -cin @('ON','OFF')) {
+            $sample.input_state = $Details.$sampleName.input_state
+        }
+        if ($sample.Count) { $evidence[$sampleName] = $sample }
     }
-    if ($last.Count) { $evidence.last_measurement = $last }
     if ([string]$Details.original_error.code -cmatch '^[a-z_]+$') {
         $evidence.original_error_code = $Details.original_error.code
     }
