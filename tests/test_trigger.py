@@ -375,6 +375,12 @@ def test_automatic_list_observation_requires_input_and_run_completion(monkeypatc
         assert code != 0
         assert result["error"]["code"] == ("input_not_on" if scenario == "input_drop"
                                             else "trigger_observation_unconfirmed")
+        details = result["error"]["details"]
+        assert details["trigger_source"] == source
+        assert details["sample_count"] == len(details["samples"])
+        assert details["software_trigger_write_attempted"] is (source == "BUS" and scenario != "input_drop")
+        assert details["software_trigger_write_confirmed"] is details["software_trigger_write_attempted"]
+        assert details["observation_phase"] in ("preflight", "baseline", "dispatch", "waveform")
     assert "MEAS:CURR?" in fake.calls
     assert fake.calls.count("*TRG") == int(source == "BUS" and scenario != "input_drop")
     assert not any(call in {"INP ON", "INP OFF"} for call in fake.calls)

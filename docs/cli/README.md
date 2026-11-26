@@ -1486,7 +1486,7 @@ source limit is not a measured value or a guarantee of DUT safety.
 | `-TriggerIntervalSeconds` | `5` | Seconds, Trigger TIMER source |
 | `-TriggerListWidthA` / `-TriggerListWidthB` | `2` / `2` | Seconds, finite LIST dwell |
 | `-TriggerListRepeat` | `1` | Finite LIST repetitions |
-| `-TriggerExternalSetup` | Optional | Extra external trigger wiring notes reviewed before initial Enter |
+| `-TriggerExternalSetup` | Optional | Extra external trigger wiring notes reviewed before the initial Enter and at the EXTERNAL readiness confirmation |
 
 These are **validation script defaults**, not changes to Core or Product LIVE
 permissions. At 5 V, 10 Ω nominally implies 0.5 A, and 2 W implies 0.4 A;
@@ -1573,12 +1573,12 @@ See the [VISA connections and LIVE support](../../README.md#visa-connections-and
 Before any live VISA operation, the script validates the selected CLI plans,
 runs the applicable offline preflight checks, displays the selected Resource
 for operator verification, and displays all selected-mode preparation and
-authorization conditions before a **single interactive Enter confirmation**
+authorization conditions before the **initial interactive Enter confirmation**
 (Ctrl+C cancels). After that Enter, settings, readbacks, comparisons and
-cleanup are automatic. Only a required physical operation during a run
-can require another confirmation: source disconnection for a mixed isolated
-batch and Protection source isolation/reconnection. EXTERNAL Trigger uses
-a physical pulse after the capture-ready message, not another Enter.
+cleanup are automatic. Additional confirmations are limited to physical source
+disconnection for a mixed isolated batch, Protection source isolation/reconnection,
+and EXTERNAL Trigger equipment readiness with Input OFF immediately before its
+trial. Apply the physical TTL pulse only after the capture-ready message.
 Timer and Workflow require a cutoff ready at each actual ON write without
 a repeated readiness prompt; cancel if the physical setup cannot enforce
 the existing deadline. A selection containing only Workflow,
@@ -1669,13 +1669,23 @@ the load's power readback accuracy does not support the narrow window at 0.50 W.
 
 The script verifies the software trip and Input OFF automatically. For each
 software trip, turn OFF and isolate the external source when instructed and
-confirm physical fault removal before Clear. The load can momentarily
-re-enable Input during Clear. If its state or communication becomes uncertain,
-use the independent manual cutoff. Restoration requires confirmed Input OFF
-and trusted communication. The script separately checks
+confirm physical fault removal. With confirmed Input OFF and trusted communication,
+the script restores the original protection thresholds and Fixed CC settings,
+then automatically issues one Clear and polls the condition with repeated OFF
+checks. It verifies the final restored settings and absence of protection faults.
+The load can momentarily re-enable Input during Clear; unexpected ON remains a
+failure even if the bounded OFF attempt succeeds. If state or communication
+becomes uncertain, use the independent manual cutoff. The script separately checks
 software and hardware power defaults and restores their saved values without
 resetting the instrument. The shareable report records trip, register,
 measurement, OFF and restoration results without the VISA resource string.
+Failed Trigger and Workflow observations retain sampled evidence and timing;
+isolated settings refusals retain selected numeric bounds and query/step
+diagnostics. Software Trigger diagnostics distinguish an attempted write from a
+confirmed write exchange, not waveform completion. Arbitrary exception text,
+private recovery snapshots and VISA identifiers are not included in shareable
+error diagnostics. A failed bounded Clear retains its failure even if a later
+trusted OFF status can verify the restored settings.
 When the CLI returns partial write progress, the report's
 `protection_write_progress` records confirmed setting values, unconfirmed
 writes, and settings that were never attempted.
@@ -1718,7 +1728,7 @@ independent operator action; the run stays FAIL.
 | `-LevelA`, `-LevelB`, `-RiseSlew`, `-FallSlew`, `-PulseWidth` | Distinct bounded Low-range CC levels, slew rates in A/μs and the Transient pulse width in seconds. Both current levels must fit the declared source limit. |
 | `-TriggerIntervalSeconds` | TIMER interval in seconds. The observation must accommodate two periods plus the pulse width. |
 | `-TriggerListWidthA`, `-TriggerListWidthB`, `-TriggerListRepeat` | LIST CC dwell times in seconds and a finite repeat count. The LIST must fit the observation window. |
-| `-TriggerExternalSetup` | Optional explanatory note shown before initial equipment and wiring confirmation. |
+| `-TriggerExternalSetup` | Optional explanatory note shown before initial authorization and at the EXTERNAL equipment readiness confirmation. |
 
 The Contributor CLI samples instrument current in one session, dispatching the
 software Trigger only for HOLD or BUS after the baseline is observed and Input ON is rechecked. Plans with pulse or dwell too short for configured VISA query delays are rejected. It checks
@@ -1744,10 +1754,11 @@ disabled. [IT8800 User’s Manual V2.7, §§3.1, 3.4, 3.19.2](https://mm.digikey
 
 The script saves the original Trigger Source and interval while Input is OFF.
 After the initial batch safety authorization, HOLD, BUS and TIMER run without
-operator observation prompts. EXTERNAL equipment readiness is confirmed
-before the initial Enter; only the physical pulse is requested after the
-capture-ready message. The script
-attempts and verifies Input OFF before marking waveform acceptance. The
+operator observation prompts. EXTERNAL equipment readiness requires a separate
+Enter after successful setup/readback with Input OFF and before Input ON.
+Keep the signal inactive until the capture-ready message, then apply the
+physical pulse. The script attempts and verifies Input OFF before marking
+waveform acceptance. The
 existing 900 s total limit and per-trial ON/OFF budget remain. Missing
 evidence, cancellation, deadlines or unsuccessful restoration fail validation;
 there is no manual Yes/No override.

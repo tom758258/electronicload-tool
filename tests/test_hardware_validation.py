@@ -165,13 +165,18 @@ def test_isolated_auxiliary_trial_restores_or_stops_without_input_on(monkeypatch
 @pytest.mark.parametrize("trial,function,enabled", [
     ("fixed-cc", "VOLT", False), ("fixed-cv", "CURR", False), ("fixed-cr", "CURR", False),
     ("fixed-cw", "CURR", False), ("transient", "VOLT", False), ("average", "CURR", False),
-    ("fixed-cc", "CURR", True), ("transient", "CURR", True),
+    ("fixed-cc", "CURR", True), ("fixed-cc", "CURR", False), ("transient", "CURR", True),
 ])
 def test_automatic_readback_trials_restore_original_mode_and_settings(monkeypatch, capsys, trial, function, enabled):
     fake = ValidationFake()
     fake.function = function
     fake.transient = enabled
     fake.range = 6
+    if trial == "fixed-cc" and function == "VOLT":
+        fake.range = fake.current = 0.1
+    elif trial == "fixed-cc" and not enabled:
+        fake.range = 60
+    original_range = fake.range
     fake.values.update({"INP:TIM": "0", "TRIG:TIM": "5", "SENS:AVER:COUN": "14"})
     initial = dict(fake.values)
     current = fake.current
@@ -185,7 +190,15 @@ def test_automatic_readback_trials_restore_original_mode_and_settings(monkeypatc
     assert result["restored"] and result["input_state"] == "OFF"
     assert fake.function == function and fake.mode == "FIX"
     assert not fake.input and fake.transient == enabled
-    assert fake.current == current
+    assert fake.current == current and fake.range == original_range
+    if trial == "fixed-cc":
+        writes = [call for call in fake.calls if call.startswith(("CURR:RANG ", "CURR "))]
+        if original_range == 0.1:
+            assert writes == ["CURR:RANG 0.2", "CURR 0.2", "CURR:RANG 0.1", "CURR 0.1"]
+        elif original_range == 6:
+            assert writes == ["CURR:RANG 0.1", "CURR 0.1", "CURR:RANG 6.0", "CURR 0.0"]
+        else:
+            assert writes == ["CURR 0.1", "CURR 0.0"]
     assert "INP ON" not in fake.calls
     for key, value in initial.items():
         try:

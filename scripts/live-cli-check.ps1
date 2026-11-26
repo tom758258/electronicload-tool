@@ -248,6 +248,7 @@ function Save-Report {
             if ($entry.Contains($field)) { $case[$field] = $entry[$field] }
         }
         if ($entry.Contains('error_code')) { $case.error_code = $entry.error_code }
+        if ($entry.Contains('error_diagnostics')) { $case.error_diagnostics = $entry.error_diagnostics }
         if ($entry.Contains('manual_action_required')) { $case.manual_action_required = $entry.manual_action_required }
         if ($entry.Contains('expected_error')) { $case.expected_error = $entry.expected_error }
         if ($entry.Contains('expected_range')) { $case.expected_range = $entry.expected_range }
@@ -526,6 +527,27 @@ function Get-ProtectionWriteProgress($Details) {
     }
 }
 
+function Get-WorkflowFailureEvidence($Details) {
+    $evidence = [ordered]@{}
+    foreach ($field in @('input_state','on_write_started_ns','off_write_started_ns','off_confirmed_ns',
+                         'load_duration_confirmed','load_evidence_tail_ns','load_evidence_resolution_ns','current_samples',
+                         'sample_count','capacity_ah','stop_reason')) {
+        if ($null -ne $Details.$field) { $evidence[$field] = $Details.$field }
+    }
+    if ($null -ne $Details.cleanup) {
+        $cleanup = [ordered]@{}
+        foreach ($field in @('required','attempted','off_confirmed')) {
+            if ($Details.cleanup.$field -is [bool]) { $cleanup[$field] = $Details.cleanup.$field }
+        }
+        if ($Details.cleanup.reason -ceq 'session_untrusted') { $cleanup.reason = 'session_untrusted' }
+        if ([string]$Details.cleanup.error.code -cmatch '^[a-z_]+$') {
+            $cleanup.error_code = $Details.cleanup.error.code
+        }
+        if ($cleanup.Count) { $evidence.cleanup = $cleanup }
+    }
+    return $evidence
+}
+
 function Invoke-LiveCommand([string]$Command, [string]$CaseName,
                             [string[]]$ExtraArgs = @(),
                             [int]$DeadlineMs = 30000,
@@ -731,6 +753,47 @@ raise SystemExit(main(contributor_stop=stop, settings_on_baseline=handoff))
             $code = [string]$result.error.code
             $details = $result.error.details
             $entry['error_code'] = $(if ($code -cmatch '^[a-z_]+$') { $code } else { 'execution_failed' })
+            # Explicitly select diagnostic evidence. Never publish arbitrary
+            # exception text, nested errors, VISA data or recovery baselines.
+            $evidence = [ordered]@{}
+            if ($isolatedSettings -and $code -cin @('invalid_response','invalid_range_readback','list_baseline_unrestorable','readback_mismatch')) {
+                if ([string]$details.query -cmatch '^[A-Z][A-Z0-9:]*\?( [0-9]{1,2})?$') { $evidence.query = $details.query }
+                foreach ($field in @('step','observed','expected','minimum','maximum')) {
+                    if ([string]$details.$field -cmatch '^[+-]?[0-9]+(\.[0-9]+)?([Ee][+-]?[0-9]+)?$') {
+                        $evidence[$field] = $details.$field
+                    }
+                }
+                if ($details.range -cin @('low','high')) { $evidence.range = $details.range }
+                if ($details.field -cin @('current_a','voltage_v','resistance_ohm','power_w')) { $evidence.field = $details.field }
+                if ($details.no_settings_written -eq $true) { $evidence.no_settings_written = $true }
+            }
+            if ($Command -ceq 'trigger-observe' -and $details.trigger_source -cin @('HOLD','BUS','TIMER','EXTERNAL')) {
+                foreach ($field in @('trigger_source','observation_phase','software_trigger_write_attempted',
+                                     'software_trigger_write_confirmed','sample_count','samples')) {
+                    if ($null -ne $details.$field) { $evidence[$field] = $details.$field }
+                }
+            }
+            if ($workflowLoad) { $evidence = Get-WorkflowFailureEvidence $details }
+            if ($Command -ceq 'protection-clear' -and $null -ne $details.condition.raw) {
+                $evidence.condition = $details.condition
+            }
+            if ($result.error.message -cin @('Fixed readback differs from the expected setting.',
+                    'Original CC selector cannot safely restore the setpoint.',
+                    'Current slew is outside the bounds for the reported range.',
+                    'Invalid LIST count.', 'LIST step readback is outside model limits.',
+                    'The original LIST current range cannot be restored.',
+                    'Pre-trigger current baseline was not observed.', 'Observation deadline reached.',
+                    'No time remains for the complete software Trigger observation.',
+                    'Current samples did not establish the expected waveform.',
+                    'Current sample arrived after the deadline.', 'LIST status arrived after the deadline.',
+                    'LIST observation encountered a protection fault.', 'LIST was already running before the trial.',
+                    'Timed Load lost current or Input ON.', 'Timed Load sample coverage is insufficient.',
+                    'Timed Load final sample is too far from scheduled OFF.',
+                    'OFF schedule or final sample coverage is insufficient.',
+                    'Protection remains active after Clear.', 'Input turned ON after Protection Clear.')) {
+                $evidence.message = $result.error.message
+            }
+            if ($evidence.Count) { $entry['error_diagnostics'] = $evidence }
             if (($workflowLoad -or $isolatedSettings) -and $details.manual_action_required -eq $true) {
                 $entry['manual_action_required'] = $true
                 if ($workflowLoad) {
@@ -846,21 +909,23 @@ raise SystemExit(main(contributor_stop=stop, settings_on_baseline=handoff))
             Fail-Case $CaseName 'settings_baseline_unconfirmed' 'The original settings were not displayed before the trial.'
         }
         if ($workflowLoad) {
+            $entry['error_diagnostics'] = Get-WorkflowFailureEvidence $result.result
             $finished = $result.result.off_confirmed_ns
             if (-not $timerWriteStartedNs -or $result.result.on_write_started_ns -ne $timerWriteStartedNs -or
                 $null -eq $finished -or $finished -lt $timerWriteStartedNs -or $finished -gt $TimerObservationDeadlineNs -or
                 $result.result.cleanup.off_confirmed -ne $true -or $result.result.input_state -cne 'OFF') {
                 $entry['manual_action_required'] = $true
+                $entry.error_diagnostics.message = 'The CLI did not confirm Input OFF within the loading deadline.'
                 Write-Host "FAIL ${CaseName}: use the independent hardware cutoff now. Input OFF is unconfirmed."
                 Fail-Case $CaseName 'workflow_cleanup_unconfirmed' 'The CLI did not confirm Input OFF within the loading deadline.'
             }
             if ($Command -ceq 'cc-timed-load') {
+                $entry['load_duration_confirmed'] = $false
                 $offWrite = $result.result.off_write_started_ns
                 if ($null -eq $offWrite -or $offWrite -lt ($timerWriteStartedNs + 5000000000L) -or $offWrite -gt $finished) {
+                    $entry.error_diagnostics.message = 'The SCPI Input OFF time does not confirm the 5 s load schedule.'
                     Fail-Case $CaseName 'workflow_load_unconfirmed' 'The SCPI Input OFF time does not confirm the 5 s load schedule.'
                 }
-                $entry['load_duration_confirmed'] = $false
-                $entry['response'] = $result
                 if ($result.result.load_duration_confirmed -ne $true -or
                     $result.result.load_evidence_source -cne 'instrument_current_samples' -or
                     $null -eq $result.result.load_evidence_tail_ns -or
@@ -868,10 +933,12 @@ raise SystemExit(main(contributor_stop=stop, settings_on_baseline=handoff))
                     $result.result.load_evidence_tail_ns -gt 1000000000L -or
                     $result.result.load_evidence_resolution_ns -ne 1000000000L -or
                     @($result.result.current_samples).Count -lt 2) {
+                    $entry.error_diagnostics.message = 'Automatic sampled current evidence is insufficient.'
                     Fail-Case $CaseName 'workflow_load_unconfirmed' 'Automatic sampled current evidence is insufficient.'
                 }
                 $entry['load_duration_confirmed'] = $true
             }
+            $entry.Remove('error_diagnostics')
         }
         if ($script:traceSelected -and $Command -eq 'trace-start') {
             # ConvertFrom-Json can normalize ISO datetimes to the runner's local
@@ -1217,7 +1284,7 @@ function New-TriggerPlan {
                 condition='Use sampled waveform evidence and confirmed OFF from this trial.'}
         } else {
             $observation = @{name="$prefix-observed";command='trigger-observe';args=$captureArgs;execution='live';
-                condition='Sample current within the observation window; EXTERNAL requires only the physical pulse at capture readiness.'}
+                condition='Sample current within the observation window; EXTERNAL requires equipment confirmation with Input OFF before ON and a physical pulse at capture readiness.'}
         }
         if ($source -in @('HOLD','BUS')) {
             $script:triggerPlans += @{name="$prefix-off";command='input-off';args=$triggerScope}
@@ -1384,7 +1451,7 @@ function Confirm-OperatorStart([string[]]$Modes, $Isolated, [bool]$ConnectedTria
     }
     if ('trigger' -in $Modes) {
         Write-Host '- Confirm external On/Off and analog programming are disabled and external trigger wiring was reviewed while de-energized.'
-        Write-Host "- EXTERNAL Trigger equipment must be ready before starting: $TriggerExternalSetup"
+        Write-Host "- EXTERNAL Trigger equipment will be confirmed with Input OFF immediately before its trial: $TriggerExternalSetup"
         Write-Host '- Verify rear TRIG and shared negative wiring and compatible TTL signal levels. Keep the signal inactive until each EXTERNAL capture-ready message, then apply one TTL low pulse (>10 us).'
     } elseif ('workflow' -in $Modes -or $Isolated.Count) {
         Write-Host '- Confirm external On/Off and analog programming are disabled.'
@@ -1469,19 +1536,20 @@ function New-ProtectionPlan {
         $script:protectionPlans += $off
         $script:protectionPlans += @{name="$prefix-events";command='protection-status';args=$script:protectionScope + @('--events')}
         if ($trial.flags.Count -gt 0) {
-            $script:protectionPlans += @(
-                @{name="$prefix-source-off";command='operator-observation';args=@()},
-                @{name="$prefix-clear";command='protection-clear';args=$set}
-            )
+            $script:protectionPlans += @{name="$prefix-source-off";command='operator-observation';args=@()}
         }
         $script:protectionPlans += @(
             @{name="$prefix-restore-guard";command='input-state';args=@()},
             @{name="$prefix-restore-settings";command='protection-set';args=$set + $trialArgs;
               condition='use the original values read before the trial'},
             @{name="$prefix-restore-cc";command='set-cc';args=@('--current','0.20','--range','low');
-              condition='use the original Fixed CC settings'},
-            @{name="$prefix-final";command='protection-status';args=$status}
+              condition='use the original Fixed CC settings'}
         )
+        if ($trial.flags.Count -gt 0) {
+            $script:protectionPlans += @{name="$prefix-clear";command='protection-clear';args=$set;
+                condition='physical isolation confirmed; original thresholds and Fixed CC restored'}
+        }
+        $script:protectionPlans += @{name="$prefix-final";command='protection-status';args=$status}
     }
     foreach ($group in @('software-power', 'hardware-power')) {
         $prefix = "protection-default-$group"
@@ -1572,7 +1640,8 @@ function Invoke-PoweredProtectionTrial([string]$Prefix, [string]$Trial, [switch]
     }
 }
 
-function Restore-Protection([string]$Prefix, $Original, $Fields, [bool]$RestoreCc) {
+function Restore-Protection([string]$Prefix, $Original, $Fields, [bool]$RestoreCc,
+                            [switch]$ClearAfterRestore) {
     $script:report.protection_restore_unconfirmed = $true
     if (-not $script:protectionTrusted -or $script:report.protection_input_off_unconfirmed) {
         Write-Host 'Protection restoration needs trusted VISA and confirmed Input OFF. Verify manually.'
@@ -1589,6 +1658,15 @@ function Restore-Protection([string]$Prefix, $Original, $Fields, [bool]$RestoreC
         $arguments = @('--current',$Original.fixed_cc.current_a,'--range',$Original.fixed_cc.range)
         $null = Invoke-ProtectionStep "$Prefix-restore-cc" -ArgsOverride $arguments
     }
+    $clearFailure = $null
+    if ($ClearAfterRestore) {
+        try {
+            $null = Invoke-ProtectionStep "$Prefix-clear"
+        } catch {
+            $clearFailure = $_
+            if (-not $script:protectionTrusted -or $script:report.protection_input_off_unconfirmed) { throw }
+        }
+    }
     $final = Invoke-ProtectionStep "$Prefix-final"
     if ($final.result.fixed_cc.range -cne $Original.fixed_cc.range -or
         [decimal]$final.result.fixed_cc.current_a -ne [decimal]$Original.fixed_cc.current_a) {
@@ -1603,6 +1681,11 @@ function Restore-Protection([string]$Prefix, $Original, $Fields, [bool]$RestoreC
         }
     }
     $script:report.protection_restore_unconfirmed = $false
+    if ($ClearAfterRestore -and ($null -eq $final.result.condition.raw -or
+        @($final.result.condition.flags | Where-Object { $_ -cin @('VF','OC','OP','OT','RRV','LRV','OV','PS') }).Count -gt 0)) {
+        Fail-Case "$Prefix-final" 'protection_still_active' 'Protection fault remains after restoration and Clear.'
+    }
+    if ($null -ne $clearFailure) { throw $clearFailure }
 }
 
 function Invoke-ProtectionValidation($Selection) {
@@ -1637,6 +1720,7 @@ function Invoke-ProtectionValidation($Selection) {
         $changeCc = $original.result.fixed_cc.range -cne 'low' -or
             [decimal]$original.result.fixed_cc.current_a -ne 0.20
         $fields = @()
+        $clearAfterRestore = $false
         try {
             $script:report.protection_restore_unconfirmed = $true
             if ($changeCc) {
@@ -1682,10 +1766,13 @@ function Invoke-ProtectionValidation($Selection) {
             if ($trial.flags.Count -gt 0) {
                 Confirm-ProtectionOperator "$prefix-source-off" 'Turn OFF and isolate the external source now. Press Enter only after the source is isolated and the physical fault condition is removed (Ctrl+C to cancel).'
                 $sourceIsolated = $true
-                $null = Invoke-ProtectionStep "$prefix-clear"
+                $clearAfterRestore = $true
             }
         } finally {
-            Restore-Protection $prefix $original.result $fields $changeCc
+            Restore-Protection $prefix $original.result $fields $changeCc -ClearAfterRestore:$clearAfterRestore
+        }
+        if ($script:report.protection_restore_unconfirmed) {
+            Fail-Case "$prefix-final" 'protection_restore_unconfirmed' 'Protection restoration was not confirmed.'
         }
         $script:report.protection_trials[$trial.name] = 'PASS'
     }
@@ -1752,11 +1839,18 @@ function Invoke-TriggerTrial($Trial) {
         switch ($Trial.source) {
             'EXTERNAL' {
                 Write-Host 'Keep the trigger signal inactive until the capture-ready message. Then apply one TTL low pulse (>10 us) to rear TRIG and its shared negative terminal.'
+                Write-Host "Confirm the reviewed equipment and wiring: $TriggerExternalSetup"
             }
             'TIMER' { Write-Host "The script will check at least two Timer pulses at $($Trial.interval) s intervals." }
             default { Write-Host 'The script will send one software trigger after Input ON is confirmed.' }
         }
         $awaitingObservation = $true
+        if ($Trial.source -ceq 'EXTERNAL') {
+            $ack = Read-ValidationAnswer 'With Input OFF, confirm the reviewed external trigger equipment is ready. Press Enter to begin (Ctrl+C to cancel)' "$prefix-observed" -DiscardPendingKeys
+            if ($null -eq $ack -or $ack -cne '') {
+                Fail-Case "$prefix-observed" 'operator_cancelled' 'External trigger equipment was not confirmed.'
+            }
+        }
         $hardStop = $script:watch.ElapsedMilliseconds + $TriggerMaxOnSeconds * 1000
         if ($hardStop -gt $totalDeadlineMs) { throw 'Insufficient total time for a bounded Trigger trial.' }
         # Reserve part of the operator's extra time for OFF and for ending

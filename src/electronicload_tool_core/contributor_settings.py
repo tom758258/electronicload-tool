@@ -174,7 +174,8 @@ def _short_trial(session):
 def _list_settings(session, *, expected_count=None):
     raw = readback._list_configuration(session, expected_count=expected_count)
     if raw["range"] is None:
-        raise LoadError("list_baseline_unrestorable", "The original LIST current range cannot be restored.", 3)
+        raise LoadError("list_baseline_unrestorable", "The original LIST current range cannot be restored.", 3,
+                        query="LIST:RANG?", observed=str(raw["range_readback_a"]))
     return c.validate_list_cc({key: raw[key] for key in c.LIST_FIELDS})
 
 
@@ -336,6 +337,11 @@ def _fixed_readback_trial(session, function):
         return validator(value) if function == "CW" else validator(value, range_name)
 
     original = validate(baseline[field])
+    cc_selector = Decimal(str(baseline["range_readback_a"])) if function == "CC" else None
+    change_selector = function == "CC" and range_name == "low"
+    if change_selector and cc_selector < original:
+        raise LoadError("readback_mismatch", "Original CC selector cannot safely restore the setpoint.", 3,
+                        field=field, query="CURR:RANG?", range=range_name)
     candidates = {"CC": ("0.1", "0.2"), "CV": ("3", "4"),
                   "CR": ("5", "10") if range_name == "low" else ("1000", "2000"),
                   "CW": ("0.10", "0.20")}[function]
@@ -347,25 +353,41 @@ def _fixed_readback_trial(session, function):
         candidate = next(validate(value) for value in candidates if Decimal(value) != original)
     prefix = c.TRANSIENT_FUNCTIONS[function]
 
-    def observe(value):
+    def observe(value, *, testing=False):
         snapshot = readback.snapshot(session, "fixed-status")
+        actual = snapshot.get(field)
+        matches = actual is not None and (
+            c._current_within(actual, value, range_name) if function == "CC" and testing
+            else Decimal(str(actual)) == value)
         if (snapshot["input_state"] != "OFF" or snapshot["function"] != function
-                or snapshot["range"] != range_name or Decimal(str(snapshot[field])) != value
-                or snapshot.get("range_auto") != baseline.get("range_auto")):
-            raise _mismatch("Fixed readback differs from the expected setting.")
+                or snapshot["range"] != range_name or not matches
+                or snapshot.get("range_auto") != baseline.get("range_auto")
+                or (function == "CC" and not (testing and change_selector)
+                    and Decimal(str(snapshot["range_readback_a"])) != cc_selector)):
+            details = {"field": field, "range": snapshot["range"],
+                       "query": f"{prefix}?"}
+            if testing and actual is not None:
+                details.update(expected=str(value), observed=str(actual))
+            raise LoadError("readback_mismatch", "Fixed readback differs from the expected setting.", 3, **details)
         return snapshot
 
     def exercise(write):
         observe(original)
+        if change_selector:
+            # IT8812C accepts a numeric selector before a nonzero Low CC level.
+            write(f"CURR:RANG {candidate:f}")
         write(f"{prefix} {candidate:f}")
-        return {"observed": observe(candidate), "expected_setpoint": str(candidate)}
+        return {"observed": observe(candidate, testing=True), "expected_setpoint": str(candidate)}
 
     def restore():
-        _selection_guard(session)
-        # Setpoint-only changes preserve the Range selector; do not attempt a
-        # restore into a different or unrecognized range.
+        selected = _selection_guard(session)
+        if selected["active_mode"] != "fixed" or selected["function"] != function:
+            raise _mismatch("Fixed selection changed; original setpoint cannot be safely restored.")
         if function != "CW" and readback._range(session, function)[0] != range_name:
             raise _mismatch("Fixed Range changed; original setpoint cannot be safely restored.")
+        if change_selector:
+            c._input_off(session)
+            c._write(session, f"CURR:RANG {cc_selector:f}")
         c._input_off(session)
         c._write(session, f"{prefix} {original:f}")
         observe(original)
@@ -703,6 +725,9 @@ def execute(trial, *, mode, resource, backend, model_id, confirmed, slot=None, p
             key = "fixed-" + function.lower()
             prefix = c.TRANSIENT_FUNCTIONS[function]
             writes[key] = [f"{prefix} <test>", f"{prefix} <original>"]
+            if function == "CC":
+                conditional[key] = [{"condition": "Original CC range is Low; selectors precede the respective test and restore setpoints",
+                                     "writes": ["CURR:RANG <test>", "CURR:RANG <original selector>"]}]
             queries[key] = [f"{prefix}?", *([f"{prefix}:RANG?"] if function != "CW" else []),
                             *(["VOLT:RANG:AUTO?"] if function == "CV" else []),
                             *([c.LED_QUERY] if function == "CR" else [])]

@@ -757,93 +757,108 @@ def execute_trigger_observation(*, mode, resource, backend, model_id, expected, 
                 if not observed["enabled"] or observed["input_state"] != "ON":
                     raise LoadError("unsafe_mode", "Transient pulse must be enabled with Input ON.")
 
-        guard()
-        if software:
-            c._write(session, "SYST:REM")
-            guard()
-        started = monotonic_ns()
         samples = []
+        phase = "preflight"
+        write_attempted = False
+        write_confirmed = False
+        try:
+            guard()
+            if software:
+                c._write(session, "SYST:REM")
+                guard()
+            started = monotonic_ns()
 
-        def list_condition():
-            # IT8800 Programming Guide V2.1 p.15, RUN bit 7 of the
-            # real-time Questionable condition register (read-only, p.29).
-            # Reuse the existing Protection register parser; never read
-            # or clear the latched event register.
-            before = monotonic_ns()
-            condition = _condition(session)
-            completed = monotonic_ns()
-            if completed >= deadline_ns:
-                raise LoadError("trigger_observation_unconfirmed", "LIST status arrived after the deadline.", 3)
-            if condition["raw"] & FAULT_MASK:
-                raise LoadError("trigger_observation_unconfirmed", "LIST observation encountered a protection fault.", 3)
-            return {"list_running": "RUN" in condition["flags"],
-                    "list_status_started_s": (before - started) / 1e9,
-                    "list_status_completed_s": (completed - started) / 1e9}
+            def list_condition():
+                # IT8800 Programming Guide V2.1 p.15, RUN bit 7 of the
+                # real-time Questionable condition register (read-only, p.29).
+                # Reuse the existing Protection register parser; never read
+                # or clear the latched event register.
+                before = monotonic_ns()
+                condition = _condition(session)
+                completed = monotonic_ns()
+                if completed >= deadline_ns:
+                    raise LoadError("trigger_observation_unconfirmed", "LIST status arrived after the deadline.", 3)
+                if condition["raw"] & FAULT_MASK:
+                    raise LoadError("trigger_observation_unconfirmed", "LIST observation encountered a protection fault.", 3)
+                return {"list_running": "RUN" in condition["flags"],
+                        "list_status_started_s": (before - started) / 1e9,
+                        "list_status_completed_s": (completed - started) / 1e9}
 
-        def sample():
-            before = monotonic_ns()
-            current = _number(session, "MEAS:CURR?")
-            after = monotonic_ns()
-            if abs(current) > Decimal(str(c.RANGE_LIMITS["high"])):
-                raise LoadError("invalid_response", "Trigger current sample exceeds model bounds.", 3)
-            if after >= deadline_ns:
-                raise LoadError("trigger_observation_unconfirmed", "Current sample arrived after the deadline.", 3)
-            samples.append({"started_s": (before - started) / 1e9, "completed_s": (after - started) / 1e9,
-                            "current_a": float(current)})
-            return current
+            def sample():
+                before = monotonic_ns()
+                current = _number(session, "MEAS:CURR?")
+                after = monotonic_ns()
+                if abs(current) > Decimal(str(c.RANGE_LIMITS["high"])):
+                    raise LoadError("invalid_response", "Trigger current sample exceeds model bounds.", 3)
+                if after >= deadline_ns:
+                    raise LoadError("trigger_observation_unconfirmed", "Current sample arrived after the deadline.", 3)
+                samples.append({"started_s": (before - started) / 1e9, "completed_s": (after - started) / 1e9,
+                                "current_a": float(current)})
+                return current
 
-        if is_list:
-            initial_list = list_condition()
-            if initial_list["list_running"]:
-                raise LoadError("trigger_observation_unconfirmed", "LIST was already running before the trial.", 3)
-        baseline = sample()
-        if is_list:
-            samples[-1].update(initial_list)
-        if source != "TIMER":
-            wanted = Decimal(0) if is_list else levels["level_b"]
-            tolerance = min(Decimal("0.01"), abs(levels["level_a"] - levels["level_b"]) / 4)
             if is_list:
-                tolerance = min(tolerance, levels["level_a"] / 4, levels["level_b"] / 4)
-            if abs(baseline - wanted) > tolerance:
-                raise LoadError("trigger_observation_unconfirmed", "Pre-trigger current baseline was not observed.", 3)
-        if software:
-            _require_trigger_input_on(session, None, "Trigger observation")
-            # Actual process startup and readback latency can consume more
-            # than the preview's minimum. Do not dispatch an event that can
-            # no longer finish within the already authorized capture window.
-            event_reserve_ns = int((float(event_seconds) + (3 if is_list else 2) * QUERY_DELAY_S + 0.3) * 1e9)
-            if deadline_ns - monotonic_ns() <= event_reserve_ns:
-                raise LoadError("trigger_observation_unconfirmed", "No time remains for the complete software Trigger observation.", 3)
-            c._write(session, software_trigger(source))
-        elif source == "EXTERNAL" and on_external_ready is not None:
-            on_external_ready()
-        # Leave time for the final state query and process return. An overrun or
-        # lost exchange is still handled by the existing script deadline.
-        reserve_ns = 300_000_000 + (int(QUERY_DELAY_S * 10**9) if is_list else 0)
-        saw_list_running = False
-        while monotonic_ns() + reserve_ns < deadline_ns and len(samples) < 10000:
-            sample()
-            list_ended = False
+                initial_list = list_condition()
+                if initial_list["list_running"]:
+                    raise LoadError("trigger_observation_unconfirmed", "LIST was already running before the trial.", 3)
+            phase = "baseline"
+            baseline = sample()
             if is_list:
-                state = list_condition()
-                samples[-1].update(state)
-                list_ended = saw_list_running and not state["list_running"]
-                saw_list_running |= state["list_running"]
-            evidence = sampled_waveform_evidence(samples, source=source, **levels)
-            if evidence is not None:
+                samples[-1].update(initial_list)
+            if source != "TIMER":
+                wanted = Decimal(0) if is_list else levels["level_b"]
+                tolerance = min(Decimal("0.01"), abs(levels["level_a"] - levels["level_b"]) / 4)
+                if is_list:
+                    tolerance = min(tolerance, levels["level_a"] / 4, levels["level_b"] / 4)
+                if abs(baseline - wanted) > tolerance:
+                    raise LoadError("trigger_observation_unconfirmed", "Pre-trigger current baseline was not observed.", 3)
+            if software:
+                phase = "dispatch"
                 _require_trigger_input_on(session, None, "Trigger observation")
-                if monotonic_ns() >= deadline_ns:
+                # Actual process startup and readback latency can consume more
+                # than the preview's minimum. Do not dispatch an event that can
+                # no longer finish within the already authorized capture window.
+                event_reserve_ns = int((float(event_seconds) + (3 if is_list else 2) * QUERY_DELAY_S + 0.3) * 1e9)
+                if deadline_ns - monotonic_ns() <= event_reserve_ns:
+                    raise LoadError("trigger_observation_unconfirmed", "No time remains for the complete software Trigger observation.", 3)
+                write_attempted = True
+                c._write(session, software_trigger(source))
+                write_confirmed = True
+            elif source == "EXTERNAL" and on_external_ready is not None:
+                on_external_ready()
+            # Leave time for the final state query and process return. An overrun or
+            # lost exchange is still handled by the existing script deadline.
+            phase = "waveform"
+            reserve_ns = 300_000_000 + (int(QUERY_DELAY_S * 10**9) if is_list else 0)
+            saw_list_running = False
+            while monotonic_ns() + reserve_ns < deadline_ns and len(samples) < 10000:
+                sample()
+                list_ended = False
+                if is_list:
+                    state = list_condition()
+                    samples[-1].update(state)
+                    list_ended = saw_list_running and not state["list_running"]
+                    saw_list_running |= state["list_running"]
+                evidence = sampled_waveform_evidence(samples, source=source, **levels)
+                if evidence is not None:
+                    _require_trigger_input_on(session, None, "Trigger observation")
+                    if monotonic_ns() >= deadline_ns:
+                        break
+                    return {**marker, "visa": runtime, "input_state": "ON", "trigger_source": source,
+                            "waveform_completion_known": True, "observation": evidence, "samples": samples}
+                if list_ended:
+                    # The first observed completion is final evidence. Do not
+                    # wait for another cycle to replace a failed waveform.
                     break
-                return {**marker, "visa": runtime, "input_state": "ON", "trigger_source": source,
-                        "waveform_completion_known": True, "observation": evidence, "samples": samples}
-            if list_ended:
-                # The first observed completion is final evidence. Do not
-                # wait for another cycle to replace a failed waveform.
-                break
-            if not is_list:
-                sleep(min(0.05, max(0, (deadline_ns - monotonic_ns()) / 1e9)))
-        raise LoadError("trigger_observation_unconfirmed", "Current samples did not establish the expected waveform.",
-                        3, sample_count=len(samples), trigger_source=source)
+                if not is_list:
+                    sleep(min(0.05, max(0, (deadline_ns - monotonic_ns()) / 1e9)))
+            raise LoadError("trigger_observation_unconfirmed", "Current samples did not establish the expected waveform.",
+                            3, sample_count=len(samples), trigger_source=source)
+        except LoadError as exc:
+            exc.details.update(trigger_source=source, observation_phase=phase,
+                               software_trigger_write_attempted=write_attempted,
+                               software_trigger_write_confirmed=write_confirmed,
+                               sample_count=len(samples), samples=samples)
+            raise
 
 
 def _execute_led_or_slow_rise(command, *, scope, mode, resource, current, resistance,

@@ -200,21 +200,27 @@ def test_protection_defaults_are_independent_and_read_back(instrument, group, wr
     assert physical("protection-status", snapshot=True)["settings"] == original
 
 
-@pytest.mark.parametrize("outcome", ["off", "restored_on", "off_refused", "lost", "still_active", "already_on"])
-def test_protection_clear_observes_input_and_issues_at_most_one_bounded_off(instrument, outcome):
+@pytest.mark.parametrize("outcome", ["off", "delayed", "restored_on", "off_refused", "lost", "still_active", "already_on"])
+def test_protection_clear_observes_input_and_issues_at_most_one_bounded_off(instrument, outcome, monkeypatch):
+    def poll(_seconds):
+        if outcome == "delayed":
+            instrument.replies["STAT:QUES:COND?"] = "0"
+
+    monkeypatch.setattr(protection, "sleep", poll)
     if outcome in ("restored_on", "off_refused"):
         instrument.on_clear = lambda: instrument.replies.update({"INP:STAT?": "1", "STAT:QUES:COND?": "0"})
         if outcome == "off_refused":
             instrument.ignored = "INP OFF"
     elif outcome == "lost":
         instrument.on_clear = lambda: instrument.replies.update({"INP:STAT?": TimeoutError()})
-    elif outcome == "still_active":
+    elif outcome in ("still_active", "delayed"):
         instrument.on_clear = lambda: None
     elif outcome == "already_on":
         instrument.replies["INP:STAT?"] = "1"
-    if outcome == "off":
+    if outcome in ("off", "delayed"):
         assert physical("protection-clear", arguments={"confirm": True})["input_state"] == "OFF"
         assert instrument.writes == ["SYST:REM", "PROT:CLE"]
+        assert instrument.calls.count("STAT:QUES:COND?") == (2 if outcome == "delayed" else 1)
     else:
         with pytest.raises(LoadError) as error:
             physical("protection-clear", arguments={"confirm": True})
@@ -229,6 +235,8 @@ def test_protection_clear_observes_input_and_issues_at_most_one_bounded_off(inst
         else:
             assert error.value.code == ("query_failed" if outcome == "lost" else "protection_still_active")
             assert instrument.writes == ["SYST:REM", "PROT:CLE"]
+            if outcome == "still_active":
+                assert instrument.calls.count("STAT:QUES:COND?") == 5
     if outcome != "already_on":
         assert instrument.calls[instrument.calls.index("PROT:CLE") + 1] == "INP:STAT?"
     assert "STAT:QUES:EVEN?" not in instrument.calls

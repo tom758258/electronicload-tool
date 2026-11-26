@@ -196,36 +196,45 @@ def _clear(session, stop) -> dict:
     c._mutation_off(session, stop)
     try:
         c._write(session, "PROT:CLE")
-        state = c._flag(session, "INP:STAT?")
     except LoadError as exc:
         exc.details.update(clear_attempted=True, input_state="UNKNOWN", operator_action_required=True)
         raise
-    if state == "ON":
+    # Clear once. A latched condition may need time to update; recheck OFF
+    # before each bounded read-only poll. Any unexpected ON remains a failure.
+    for attempt in range(5):
         try:
-            c._write(session, "INP OFF")
-            final = c._flag(session, "INP:STAT?")
+            state = c._flag(session, "INP:STAT?")
         except LoadError as exc:
-            exc.details.update(clear_attempted=True, input_state="UNKNOWN", off_attempted=True,
-                               operator_action_required=True)
+            exc.details.update(clear_attempted=True, input_state="UNKNOWN", operator_action_required=True)
             raise
+        if state == "ON":
+            try:
+                c._write(session, "INP OFF")
+                final = c._flag(session, "INP:STAT?")
+            except LoadError as exc:
+                exc.details.update(clear_attempted=True, input_state="UNKNOWN", off_attempted=True,
+                                   operator_action_required=True)
+                raise
+            try:
+                condition = _condition(session)
+            except LoadError as exc:
+                exc.details.update(clear_attempted=True, input_state=final, off_attempted=True,
+                                   operator_action_required=True)
+                raise
+            raise LoadError("protection_clear_unexpected_on", "Input turned ON after Protection Clear.", 3,
+                            clear_attempted=True, off_attempted=True, input_state=final,
+                            condition=condition, operator_action_required=final != "OFF")
         try:
             condition = _condition(session)
         except LoadError as exc:
-            exc.details.update(clear_attempted=True, input_state=final, off_attempted=True,
-                               operator_action_required=True)
+            exc.details.update(clear_attempted=True, input_state="OFF", operator_action_required=True)
             raise
-        raise LoadError("protection_clear_unexpected_on", "Input turned ON after Protection Clear.", 3,
-                        clear_attempted=True, off_attempted=True, input_state=final,
-                        condition=condition, operator_action_required=final != "OFF")
-    try:
-        condition = _condition(session)
-    except LoadError as exc:
-        exc.details.update(clear_attempted=True, input_state="OFF", operator_action_required=True)
-        raise
-    if condition["raw"] & FAULT_MASK:
-        raise LoadError("protection_still_active", "Protection remains active after Clear.", 3,
-                        clear_attempted=True, input_state="OFF", condition=condition)
-    return {"input_state": "OFF", "condition": condition}
+        if not condition["raw"] & FAULT_MASK:
+            return {"input_state": "OFF", "condition": condition}
+        if attempt < 4:
+            sleep(0.2)
+    raise LoadError("protection_still_active", "Protection remains active after Clear.", 3,
+                    clear_attempted=True, input_state="OFF", condition=condition)
 
 
 def _simulate(command: str, settings: dict, events: bool, session, stop) -> dict:

@@ -176,7 +176,8 @@ def _transient(session, selection, *, summary=False):
 def _list_integer(session, query, minimum, maximum):
     value = c._decimal_readback(session, query)
     if not minimum <= value <= maximum or value != value.to_integral_value():
-        raise LoadError("invalid_response", "Invalid LIST count.", 3, query=query)
+        raise LoadError("invalid_response", "Invalid LIST count.", 3, query=query, observed=str(value),
+                        minimum=str(minimum), maximum=str(maximum))
     return int(value)
 
 
@@ -210,7 +211,7 @@ def _list_configuration(session, *, summary=False, expected_count=None):
             value = c._decimal_readback(session, query)
             if not minimum <= value <= maximum:
                 raise LoadError("invalid_response", "LIST step readback is outside model limits.", 3,
-                                query=query, step=index, observed=str(value))
+                                query=query, step=index, observed=str(value), minimum=str(minimum), maximum=str(maximum))
             step[field] = value
         steps.append(step)
     return {**metadata, "steps": steps}

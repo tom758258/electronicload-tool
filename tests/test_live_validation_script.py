@@ -78,7 +78,7 @@ def run_script(tmp_path):
                 "foreach ($node in $ast.EndBlock.Statements) {\n"
                 "    if ($node.Name -in @('Invoke-ProtectionValidation','Invoke-ProtectionStep',"
                 "'Get-ProtectionWriteProgress','Assert-InputOff',"
-                "'Assert-ReadbackFields','Fail-Case','Invoke-TimerExpiry','Invoke-LiveCommand',"
+                "'Assert-ReadbackFields','Fail-Case','Invoke-TimerExpiry','Invoke-LiveCommand','Get-WorkflowFailureEvidence',"
                 "'Get-TimerMonotonicNs','Get-TimerRemainingMs','Get-TimerObservationDeadlineNs',"
                 "'Confirm-TimerExpiry','Confirm-WorkflowLoad','Assert-Runtime','Save-Report',"
                 "'New-CliProcessInfo','New-LiveCliProcess','Invoke-SelectedPreflight',"
@@ -277,7 +277,9 @@ def test_protection_explicit_mode_report_without_visa(run_script):
         assert cases[f'{prefix}-final']['command'] == 'protection-status'
         if trial.startswith('software-'):
             assert cases[f'{prefix}-source-off']['command'] == 'operator-observation'
-            assert list(cases).index(f'{prefix}-source-off') < list(cases).index(f'{prefix}-clear')
+            assert (list(cases).index(f'{prefix}-source-off') < list(cases).index(f'{prefix}-restore-settings')
+                    < list(cases).index(f'{prefix}-restore-cc') < list(cases).index(f'{prefix}-clear')
+                    < list(cases).index(f'{prefix}-final'))
         else:
             assert f'{prefix}-clear' not in cases
             assert cases[f'{prefix}-baseline-on']['command'] == 'operator-observation'
@@ -1101,9 +1103,11 @@ $entry = $script:report.results[0]
     assert sessions.read_text().splitlines() == ['session']
 
 
-def test_contributor_workflow_script_accepts_bounded_duration_evidence_after_confirmed_off(run_script, tmp_path):
+@pytest.mark.parametrize('early_drop', [False, True])
+def test_contributor_workflow_script_accepts_bounded_duration_evidence_after_confirmed_off(run_script, tmp_path, early_drop):
     with (tmp_path / 'sitecustomize.py').open('a', encoding='utf-8') as preload:
         preload.write("""
+import os
 import sys
 from contextlib import contextmanager
 
@@ -1119,6 +1123,8 @@ def fake_session(_resource):
             response = super().query(command)
             if self.input:
                 sleep(self.query_delay)
+                if command == 'MEAS:CURR?' and os.environ.get('FAKE_WORKFLOW_DROP') == '1':
+                    return '0'
             return response
 
     fake = DelayedLoad()
@@ -1129,8 +1135,8 @@ def fake_session(_resource):
 
 workflows.open_session = fake_session
 """)
-    result = run_script([], extra_env={'FAKE_WORKFLOW_PYTHON': sys.executable, 'FAKE_WORKFLOW_RESOURCE': RESOURCE},
-                        harness="""
+    result = run_script([], extra_env={'FAKE_WORKFLOW_PYTHON': sys.executable, 'FAKE_WORKFLOW_RESOURCE': RESOURCE,
+                                       'FAKE_WORKFLOW_DROP': '1' if early_drop else '0'}, harness="""
 $python = $env:FAKE_WORKFLOW_PYTHON
 $repo = (Get-Location).Path
 $script:connectionArgs = @('--resource', $env:FAKE_WORKFLOW_RESOURCE)
@@ -1148,10 +1154,17 @@ try {
     if ($entry.error_code -cne 'workflow_load_unconfirmed') { throw }
 }
 @{result=$entry.response.result;final_status=$entry.status;error_code=$entry.error_code;
-  load_confirmed=$entry.load_duration_confirmed} | ConvertTo-Json -Depth 6 -Compress
+  load_confirmed=$entry.load_duration_confirmed;diagnostics=$entry.error_diagnostics} | ConvertTo-Json -Depth 8 -Compress
 """)
     assert result.returncode == 0, result.stdout + result.stderr
     evidence = json.loads(result.stdout.splitlines()[-1])
+    if early_drop:
+        assert evidence['final_status'] == 'FAIL' and evidence['error_code'] == 'workflow_load_unconfirmed'
+        diagnostic = evidence['diagnostics']
+        assert diagnostic['input_state'] == 'OFF' and diagnostic['cleanup']['off_confirmed']
+        assert diagnostic['current_samples'][0]['current_a'] == 0
+        assert diagnostic['off_confirmed_ns'] - diagnostic['on_write_started_ns'] <= 10**10
+        return
     assert evidence['final_status'] == 'PASS'
     assert evidence['error_code'] is None
     workflow = evidence['result']
@@ -1179,6 +1192,7 @@ from electronicload_tool_core import control
 def fake_session(_resource):
     class SettingsFake(ValidationFake):
         def write(self, command):
+            assert 'slew' not in sys.argv, 'Out-of-bounds baseline must be refused before writes.'
             assert (Path(os.environ['FAKE_SETTINGS_REPORT']) / 'baseline-visible').is_file()
             super().write(command)
 
@@ -1188,7 +1202,8 @@ def fake_session(_resource):
             return super().query(command)
 
     fake = SettingsFake()
-    fake.values.update({'INP:TIM': '0', 'VOLT:ON': '0.536', 'VOLT:LATC': '1'})
+    fake.range = 6
+    fake.values.update({'INP:TIM': '0', 'VOLT:ON': '0.536', 'VOLT:LATC': '1', 'CURR:SLEW:POS': '0.5'})
     yield fake, {'library': 'fake', 'manufacturer': 'fake'}
 
 control.open_session = fake_session
@@ -1216,6 +1231,11 @@ try {
     Invoke-LiveCommand -Command 'contributor-settings' -CaseName 'auxiliary-controls-von' -ExtraArgs @(
         '--trial', 'von', '--confirm-isolated')
 } catch { Write-Host $_.Exception.Message }
+$script:report.results += [ordered]@{name='auxiliary-controls-slew';command='contributor-settings';status='NOT RUN'}
+try {
+    $null = Invoke-LiveCommand -Command 'contributor-settings' -CaseName 'auxiliary-controls-slew' -ExtraArgs @(
+        '--trial', 'slew', '--confirm-isolated')
+} catch { Write-Host $_.Exception.Message }
 # Success responses also contain private untouched baseline values.
 $script:report.results += [ordered]@{name='list-status';command='contributor-settings';execution='live';status='PASS';
     response=@{result=@{restored=$true;input_state='OFF';expected_width_s='1';
@@ -1231,7 +1251,12 @@ Save-Report
     assert 'keep the terminals isolated' in result.stdout, result.stdout + result.stderr
     assert result.stdout.index(baseline) < result.stdout.index('keep the terminals isolated')
     report_text = (report_dir / 'shareable/report.json').read_text(encoding='utf-8-sig')
-    case, list_case, transient_case = json.loads(report_text)['cases']
+    case, slew_case, list_case, transient_case = json.loads(report_text)['cases']
+    assert slew_case['status'] == 'FAIL' and slew_case['error_code'] == 'invalid_response'
+    diagnostic = slew_case['error_diagnostics']
+    assert diagnostic['query'] == 'CURR:SLEW:POS?' and diagnostic['range'] == 'low'
+    assert float(diagnostic['observed']) == 0.5 and float(diagnostic['maximum']) == 0.25
+    assert diagnostic['no_settings_written'] is True
     assert list_case['restored'] and list_case['expected_width_s'] == '1'
     assert transient_case['restored'] and transient_case['expected_level_a'] == '0.2'
     assert 'observed' not in list_case and 'observed' not in transient_case
@@ -1419,7 +1444,11 @@ function Read-ValidationAnswer([string]$Prompt, [string]$CaseName, [switch]$Disc
     if ($CaseName -ceq $script:cancelAt) { return 'cancel' }
     return ''
 }
-function Restore-Protection {}
+function Restore-Protection([string]$Prefix, $Original, $Fields, [bool]$RestoreCc, [switch]$ClearAfterRestore) {
+    $script:calls += "$Prefix-restore-settings"
+    if ($ClearAfterRestore) { $null = Invoke-ProtectionStep "$Prefix-clear" }
+    $script:report.protection_restore_unconfirmed = $false
+}
 function Invoke-ProtectionStep([string]$Name, [switch]$Cleanup, [switch]$AllowDefaultRefusal) {
     $script:calls += $Name
     if ($Name -like '*-original') {
@@ -1473,7 +1502,8 @@ ConvertTo-Json -InputObject $results -Depth 6 -Compress
     for trial in ('software-current', 'software-power'):
         prefix = f'protection-{trial}'
         assert calls.index(f'{prefix}-trial') < calls.index(f'prompt:{prefix}-source-off')
-        assert calls.index(f'prompt:{prefix}-source-off') < calls.index(f'{prefix}-clear')
+        assert (calls.index(f'prompt:{prefix}-source-off') < calls.index(f'{prefix}-restore-settings')
+                < calls.index(f'{prefix}-clear'))
     assert calls.index('prompt:protection-software-power-on') < calls.index('protection-software-power-trial')
     assert calls.index('prompt:protection-hardware-power-baseline-on') < calls.index(
         'protection-hardware-power-baseline-trial')
@@ -1845,10 +1875,10 @@ def test_trigger_validation_script_plan_and_noninteractive_refusal(run_script):
     assert mixed_names.index('trigger-snapshot') < mixed_names.index('transient-continuous-auto-setup')
 
 
-def test_external_trigger_requires_only_physical_pulse_after_start(run_script):
-    # The plan/refusal test cannot reach the EXTERNAL trial's former second
-    # prompt. Run the actual trial with scripted instrument replies and clock.
-    result = run_script([], harness="""
+@pytest.mark.parametrize('ready', [True, False])
+def test_external_trigger_confirms_equipment_before_input_on(run_script, ready):
+    # Exercise the actual trial with scripted instrument replies and clock.
+    result = run_script(['ready' if ready else 'cancel'], harness="""
 $script:watch = @{ElapsedMilliseconds=0}
 $script:totalDeadlineMs = 900000
 $script:perCommandDeadlineMs = 30000
@@ -1858,6 +1888,7 @@ $TriggerListRepeat = 1
 $LevelA = '0.1'; $LevelB = '0.2'
 $RiseSlew = '0.1'; $FallSlew = '0.1'
 $TriggerListWidthA = '2'; $TriggerListWidthB = '2'
+$TriggerExternalSetup = 'reviewed fixture'
 $script:triggerTrusted = $true
 $script:triggerProcessStillRunning = $false
 $script:triggerArtifacts = @()
@@ -1865,8 +1896,14 @@ $script:report = @{results=@(foreach ($suffix in @('setup','observed','off','rel
     [ordered]@{name="trigger-external-$suffix";status='NOT RUN'}
 })}
 $script:calls = @()
-function Read-ValidationAnswer { throw 'EXTERNAL must not ask for another Enter.' }
-function Read-Host { throw 'EXTERNAL must not ask for another Enter.' }
+function Read-ValidationAnswer([string]$Prompt, [string]$CaseName, [switch]$DiscardPendingKeys) {
+    if (-not $DiscardPendingKeys -or $CaseName -cne 'trigger-external-observed' -or
+        -not $script:triggerOffConfirmed) { throw 'Unsafe EXTERNAL readiness confirmation.' }
+    $script:calls += 'equipment-confirmation'
+    if ($Scenario -ceq 'ready') { return '' }
+    return 'cancel'
+}
+function Read-Host { throw 'EXTERNAL must use the bounded readiness confirmation.' }
 function Start-Sleep([int]$Milliseconds) { $script:watch.ElapsedMilliseconds += $Milliseconds }
 function Save-Report {}
 function Get-TimerMonotonicNs { return [long]$script:watch.ElapsedMilliseconds * 1000000L }
@@ -1892,18 +1929,28 @@ function Invoke-TriggerStep([string]$Name, [int]$DeadlineMs, [int]$TerminationMs
         default { return @{result=@{input_state='OFF'}} }
     }
 }
-Invoke-TriggerTrial @{prefix='trigger-external';source='EXTERNAL';isList=$true}
+try {
+    Invoke-TriggerTrial @{prefix='trigger-external';source='EXTERNAL';isList=$true}
+} catch {
+    $entry = $script:report.results | Where-Object { $_.name -ceq 'trigger-external-observed' }
+    if ($Scenario -cne 'cancel' -or $entry.error_code -cne 'operator_cancelled') { throw }
+}
 $entry = $script:report.results | Where-Object { $_.name -ceq 'trigger-external-observed' }
-@{calls=$script:calls;status=$entry.status;off_confirmed=$script:triggerOffConfirmed} | ConvertTo-Json -Compress
+@{calls=$script:calls;status=$entry.status;error_code=$entry.error_code;
+    off_confirmed=$script:triggerOffConfirmed} | ConvertTo-Json -Compress
 """)
     assert result.returncode == 0, result.stdout + result.stderr
     evidence = json.loads(result.stdout.splitlines()[-1])
-    assert evidence['status'] == 'PASS' and evidence['off_confirmed']
-    assert evidence['calls'] == [
-        f'trigger-external-{suffix}' for suffix in (
-            'configure', 'source-status', 'setup', 'readback', 'on', 'observed', 'off', 'release',
-        )
-    ]
+    assert evidence['off_confirmed']
+    expected = [f'trigger-external-{suffix}' for suffix in ('configure', 'source-status', 'setup', 'readback')]
+    expected.append('equipment-confirmation')
+    if ready:
+        assert evidence['status'] == 'PASS'
+        expected.extend(f'trigger-external-{suffix}' for suffix in ('on', 'observed', 'off'))
+    else:
+        assert evidence['status'] == 'FAIL' and evidence['error_code'] == 'operator_cancelled'
+    expected.append('trigger-external-release')
+    assert evidence['calls'] == expected
     assert 'capture-ready message' in result.stdout
 
 
