@@ -1682,7 +1682,15 @@ measurement, OFF and restoration results without the VISA resource string.
 Failed Trigger and Workflow observations retain sampled evidence and timing;
 isolated settings refusals retain selected numeric bounds and query/step
 diagnostics. Software Trigger diagnostics distinguish an attempted write from a
-confirmed write exchange, not waveform completion. Arbitrary exception text,
+confirmed write exchange, not waveform completion. A confirmed write exchange
+can pass its dispatch case even when the separate waveform case fails. A
+preflight or baseline failure before a write leaves dispatch NOT RUN; a
+failed or unconfirmed write blocks the dependent waveform case.
+LIST failures retain selected nested diagnostic fields and Workflow discharge
+failures retain the final measured quantities and elapsed time.
+The isolated Low CC readback trial also verifies the numeric candidate selector
+within the model programming resolution; an unconfirmed selector fails the trial.
+Arbitrary exception text,
 private recovery snapshots and VISA identifiers are not included in shareable
 error diagnostics. A failed bounded Clear retains its failure even if a later
 trusted OFF status can verify the restored settings.

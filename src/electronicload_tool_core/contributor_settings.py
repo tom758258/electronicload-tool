@@ -359,14 +359,22 @@ def _fixed_readback_trial(session, function):
         matches = actual is not None and (
             c._current_within(actual, value, range_name) if function == "CC" and testing
             else Decimal(str(actual)) == value)
+        selector_matches = True
+        if function == "CC":
+            actual_selector = Decimal(str(snapshot["range_readback_a"]))
+            expected_selector = value if testing and change_selector else cc_selector
+            selector_matches = (c._current_within(actual_selector, expected_selector, range_name)
+                                if testing and change_selector else actual_selector == expected_selector)
         if (snapshot["input_state"] != "OFF" or snapshot["function"] != function
                 or snapshot["range"] != range_name or not matches
-                or snapshot.get("range_auto") != baseline.get("range_auto")
-                or (function == "CC" and not (testing and change_selector)
-                    and Decimal(str(snapshot["range_readback_a"])) != cc_selector)):
+                or snapshot.get("range_auto") != baseline.get("range_auto") or not selector_matches):
             details = {"field": field, "range": snapshot["range"],
                        "query": f"{prefix}?"}
-            if testing and actual is not None:
+            if not selector_matches:
+                details["query"] = "CURR:RANG?"
+                if testing and change_selector:
+                    details.update(expected=str(expected_selector), observed=str(actual_selector))
+            elif testing and actual is not None:
                 details.update(expected=str(value), observed=str(actual))
             raise LoadError("readback_mismatch", "Fixed readback differs from the expected setting.", 3, **details)
         return snapshot

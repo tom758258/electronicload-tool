@@ -467,7 +467,7 @@ def test_workflow_contributor_cli_uses_one_readonly_visa_session(fake_visa, caps
 
 
 @pytest.mark.parametrize("scenario", ["timed", "timed_latency", "timed_fractional_clock", "early_wake", "early_drop", "late_drop",
-                                       "sample_gap", "capacity", "stop", "lost", "late_off", "voltage"])
+                                       "sample_gap", "capacity", "stop", "lost", "late_off", "late_off_reply", "voltage"])
 def test_contributor_cc_owns_bounded_on_and_cleanup(clock, monkeypatch, capsys, scenario):
     class PhysicalLoad(ValidationFake):
         query_delay = 0.15
@@ -495,6 +495,10 @@ def test_contributor_cc_owns_bounded_on_and_cleanup(clock, monkeypatch, capsys, 
                 response = super().query(command)
                 delay = 0.45 if scenario == "sample_gap" and clock.now - self.dispatched > 2 else self.query_delay
                 clock.wait(delay)
+                return response
+            if command == "INP:STAT?" and scenario == "late_off_reply" and hasattr(self, "off_at"):
+                response = super().query(command)
+                clock.now = self.dispatched + 10.01
                 return response
             if command == "MEAS:CURR?" and scenario == "lost":
                 self.calls.append(command)
@@ -553,9 +557,15 @@ def test_contributor_cc_owns_bounded_on_and_cleanup(clock, monkeypatch, capsys, 
         assert "INP OFF" not in fake.calls and fake.calls[-1] == "MEAS:CURR?"
         return
     assert fake.calls.count("INP OFF") == 1
-    if scenario == "late_off":
+    if scenario in {"late_off", "late_off_reply"}:
         assert status == 3 and outcome["error"]["code"] == "workflow_cleanup_unconfirmed"
-        assert outcome["error"]["details"]["manual_action_required"]
+        details = outcome["error"]["details"]
+        assert details["manual_action_required"] and not details["cleanup"]["off_confirmed"]
+        assert details["off_write_started_ns"] >= details["on_write_started_ns"]
+        if scenario == "late_off_reply":
+            assert details["off_confirmed_ns"] - details["on_write_started_ns"] > 10**10
+        else:
+            assert "off_confirmed_ns" not in details
         return
     assert not fake.input
     if scenario in {"stop", "voltage", "early_drop", "sample_gap"} or (scenario == "late_drop" and status != 0):

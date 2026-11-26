@@ -594,7 +594,14 @@ runs require no second Enter; powered-to-isolated runs pause once for actual
 disconnection. Protection prompts only for source isolation before automatic
 restoration/Clear and reconnection before the next powered trial, not for each
 Input ON. EXTERNAL retains its equipment readiness confirmation with Input OFF
-immediately before its trial and the physical pulse after capture-ready. Verify cancellation
+immediately before its trial and the physical pulse after capture-ready.
+Exercise the real Protection restore/clear orchestration with simulated
+command exchanges for success, persistent faults, late clean status,
+uncertain communication and unexpected ON. Check candidate Low CC selector
+readback and current resolution, and classify a confirmed software Trigger
+write separately from failed waveform acceptance. Preserve safe LIST nested
+errors, discharge cutoff evidence and late OFF timestamps without relaxing
+the existing limits. Verify cancellation
 and unchanged per-request CLI confirmation, OFF/restore and refusal rules
 without real VISA. Use the existing PowerShell harness and relevant plan tests;
 do not repeat unrelated Core or Worker tests for this Script-only change. Check

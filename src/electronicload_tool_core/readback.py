@@ -186,10 +186,13 @@ def _list_configuration(session, *, summary=False, expected_count=None):
     raw = c._decimal_readback(session, range_query)
     if not 0 <= raw <= c.RANGE_LIMITS["high"]:
         raise LoadError("invalid_range_readback", "LIST range is outside model limits.", 3,
-                        query=range_query)
+                        query=range_query, observed=str(raw), minimum="0",
+                        maximum=str(c.RANGE_LIMITS["high"]))
     count = _list_integer(session, count_query, 2, 84)
     if expected_count is not None and count != expected_count:
-        raise LoadError("readback_mismatch", "LIST step count changed during the settings trial.", 3)
+        raise LoadError("readback_mismatch", "LIST step count changed during the settings trial.", 3,
+                        query=count_query, expected=str(expected_count), observed=str(count),
+                        minimum="2", maximum="84")
     repeat = _list_integer(session, repeat_query, 1, 65536)
     ranges = {value: name for name, value in c.RANGE_LIMITS.items()}
     metadata = {"range": ranges.get(raw), "range_readback_a": float(raw),

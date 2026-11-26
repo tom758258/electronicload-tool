@@ -359,10 +359,12 @@ def _run_cc(session, settings, stop, result, run_load, *, on_write_started=None)
             observe(control._turn_input_off(session)["input_state"])
             if timed:
                 off_confirmed_ns = monotonic_ns()
+                result.update(off_write_started_ns=session.off_write_started_ns, off_confirmed_ns=off_confirmed_ns)
                 if off_confirmed_ns - result["on_write_started_ns"] > CONTRIBUTOR_MAX_ON_SECONDS * 10**9:
                     raise LoadError("workflow_timeout", "Input OFF was confirmed after the maximum loading time.", 3)
-                result.update(off_write_started_ns=session.off_write_started_ns, off_confirmed_ns=off_confirmed_ns)
         except (Exception, KeyboardInterrupt) as exc:
+            if timed and session.off_write_started_ns is not None:
+                result["off_write_started_ns"] = session.off_write_started_ns
             observe("UNKNOWN")
             if isinstance(exc, LoadError):
                 cleanup["error"] = exc.as_dict()

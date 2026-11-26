@@ -262,7 +262,7 @@ function Save-Report {
         if ($entry.Contains('origin_function')) { $case.origin_function = $entry.origin_function }
         foreach ($field in @('trace_source','trace_points','trace_interval_s','trace_sample_count',
                              'trace_csv_complete','operator_observed','load_duration_confirmed','trigger_observation','trigger_source','trigger_interval_s',
-                             'trigger_source_restore','trigger_interval_restore','list_selected','automatic_off_observed','timer_expiry_bracket','reuse_from')) {
+                             'trigger_source_restore','trigger_interval_restore','trigger_dispatch_exchange','list_selected','automatic_off_observed','timer_expiry_bracket','reuse_from')) {
             if ($entry.Contains($field)) { $case[$field] = $entry[$field] }
         }
         if ($entry.Contains('confirmed_input_state')) { $case.input_state = $entry.confirmed_input_state }
@@ -527,12 +527,40 @@ function Get-ProtectionWriteProgress($Details) {
     }
 }
 
+function Get-SettingsFailureEvidence($ErrorResult) {
+    $evidence = [ordered]@{}
+    if ($ErrorResult.code -cnotin @('invalid_response','invalid_range_readback','list_baseline_unrestorable',
+                                   'readback_mismatch','settings_restore_unconfirmed')) { return $evidence }
+    $details = $ErrorResult.details
+    if ([string]$details.query -cmatch '^[A-Z][A-Z0-9:]*\?( [0-9]{1,2})?$') { $evidence.query = $details.query }
+    foreach ($field in @('step','observed','expected','minimum','maximum')) {
+        if ([string]$details.$field -cmatch '^[+-]?[0-9]+(\.[0-9]+)?([Ee][+-]?[0-9]+)?$') {
+            $evidence[$field] = $details.$field
+        }
+    }
+    if ($details.range -cin @('low','high')) { $evidence.range = $details.range }
+    if ($details.field -cin @('current_a','voltage_v','resistance_ohm','power_w')) { $evidence.field = $details.field }
+    if ($details.no_settings_written -eq $true) { $evidence.no_settings_written = $true }
+    return $evidence
+}
+
 function Get-WorkflowFailureEvidence($Details) {
     $evidence = [ordered]@{}
     foreach ($field in @('input_state','on_write_started_ns','off_write_started_ns','off_confirmed_ns',
                          'load_duration_confirmed','load_evidence_tail_ns','load_evidence_resolution_ns','current_samples',
-                         'sample_count','capacity_ah','stop_reason')) {
+                         'sample_count','capacity_ah','initial_voltage_v','stop_reason','elapsed_s')) {
         if ($null -ne $Details.$field) { $evidence[$field] = $Details.$field }
+    }
+    $last = [ordered]@{}
+    foreach ($field in @('voltage_v','current_a','power_w','resistance_ohm')) {
+        if ($null -ne $Details.last_measurement.$field -and
+            [string]$Details.last_measurement.$field -cmatch '^[+-]?[0-9]+(\.[0-9]+)?([Ee][+-]?[0-9]+)?$') {
+            $last[$field] = $Details.last_measurement.$field
+        }
+    }
+    if ($last.Count) { $evidence.last_measurement = $last }
+    if ([string]$Details.original_error.code -cmatch '^[a-z_]+$') {
+        $evidence.original_error_code = $Details.original_error.code
     }
     if ($null -ne $Details.cleanup) {
         $cleanup = [ordered]@{}
@@ -756,16 +784,23 @@ raise SystemExit(main(contributor_stop=stop, settings_on_baseline=handoff))
             # Explicitly select diagnostic evidence. Never publish arbitrary
             # exception text, nested errors, VISA data or recovery baselines.
             $evidence = [ordered]@{}
-            if ($isolatedSettings -and $code -cin @('invalid_response','invalid_range_readback','list_baseline_unrestorable','readback_mismatch')) {
-                if ([string]$details.query -cmatch '^[A-Z][A-Z0-9:]*\?( [0-9]{1,2})?$') { $evidence.query = $details.query }
-                foreach ($field in @('step','observed','expected','minimum','maximum')) {
-                    if ([string]$details.$field -cmatch '^[+-]?[0-9]+(\.[0-9]+)?([Ee][+-]?[0-9]+)?$') {
-                        $evidence[$field] = $details.$field
+            if ($isolatedSettings -or $Command -cin @('list-status','fixed-slew-status')) {
+                $evidence = Get-SettingsFailureEvidence $result.error
+                if ($code -ceq 'settings_restore_unconfirmed') {
+                    foreach ($field in @('original_error','restoration_error')) {
+                        $nested = $details.$field
+                        if ([string]$nested.code -cmatch '^[a-z_]+$') {
+                            $safe = Get-SettingsFailureEvidence $nested
+                            if ($field -ceq 'restoration_error' -and $nested.code -ceq 'readback_mismatch') {
+                                # A restore mismatch can contain private original settings.
+                                $safe.Remove('expected')
+                                $safe.Remove('observed')
+                            }
+                            $safe.error_code = $nested.code
+                            $evidence[$field] = $safe
+                        }
                     }
                 }
-                if ($details.range -cin @('low','high')) { $evidence.range = $details.range }
-                if ($details.field -cin @('current_a','voltage_v','resistance_ohm','power_w')) { $evidence.field = $details.field }
-                if ($details.no_settings_written -eq $true) { $evidence.no_settings_written = $true }
             }
             if ($Command -ceq 'trigger-observe' -and $details.trigger_source -cin @('HOLD','BUS','TIMER','EXTERNAL')) {
                 foreach ($field in @('trigger_source','observation_phase','software_trigger_write_attempted',
@@ -1022,6 +1057,8 @@ function Confirm-WorkflowLoad([string]$CaseName) {
              @($result.current_samples).Count -lt 2)) -or
         ($CaseName -ceq 'workflow-cc-discharge' -and
             ($result.stop_reason -cne 'capacity_cutoff' -or $result.capacity_ah -lt 0.00010))) {
+        $entry['error_diagnostics'] = Get-WorkflowFailureEvidence $result
+        $entry.error_diagnostics.message = 'Automatic Workflow evidence is insufficient.'
         Fail-Case $CaseName 'workflow_load_unconfirmed' 'Automatic Workflow evidence is insufficient.'
     }
     $entry.status = 'PASS'
@@ -1279,7 +1316,7 @@ function New-TriggerPlan {
         $captureArgs = $triggerScope + $expected + @('--observation-seconds',[string]$TriggerObservationSeconds,'--confirm')
         if ($source -in @('HOLD','BUS')) {
             $script:triggerPlans += @{name="$prefix-dispatch";command='trigger-observe';args=$captureArgs;execution='live';
-                condition='Single-session software Trigger and sampled current waveform; live deadline supplied by the bounded trial.'}
+                condition='Software Trigger write exchange (not proof of physical dispatch); single-session capture also supplies waveform evidence to the observed case.'}
             $observation = @{name="$prefix-observed";command='automatic-observation';args=@();
                 condition='Use sampled waveform evidence and confirmed OFF from this trial.'}
         } else {
@@ -1877,6 +1914,10 @@ function Invoke-TriggerTrial($Trial) {
             $captureDeadline = (Get-TimerMonotonicNs) + ([long]$captureBudget - 500) * 1000000L
             $capture = Invoke-TriggerStep $captureName -DeadlineMs $captureBudget -TerminationMs $terminationMs `
                 -ObservationDeadlineNs $captureDeadline
+            if ($Trial.source -cin @('HOLD','BUS')) {
+                $dispatch = $script:report.results | Where-Object { $_.name -ceq $captureName }
+                $dispatch['trigger_dispatch_exchange'] = 'CONFIRMED'
+            }
             $remaining = $observeUntil - $script:watch.ElapsedMilliseconds
             if ($remaining -gt 0) { Start-Sleep -Milliseconds $remaining }
         } finally {
@@ -1923,8 +1964,37 @@ function Invoke-TriggerTrial($Trial) {
         $entry.status = 'PASS'
     } finally {
         if ($awaitingObservation -and $entry.status -eq 'NOT RUN') {
-            $entry.status = 'FAIL'
-            $entry['error_code'] = 'observation_incomplete'
+            $dispatch = if ($Trial.source -cin @('HOLD','BUS')) {
+                $script:report.results | Where-Object { $_.name -ceq "$prefix-dispatch" }
+            }
+            if ($null -ne $dispatch -and $dispatch.status -ceq 'FAIL') {
+                $diagnostics = $dispatch.error_diagnostics
+                if ($diagnostics.software_trigger_write_confirmed -eq $true -or
+                    $diagnostics.software_trigger_write_attempted -eq $false) {
+                    # A failed observation/preflight is not an independent failed dispatch.
+                    $entry.status = 'FAIL'
+                    $entry['error_code'] = $dispatch.error_code
+                    $entry['error_diagnostics'] = $diagnostics
+                    if ($diagnostics.software_trigger_write_confirmed -eq $true) {
+                        $dispatch.status = 'PASS'
+                        $dispatch['trigger_dispatch_exchange'] = 'CONFIRMED'
+                    } else {
+                        $dispatch.status = 'NOT RUN'
+                        $dispatch['trigger_dispatch_exchange'] = 'NOT ATTEMPTED'
+                    }
+                    $dispatch.Remove('error_code')
+                    $dispatch.Remove('error_diagnostics')
+                } else {
+                    # Failed or uncertain write: no separate waveform verdict.
+                    $dispatch['trigger_dispatch_exchange'] = if ($diagnostics.software_trigger_write_attempted -eq $true) {
+                        'UNCONFIRMED'
+                    } else { 'UNKNOWN' }
+                    $entry['error_code'] = 'observation_blocked_by_dispatch'
+                }
+            } else {
+                $entry.status = 'FAIL'
+                $entry['error_code'] = 'observation_incomplete'
+            }
         }
         $releaseRequired = $armed -or $setupEntry.Contains('list_selected')
         if ($releaseRequired -and $script:triggerTrusted -and $script:triggerOffConfirmed) {
