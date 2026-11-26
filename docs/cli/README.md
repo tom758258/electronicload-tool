@@ -1590,7 +1590,7 @@ are blocked.
 | Check before Enter | Operator action |
 | --- | --- |
 | Target, Resource, backend and modes | Correct instrument; no other process controlling the device |
-| External source (**5 V / 0.8 A** by default) | Manually set and verify voltage and current limit |
+| External source (**5 V / 0.8 A** by default, only when selected modes include source-connected trials) | For those trials, manually set and verify voltage and current limit |
 | Load Input, wiring and DUT | Physically OFF and safe for every selected setting |
 | Manual OFF contingency | Independent means of making the circuit safe if communications fail |
 
