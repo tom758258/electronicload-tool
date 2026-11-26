@@ -632,3 +632,12 @@ physical signal after capture-ready. Refusing readiness must not enable Input
 and must retain guarded LIST exit and Trigger restoration. Sampled instrument
 evidence is not independent calibration.
 
+
+For Trigger failure attribution, include known pre-write identity/session failures
+and unknown process termination. Check the capture guard's LIST diagnostics as
+well as the initial list-status. For isolated LIST Save/Recall, verify the failing
+phase and first differing field without publishing private working-buffer or slot
+values; malformed step replies retain step and bounds, not raw text. Cover the
+conservative zero-selector refusal before writes, trusted unexpected ON followed
+by OFF during Protection Clear, and late Workflow OFF reply in the shareable
+report using the existing harnesses.

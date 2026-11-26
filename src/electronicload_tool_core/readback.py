@@ -211,7 +211,12 @@ def _list_configuration(session, *, summary=False, expected_count=None):
         for field, template in LIST_STEP_QUERIES.items():
             query = template.format(index)
             minimum, maximum = limits[field]
-            value = c._decimal_readback(session, query)
+            try:
+                value = c._decimal_readback(session, query)
+            except LoadError as exc:
+                if exc.code == "invalid_response":
+                    exc.details.update(step=index, minimum=str(minimum), maximum=str(maximum), parse_failure=True)
+                raise
             if not minimum <= value <= maximum:
                 raise LoadError("invalid_response", "LIST step readback is outside model limits.", 3,
                                 query=query, step=index, observed=str(value), minimum=str(minimum), maximum=str(maximum))

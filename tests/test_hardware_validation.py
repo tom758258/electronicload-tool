@@ -169,7 +169,7 @@ def test_isolated_auxiliary_trial_restores_or_stops_without_input_on(monkeypatch
     ("fixed-cc", "CURR", True, None), ("fixed-cc", "CURR", False, None),
     ("transient", "CURR", True, None),
     ("fixed-cc", "VOLT", False, "selector"), ("fixed-cc", "VOLT", False, "within"),
-    ("fixed-cc", "VOLT", False, "outside"),
+    ("fixed-cc", "VOLT", False, "outside"), ("fixed-cc", "VOLT", False, "zero_selector"),
 ])
 def test_automatic_readback_trials_restore_original_mode_and_settings(
         monkeypatch, capsys, trial, function, enabled, fault):
@@ -181,8 +181,10 @@ def test_automatic_readback_trials_restore_original_mode_and_settings(
         fake.range = fake.current = 0.1
     elif trial == "fixed-cc" and not enabled:
         fake.range = 60
+    if fault == "zero_selector":
+        fake.range = 0
     original_range = fake.range
-    if fault:
+    if fault and fault != "zero_selector":
         def inject(device, command):
             if command == "CURR:RANG 0.2" and fault == "selector":
                 device.range = 0.1
@@ -197,10 +199,17 @@ def test_automatic_readback_trials_restore_original_mode_and_settings(
     args = ["contributor-settings", "--trial", trial, "--resource", RESOURCE, "--json"]
     assert cli.main(args) == 2 and not fake.calls
     capsys.readouterr()
-    failed = fault in {"selector", "outside"}
+    failed = fault in {"selector", "outside", "zero_selector"}
     assert cli.main([*args, "--confirm-isolated"]) == (3 if failed else 0)
     output = capsys.readouterr()
     payload = json.loads(output.out)
+    if fault == "zero_selector":
+        assert payload["error"]["code"] == "readback_mismatch"
+        assert payload["error"]["details"]["query"] == "CURR:RANG?"
+        assert payload["error"]["details"]["no_settings_written"]
+        assert all("?" in call for call in fake.calls)
+        assert fake.current == current and fake.range == original_range and fake.function == function
+        return
     if failed:
         assert payload["error"]["code"] == "readback_mismatch"
         result = payload["error"]["details"]
@@ -846,6 +855,14 @@ def test_configuration_readback_list_reads_observed_steps_and_rejects_bad_count(
     }
 
     fake_visa.calls.clear()
+    fake_visa.responses["LIST:SLEW? 1"] = "not-a-number"
+    with pytest.raises(LoadError) as failure:
+        control.execute("list-status", resource=RESOURCE, hardware_validation="readback")
+    assert failure.value.code == "invalid_response"
+    assert failure.value.details == {
+        "query": "LIST:SLEW? 1", "step": 1, "minimum": "0.0001", "maximum": "0.25",
+        "parse_failure": True,
+    }
     fake_visa.responses["LIST:STEP?"] = "85"
     with pytest.raises(LoadError) as failure:
         control.execute("list-status", resource=RESOURCE, hardware_validation="readback")

@@ -1104,7 +1104,7 @@ $entry = $script:report.results[0]
     assert sessions.read_text().splitlines() == ['session']
 
 
-@pytest.mark.parametrize('scenario', ['timed', 'early-drop', 'voltage'])
+@pytest.mark.parametrize('scenario', ['timed', 'early-drop', 'voltage', 'late-off-reply'])
 def test_contributor_workflow_script_accepts_bounded_duration_evidence_after_confirmed_off(run_script, tmp_path, scenario):
     with (tmp_path / 'sitecustomize.py').open('a', encoding='utf-8') as preload:
         preload.write("""
@@ -1120,8 +1120,17 @@ from time import sleep
 @contextmanager
 def fake_session(_resource):
     class DelayedLoad(ValidationFake):
+        def write(self, command):
+            super().write(command)
+            if command == 'INP OFF':
+                self.off_written = True
+
         def query(self, command):
             response = super().query(command)
+            if (command == 'INP:STAT?' and getattr(self, 'off_written', False)
+                    and os.environ.get('FAKE_WORKFLOW_SCENARIO') == 'late-off-reply'):
+                sleep(2.2)
+                return response
             if self.input:
                 sleep(self.query_delay)
                 if command == 'MEAS:CURR?' and os.environ.get('FAKE_WORKFLOW_SCENARIO') == 'early-drop':
@@ -1162,7 +1171,7 @@ try {
     $null = Invoke-LiveCommand -Command $command -CaseName $caseName -ExtraArgs $extra
     Confirm-WorkflowLoad $caseName
 } catch {
-    if ($entry.error_code -cnotin @('workflow_load_unconfirmed','capacity_cutoff_unconfirmed')) { throw }
+    if ($entry.error_code -cnotin @('workflow_load_unconfirmed','capacity_cutoff_unconfirmed','workflow_cleanup_unconfirmed')) { throw }
 }
 Save-Report
 @{result=$entry.response.result;final_status=$entry.status;error_code=$entry.error_code;
@@ -1173,6 +1182,14 @@ Save-Report
     public = (tmp_path / 'workflow-report/shareable/report.json').read_text(encoding='utf-8-sig')
     assert RESOURCE not in public
     case = json.loads(public)['cases'][0]
+    if scenario == 'late-off-reply':
+        assert case['status'] == 'FAIL' and case['error_code'] == 'workflow_cleanup_unconfirmed'
+        assert case['manual_action_required']
+        diagnostic = case['error_diagnostics']
+        assert diagnostic['input_state'] == 'UNKNOWN' and not diagnostic['cleanup']['off_confirmed']
+        assert diagnostic['off_reply_received_ns'] - diagnostic['off_write_started_ns'] > 2 * 10**9
+        assert 'off_confirmed_ns' not in diagnostic
+        return
     if scenario == 'voltage':
         assert evidence['final_status'] == 'FAIL' and evidence['error_code'] == 'capacity_cutoff_unconfirmed'
         diagnostic = case['error_diagnostics']
@@ -1218,7 +1235,8 @@ def fake_session(_resource):
             assert 'slew' not in sys.argv, 'Out-of-bounds baseline must be refused before writes.'
             assert (Path(os.environ['FAKE_SETTINGS_REPORT']) / 'baseline-visible').is_file()
             super().write(command)
-            if 'list-cc' in sys.argv and command.startswith('LIST:WID 1,'):
+            if ('list-cc' in sys.argv and sys.argv[sys.argv.index('--slot') + 1] == '1'
+                    and command.startswith('LIST:WID 1,')):
                 self.list_steps['LIST:SLEW? 2'] = '0.5'
 
         def query(self, command):
@@ -1232,6 +1250,11 @@ def fake_session(_resource):
     fake.list_steps = {f'LIST:{key}? {index}': value for index in (1, 2)
                        for key, value in (('LEV', '.2'), ('SLEW', '.1'), ('WID', '.3'))}
     if 'list-status' in sys.argv:
+        fake.values['LIST:RANG'] = '61'
+    if 'trigger-observe' in sys.argv:
+        fake.mode = 'LIST'
+        fake.input = True
+        fake.values['TRIG:SOUR'] = 'BUS'
         fake.values['LIST:RANG'] = '61'
     yield fake, {'library': 'fake', 'manufacturer': 'fake'}
 
@@ -1274,6 +1297,19 @@ try {
     $null = Invoke-LiveCommand -Command 'contributor-settings' -CaseName 'list-cc-settings' -DeadlineMs 300000 -ExtraArgs @(
         '--trial','list-cc','--slot','1','--confirm-isolated')
 } catch { Write-Host $_.Exception.Message }
+$script:report.results += [ordered]@{name='list-cc-recall';command='contributor-settings';status='NOT RUN'}
+try {
+    $null = Invoke-LiveCommand -Command 'contributor-settings' -CaseName 'list-cc-recall' -DeadlineMs 300000 -ExtraArgs @(
+        '--trial','list-cc','--slot','2','--confirm-isolated')
+} catch { Write-Host $_.Exception.Message }
+$script:report.results += [ordered]@{name='trigger-bus-dispatch';command='trigger-observe';status='NOT RUN'}
+$settings = '{"function":"LIST","trigger":{"source":"BUS"},"configuration":{"range":"low","repeat_count":1,"steps":[{"current_a":0.1,"slew_a_per_us":0.1,"width_s":2},{"current_a":0.2,"slew_a_per_us":0.1,"width_s":2}]}}'
+try {
+    $deadline = (Get-TimerMonotonicNs) + 14000000000L
+    $null = Invoke-LiveCommand -Command 'trigger-observe' -CaseName 'trigger-bus-dispatch' -ExtraArgs @(
+        '--hardware-validation','trigger','--validation-settings-json',$settings,'--observation-seconds','15',
+        '--deadline-ns',[string]$deadline,'--confirm')
+} catch { Write-Host $_.Exception.Message }
 # Success responses also contain private untouched baseline values.
 $script:report.results += [ordered]@{name='list-status';command='contributor-settings';execution='live';status='PASS';
     response=@{result=@{restored=$true;input_state='OFF';expected_width_s='1';
@@ -1289,7 +1325,15 @@ Save-Report
     assert 'keep the terminals isolated' in result.stdout, result.stdout + result.stderr
     assert result.stdout.index(baseline) < result.stdout.index('keep the terminals isolated')
     report_text = (report_dir / 'shareable/report.json').read_text(encoding='utf-8-sig')
-    case, slew_case, bus_case, nested_list, list_case, transient_case = json.loads(report_text)['cases']
+    case, slew_case, bus_case, nested_list, recall_case, capture_case, list_case, transient_case = json.loads(report_text)['cases']
+    assert recall_case['error_code'] == 'readback_mismatch'
+    recall = recall_case['error_diagnostics']
+    assert recall['list_phase'] == 'Baseline Recall' and recall['query'] == 'LIST:WID? 1'
+    assert recall['step'] == 1 and float(recall['expected']) != float(recall['observed'])
+    assert capture_case['error_code'] == 'readback_mismatch'
+    capture = capture_case['error_diagnostics']
+    assert capture['query'] == 'LIST:RANG?' and float(capture['observed']) == 61
+    assert capture['software_trigger_write_attempted'] is False
     assert bus_case['error_code'] == 'invalid_range_readback'
     assert bus_case['error_diagnostics']['query'] == 'LIST:RANG?'
     assert float(bus_case['error_diagnostics']['observed']) == 61
@@ -1562,7 +1606,7 @@ ConvertTo-Json -InputObject $results -Depth 6 -Compress
     }
 
 
-@pytest.mark.parametrize('scenario', ['cancel', 'success', 'persistent', 'late-clean', 'untrusted', 'unexpected-on', 'final-fault'])
+@pytest.mark.parametrize('scenario', ['cancel', 'success', 'persistent', 'late-clean', 'untrusted', 'unexpected-on', 'unexpected-on-off', 'final-fault'])
 def test_protection_cancel_restores_original_settings(run_script, scenario):
     # Real finally/restore path; only command exchanges and operator input are fake.
     result = run_script([scenario], harness="""
@@ -1603,11 +1647,11 @@ function Invoke-ProtectionStep([string]$Name, [string[]]$ArgsOverride,
         return @{ok=$true;result=@{settings=$settings;fixed_cc=$fixedCc}}
     }
     if ($Name -like 'protection-default-*-set') { return @{ok=$false} }
-    if ($Name -ceq 'protection-software-current-clear' -and $Scenario -cin @('persistent','late-clean','untrusted','unexpected-on')) {
+    if ($Name -ceq 'protection-software-current-clear' -and $Scenario -cin @('persistent','late-clean','untrusted','unexpected-on','unexpected-on-off')) {
         if ($Scenario -ceq 'untrusted') { $script:protectionTrusted = $false }
         if ($Scenario -ceq 'unexpected-on') { $script:report.protection_input_off_unconfirmed = $true }
         $code = if ($Scenario -ceq 'untrusted') { 'query_failed' }
-            elseif ($Scenario -ceq 'unexpected-on') { 'protection_clear_unexpected_on' }
+            elseif ($Scenario -cin @('unexpected-on','unexpected-on-off')) { 'protection_clear_unexpected_on' }
             else { 'protection_still_active' }
         Fail-Case $Name $code 'Synthetic Clear failure.'
     }
@@ -1694,7 +1738,7 @@ foreach ($name in $restoreNames) {
             assert evidence['restore_statuses'][f'{prefix}-final'] == expected_final
         assert evidence['trial_status'] == ('PASS' if scenario == 'success' else 'FAIL')
         assert evidence['clear_status'] == ('PASS' if scenario in {'success', 'final-fault'} else 'FAIL')
-        if scenario == 'late-clean':
+        if scenario in {'late-clean', 'unexpected-on-off'}:
             assert evidence['caught'] == 'Synthetic Clear failure.'
         return
     assert evidence['caught'] == 'The operator did not confirm the Protection step.'
@@ -2038,7 +2082,7 @@ $entry = $script:report.results | Where-Object { $_.name -ceq 'trigger-external-
 
 
 @pytest.mark.parametrize('source', ['HOLD', 'BUS'])
-@pytest.mark.parametrize('scenario', ['baseline', 'uncertain-write', 'waveform'])
+@pytest.mark.parametrize('scenario', ['baseline', 'uncertain-write', 'waveform', 'identity', 'unknown'])
 def test_software_trigger_failure_attribution(run_script, source, scenario):
     # Real trial and cleanup; only CLI exchanges and clock are fake.
     result = run_script([f'{source}:{scenario}'], harness="""
@@ -2078,12 +2122,16 @@ function Invoke-TriggerStep([string]$Name, [int]$DeadlineMs, [int]$TerminationMs
         "$prefix-on" { return @{result=@{input_state='ON'}} }
         "$prefix-dispatch" {
             $dispatch = $script:report.results | Where-Object { $_.name -ceq $Name }
-            $dispatch['error_diagnostics'] = [ordered]@{
-                software_trigger_write_attempted=($fault -cne 'baseline')
-                software_trigger_write_confirmed=($fault -ceq 'waveform')
+            if ($fault -cne 'unknown') {
+                $dispatch['error_diagnostics'] = [ordered]@{
+                    software_trigger_write_attempted=($fault -cnotin @('baseline','identity'))
+                    software_trigger_write_confirmed=($fault -ceq 'waveform')
+                }
             }
             $code = 'trigger_observation_unconfirmed'
             if ($fault -ceq 'uncertain-write') { $script:triggerTrusted = $false; $code = 'write_failed' }
+            if ($fault -ceq 'identity') { $script:triggerTrusted = $false; $code = 'identity_mismatch' }
+            if ($fault -ceq 'unknown') { $script:triggerTrusted = $false; $code = 'deadline_expired' }
             Fail-Case $Name $code 'Synthetic capture failure.'
         }
         default { return @{result=@{input_state='OFF'}} }
@@ -2102,16 +2150,18 @@ try {
     prefix = f'trigger-{source.lower()}'
     cases = {case['name']: case for case in evidence['cases']}
     dispatch, observed = cases[f'{prefix}-dispatch'], cases[f'{prefix}-observed']
-    if scenario in {'waveform', 'baseline'}:
+    if scenario in {'waveform', 'baseline', 'identity'}:
         assert dispatch['status'] == ('PASS' if scenario == 'waveform' else 'NOT RUN')
         assert dispatch['trigger_dispatch_exchange'] == ('CONFIRMED' if scenario == 'waveform' else 'NOT ATTEMPTED')
         assert 'error_code' not in dispatch
-        assert observed['status'] == 'FAIL' and observed['error_code'] == 'trigger_observation_unconfirmed'
+        assert observed['status'] == 'FAIL'
+        assert observed['error_code'] == ('identity_mismatch' if scenario == 'identity' else 'trigger_observation_unconfirmed')
         assert observed['error_diagnostics']['software_trigger_write_confirmed'] is (scenario == 'waveform')
     else:
-        assert dispatch['status'] == 'FAIL' and dispatch['trigger_dispatch_exchange'] == 'UNCONFIRMED'
+        assert dispatch['status'] == 'FAIL'
+        assert dispatch['trigger_dispatch_exchange'] == ('UNKNOWN' if scenario == 'unknown' else 'UNCONFIRMED')
         assert observed['status'] == 'NOT RUN' and observed['error_code'] == 'observation_blocked_by_dispatch'
-    if scenario == 'uncertain-write':
+    if scenario in {'uncertain-write', 'identity', 'unknown'}:
         assert not evidence['off_confirmed']
         assert f'{prefix}-off' not in evidence['calls'] and f'{prefix}-release' not in evidence['calls']
     else:

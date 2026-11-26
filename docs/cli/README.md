@@ -1686,8 +1686,12 @@ confirmed write exchange, not waveform completion. A confirmed write exchange
 can pass its dispatch case even when the separate waveform case fails. A
 preflight or baseline failure before a write leaves dispatch NOT RUN; a
 failed or unconfirmed write blocks the dependent waveform case.
-LIST failures retain selected nested diagnostic fields and Workflow discharge
-failures retain the final measured quantities and elapsed time. A late OFF
+LIST failures retain selected nested diagnostic fields, the failing Save/Recall
+phase and first differing field, and the capture guard's authorized LIST
+comparison. Private baseline or unrelated slot values and malformed reply text
+are not published. Known session/identity failures before software dispatch
+leave dispatch NOT RUN; unknown process termination remains uncertain.
+Workflow discharge failures retain the final measured quantities and elapsed time. A late OFF
 reply is recorded as a received-reply timestamp, not as accepted OFF
 confirmation; the failure and manual cutoff requirement remain unchanged.
 The isolated Low CC readback trial also verifies the numeric candidate selector

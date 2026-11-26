@@ -504,9 +504,18 @@ def _list_snapshot(session, configuration):
                        f"LIST:SLEW? {index}": step["slew_a_per_us"],
                        f"LIST:WID? {index}": step["width_s"]})
     for query, value in checks.items():
-        if _number(session, query) != value:
+        details = {"query": query, "list_selected": True, "expected": str(value)}
+        if " " in query:
+            details["step"] = int(query.rsplit(" ", 1)[1])
+        try:
+            observed = _number(session, query)
+        except LoadError as exc:
+            if exc.code == "invalid_response":
+                exc.details.update(details, parse_failure=True)
+            raise
+        if observed != value:
             raise LoadError("readback_mismatch", "Physical LIST differs from the authorized settings.", 3,
-                            query=query, list_selected=True)
+                            **details, observed=str(observed))
     return {"function_mode": mode, "function": function,
             "configuration": {**configuration, "steps": [_serial(step) for step in configuration["steps"]]}}
 
@@ -736,32 +745,32 @@ def execute_trigger_observation(*, mode, resource, backend, model_id, expected, 
         raise LoadError("argument_error", "A current, bounded observation deadline is required.")
     # The script owns the existing powered trial and OFF reserve. This command
     # never switches Input ON/OFF or starts a second VISA session.
-    with open_request_session(resource, asrl, c.open_session) as (session, runtime):
-        require_trusted_session(session)
-        parse_identity(c._query(session, "*IDN?"))
+    samples = []
+    phase = "preflight"
+    write_attempted = False
+    write_confirmed = False
+    try:
+        with open_request_session(resource, asrl, c.open_session) as (session, runtime):
+            require_trusted_session(session)
+            parse_identity(c._query(session, "*IDN?"))
 
-        def guard():
-            if monotonic_ns() >= deadline_ns:
-                raise LoadError("trigger_observation_unconfirmed", "Observation deadline reached.", 3)
-            _check_trigger(session, trigger)
-            if c._flag(session, "INP:TIM?") != "OFF" or c._flag(session, "INP:SHOR:STAT?") != "OFF":
-                raise LoadError("unsafe_mode", "Trigger observation requires Timer and Short OFF.")
-            _require_trigger_input_on(session, None, "Trigger observation")
-            if is_list:
-                if c._flag(session, "TRAN?") != "OFF":
-                    raise LoadError("unsafe_mode", "LIST observation requires Transient OFF.")
-                _list_snapshot(session, config)
-            else:
-                observed = _snapshot(session, "transient-cc", require_hold=False)
-                _match(observed, config)
-                if not observed["enabled"] or observed["input_state"] != "ON":
-                    raise LoadError("unsafe_mode", "Transient pulse must be enabled with Input ON.")
+            def guard():
+                if monotonic_ns() >= deadline_ns:
+                    raise LoadError("trigger_observation_unconfirmed", "Observation deadline reached.", 3)
+                _check_trigger(session, trigger)
+                if c._flag(session, "INP:TIM?") != "OFF" or c._flag(session, "INP:SHOR:STAT?") != "OFF":
+                    raise LoadError("unsafe_mode", "Trigger observation requires Timer and Short OFF.")
+                _require_trigger_input_on(session, None, "Trigger observation")
+                if is_list:
+                    if c._flag(session, "TRAN?") != "OFF":
+                        raise LoadError("unsafe_mode", "LIST observation requires Transient OFF.")
+                    _list_snapshot(session, config)
+                else:
+                    observed = _snapshot(session, "transient-cc", require_hold=False)
+                    _match(observed, config)
+                    if not observed["enabled"] or observed["input_state"] != "ON":
+                        raise LoadError("unsafe_mode", "Transient pulse must be enabled with Input ON.")
 
-        samples = []
-        phase = "preflight"
-        write_attempted = False
-        write_confirmed = False
-        try:
             guard()
             if software:
                 c._write(session, "SYST:REM")
@@ -853,12 +862,12 @@ def execute_trigger_observation(*, mode, resource, backend, model_id, expected, 
                     sleep(min(0.05, max(0, (deadline_ns - monotonic_ns()) / 1e9)))
             raise LoadError("trigger_observation_unconfirmed", "Current samples did not establish the expected waveform.",
                             3, sample_count=len(samples), trigger_source=source)
-        except LoadError as exc:
-            exc.details.update(trigger_source=source, observation_phase=phase,
-                               software_trigger_write_attempted=write_attempted,
-                               software_trigger_write_confirmed=write_confirmed,
-                               sample_count=len(samples), samples=samples)
-            raise
+    except LoadError as exc:
+        exc.details.update(trigger_source=source, observation_phase=phase,
+                           software_trigger_write_attempted=write_attempted,
+                           software_trigger_write_confirmed=write_confirmed,
+                           sample_count=len(samples), samples=samples)
+        raise
 
 
 def _execute_led_or_slow_rise(command, *, scope, mode, resource, current, resistance,

@@ -541,6 +541,10 @@ function Get-SettingsFailureEvidence($ErrorResult) {
     if ($details.range -cin @('low','high')) { $evidence.range = $details.range }
     if ($details.field -cin @('current_a','voltage_v','resistance_ohm','power_w')) { $evidence.field = $details.field }
     if ($details.no_settings_written -eq $true) { $evidence.no_settings_written = $true }
+    if ($details.parse_failure -is [bool] -and $details.parse_failure) { $evidence.parse_failure = $true }
+    if ($details.list_phase -cin @('B baseline','A before baseline Recall','Baseline Recall','A','B before final Recall','Final Recall')) {
+        $evidence.list_phase = $details.list_phase
+    }
     return $evidence
 }
 
@@ -784,7 +788,8 @@ raise SystemExit(main(contributor_stop=stop, settings_on_baseline=handoff))
             # Explicitly select diagnostic evidence. Never publish arbitrary
             # exception text, nested errors, VISA data or recovery baselines.
             $evidence = [ordered]@{}
-            if ($isolatedSettings -or $Command -cin @('list-status','fixed-slew-status')) {
+            if ($isolatedSettings -or $Command -cin @('list-status','fixed-slew-status','trigger-observe') -or
+                ($Command -ceq 'set-list-cc' -and $CaseName.StartsWith('trigger-'))) {
                 $evidence = Get-SettingsFailureEvidence $result.error
                 if ($code -ceq 'settings_restore_unconfirmed') {
                     foreach ($field in @('original_error','restoration_error')) {

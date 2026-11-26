@@ -194,8 +194,37 @@ def _list_trial(session, slot, previous_slot_width, budget):
 
     def require_list(expected, label):
         mode, function = c._load_mode(session)
-        if mode != "LIST" or function not in _CURRENT or budget.snapshot(lambda: _list_settings(session, expected_count=budget.count)) != expected:
-            raise _mismatch(f"LIST {label} did not match the expected configuration.")
+        details = {"list_phase": label}
+        if mode != "LIST" or function not in _CURRENT:
+            details["query"] = "FUNC:MODE?" if mode != "LIST" else "FUNC?"
+        else:
+            try:
+                actual = budget.snapshot(lambda: _list_settings(session, expected_count=budget.count))
+            except LoadError as exc:
+                exc.details["list_phase"] = label
+                raise
+            if actual == expected:
+                return
+            for field, query in (("range", "LIST:RANG?"), ("repeat_count", "LIST:COUN?")):
+                if actual[field] != expected[field]:
+                    details["query"] = query
+                    break
+            else:
+                for index, (observed, wanted) in enumerate(zip(actual["steps"], expected["steps"]), 1):
+                    for field, template in readback.LIST_STEP_QUERIES.items():
+                        if observed[field] != wanted[field]:
+                            details.update(query=template.format(index), step=index)
+                            # Only A/B widths are public trial values. An ignored
+                            # write or Recall can expose an unrelated saved value.
+                            if index == 1 and field == "width_s":
+                                details["expected"] = str(wanted[field])
+                                if observed[field] in (first, second):
+                                    details["observed"] = str(observed[field])
+                            break
+                    if "query" in details:
+                        break
+        raise LoadError("readback_mismatch", f"LIST {label} did not match the expected configuration.", 3,
+                        **details)
 
     def exercise(write):
         if c._check_mode_change(session) or budget.snapshot(lambda: _list_settings(session, expected_count=budget.count)) != baseline:
