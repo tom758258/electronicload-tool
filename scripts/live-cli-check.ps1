@@ -2534,8 +2534,8 @@ try {
         Write-Host 'Sequence: one batch confirmation for four Fixed trials, each with one ON, measurement and confirmed OFF.'
     }
     if ($protectionSelected) {
-        Write-Host 'Protection: independent software current trip, software power trip and hardware power limit trials at 0.20 A.'
-        Write-Host 'Protection confirms Fixed CC with Input OFF before trials. Each trial requires Enter before Input ON. Software Clear also requires source isolation and a second Enter.'
+        Write-Host 'Protection: software trips are verified from instrument readback. After each trip, turn OFF and isolate the external source and remove the physical fault before confirming Clear.'
+        Write-Host 'Protection: reconnect and energize the same source only when prompted for the next powered trial; the hardware-power baseline and limit trial share the same powered source without another confirmation.'
     }
     if ($traceSelected) {
         Write-Host 'TRACE: four Input OFF batches and one bounded Fixed CC ON batch with explicit OFF.'

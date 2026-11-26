@@ -83,8 +83,8 @@ def run_script(tmp_path):
                 "'Confirm-TimerExpiry','Confirm-WorkflowLoad','Assert-Runtime','Save-Report',"
                 "'New-CliProcessInfo','New-LiveCliProcess','Invoke-SelectedPreflight',"
                 "'Test-SourceConnectedTrials','Confirm-OperatorStart','Confirm-IsolatedBatch',"
-                "'Confirm-ProtectionOperator','Invoke-PoweredProtectionTrial',"
-                "'Invoke-TriggerTrial','Assert-TriggerOff')) {\n"
+                "'Confirm-ProtectionOperator','Invoke-PoweredProtectionTrial','Restore-Protection',"
+                "'Get-ProtectionSetArgs','Invoke-TriggerTrial','Assert-TriggerOff')) {\n"
                 "        Invoke-Expression $node.Extent.Text\n"
                 "    }\n}\n" + harness, encoding='utf-8')
             args = [str(harness_path)]
@@ -1484,6 +1484,266 @@ ConvertTo-Json -InputObject $results -Depth 6 -Compress
         'protection-software-power-on': 'PASS', 'protection-software-power-source-off': 'PASS',
         'protection-hardware-power-baseline-on': 'PASS', 'protection-hardware-power-on': 'SKIP',
     }
+
+
+def test_protection_cancel_restores_original_settings(run_script):
+    # Exercise the real Protection finally/restore path after the operator
+    # cancels the physical source-isolation confirmation. All instrument
+    # exchanges are controlled fakes; no VISA or powered load is involved.
+    result = run_script([], harness="""
+$script:protectionTrials = @(
+    @{name='software-current';settings=[ordered]@{current=1};flags=@('OC','PS')}
+)
+$script:protectionScope = @('--hardware-validation','protection')
+$script:protectionTrusted = $true
+$script:report = @{
+    protection_trials=@{}
+    protection_input_off_unconfirmed=$false
+    protection_restore_unconfirmed=$false
+    results=@(foreach ($name in @(
+        'start-state','prepare-cc','prepare-cc-readback',
+        'software-current-original','software-current-cc','software-current-on',
+        'software-current-trial','software-current-off','software-current-events',
+        'software-current-source-off','software-current-clear',
+        'software-current-restore-guard','software-current-restore-settings',
+        'software-current-restore-cc','software-current-final'
+    )) { [ordered]@{name="protection-$name";status='NOT RUN'} })
+}
+$script:calls = @()
+function Read-ValidationAnswer([string]$Prompt, [string]$CaseName, [switch]$DiscardPendingKeys) {
+    $script:calls += "prompt:$CaseName"
+    return 'cancel'
+}
+function Invoke-ProtectionStep([string]$Name, [string[]]$ArgsOverride,
+                               [switch]$Cleanup, [switch]$AllowDefaultRefusal) {
+    $script:calls += $Name
+    if ($PSBoundParameters.ContainsKey('ArgsOverride')) {
+        $script:restoreArguments = @($ArgsOverride)
+    }
+    $entry = $script:report.results | Where-Object { $_.name -ceq $Name }
+    $settings = [pscustomobject]@{current='0.30'}
+    $fixedCc = [pscustomobject]@{range='low';current_a='0.20'}
+    $payload = switch ($Name) {
+        'protection-software-current-original' {
+            @{input_state='OFF';fixed_cc=$fixedCc;settings=$settings}
+        }
+        'protection-software-current-trial' {
+            @{input_state='OFF';current_a=0.20;condition=@{flags=@('OC','PS')}}
+        }
+        'protection-software-current-events' {
+            @{input_state='OFF';events=@()}
+        }
+        'protection-software-current-restore-guard' {
+            @{input_state='OFF'}
+        }
+        'protection-software-current-restore-settings' {
+            @{input_state='OFF';settings=$settings}
+        }
+        'protection-software-current-final' {
+            @{input_state='OFF';fixed_cc=$fixedCc;settings=$settings}
+        }
+        default { throw "Unexpected Protection exchange: $Name" }
+    }
+    $entry.status = 'PASS'
+    $entry.protection_state = $payload.input_state
+    $script:report.protection_input_off_unconfirmed = $payload.input_state -cne 'OFF'
+    return @{ok=$true;result=$payload}
+}
+try {
+    Invoke-ProtectionValidation @{
+        active_mode='fixed';function='CC';input_state='OFF';short_state='OFF'
+    }
+    throw 'Expected the source-isolation cancellation to stop Protection.'
+} catch {
+    $script:caught = $_.Exception.Message
+}
+$sourceOff = $script:report.results | Where-Object { $_.name -ceq 'protection-software-current-source-off' }
+$clear = $script:report.results | Where-Object { $_.name -ceq 'protection-software-current-clear' }
+$restoreNames = @('protection-software-current-restore-guard',
+                  'protection-software-current-restore-settings',
+                  'protection-software-current-final')
+$restoreStatuses = @{}
+foreach ($name in $restoreNames) {
+    $entry = $script:report.results | Where-Object { $_.name -ceq $name }
+    $restoreStatuses[$name] = $entry.status
+}
+@{
+    caught=$script:caught
+    source_off_status=$sourceOff.status
+    source_off_error=$sourceOff.error_code
+    clear_status=$clear.status
+    restore_unconfirmed=$script:report.protection_restore_unconfirmed
+    restore_input_off_unconfirmed=$script:report.protection_input_off_unconfirmed
+    restore_statuses=$restoreStatuses
+    restore_arguments=$script:restoreArguments
+    calls=$script:calls
+} | ConvertTo-Json -Depth 8 -Compress
+""")
+    assert result.returncode == 0, result.stdout + result.stderr
+    evidence = json.loads(result.stdout.splitlines()[-1])
+    assert evidence['caught'] == 'The operator did not confirm the Protection step.'
+    assert evidence['source_off_status'] == 'FAIL'
+    assert evidence['source_off_error'] == 'confirmation_required'
+    assert evidence['clear_status'] == 'NOT RUN'
+    assert evidence['restore_unconfirmed'] is False
+    assert evidence['restore_input_off_unconfirmed'] is False
+    assert evidence['restore_statuses'] == {
+        'protection-software-current-restore-guard': 'PASS',
+        'protection-software-current-restore-settings': 'PASS',
+        'protection-software-current-final': 'PASS',
+    }
+    assert evidence['restore_arguments'] == [
+        '--hardware-validation', 'protection', '--confirm', '--current', '0.30',
+    ]
+    assert evidence['calls'][-3:] == [
+        'protection-software-current-restore-guard',
+        'protection-software-current-restore-settings',
+        'protection-software-current-final',
+    ]
+
+
+def test_selected_execution_loop_has_no_repeated_operator_prompts(run_script):
+    # Execute the real selected-mode loop with controlled CLI responses.
+    # Timer, both Workflow loads and Sequence must proceed after the initial
+    # authorization without another Read-Host/Read-ValidationAnswer call.
+    result = run_script([], harness="""
+$source = (Join-Path (Get-Location) 'scripts/live-cli-check.ps1')
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    $source, [ref]$null, [ref]$null)
+$loop = $ast.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.ForStatementAst] -and
+        $node.Extent.Text.StartsWith('for ($i = 1; $i -le $planned.Count; $i++)')
+}, $true)
+if ($null -eq $loop) { throw 'Selected-mode execution loop was not found.' }
+
+$planned = @(
+    @{name='identify';command='identify';args=@()},
+    @{name='input-state';command='input-state';args=@()},
+    @{name='measure-off';command='measure';args=@()},
+    @{name='timer-setup';command='set-input-timer';args=@()},
+    @{name='timer-enable';command='input-timer-enable';args=@()},
+    @{name='timer-status-off';command='input-timer-status';args=@()},
+    @{name='timer-on';command='input-on';args=@()},
+    @{name='timer-expiry';command='input-timer-status';args=@()},
+    @{name='timer-off';command='input-off';args=@()},
+    @{name='timer-disable';command='input-timer-disable';args=@()},
+    @{name='timer-status-disabled';command='input-timer-status';args=@()},
+    @{name='timer-final-state';command='input-state';args=@()},
+    @{name='workflow-cc-timed-load';command='cc-timed-load';args=@();workflow_load=$true},
+    @{name='workflow-cc-discharge';command='cc-discharge';args=@();workflow_load=$true},
+    @{name='sequence';command='sequence';args=@()}
+)
+$script:report = @{
+    results=@(foreach ($step in $planned[1..($planned.Count - 1)]) {
+        [ordered]@{name=$step.name;status='NOT RUN'}
+    })
+    prechecks=@{input_off='NOT RUN'}
+    sequence_input_off_unconfirmed=$false
+}
+$script:calls = @()
+$script:answers = @()
+$timerSelected = $true
+$workflowSelected = $true
+$sequenceSelected = $true
+$traceSelected = $false
+$triggerSelected = $false
+$protectionSelected = $false
+$readbackSelected = $false
+$watch = [Diagnostics.Stopwatch]::StartNew()
+$TimerSeconds = '5'
+$perCommandDeadlineMs = 30000
+$traceStartDeadlineMs = 120000
+$readbackSelection = $null
+$isolatedBatchConfirmed = $false
+$triggerCompleted = $false
+$inputOnAttempted = $false
+$timerEnableAttempted = $false
+$timerPowered = $false
+$transientEnableAttempted = $false
+$slowRiseEnableAttempted = $false
+$activeTransientScope = $null
+$slowRiseCleanup = @()
+function Write-Host([string]$Text) {}
+function Read-Host([string]$Prompt) { throw "Unexpected extra Read-Host prompt: $Prompt" }
+function Read-ValidationAnswer([string]$Prompt, [string]$CaseName, [switch]$DiscardPendingKeys) {
+    throw "Unexpected extra operator confirmation: $CaseName"
+}
+function Assert-Runtime($Response, [string]$Name) {
+    if ($Response.ok -ne $true) { throw "Unexpected command failure: $Name" }
+}
+function Assert-InputOff($Response, [string]$Name) {
+    if ($Response.result.input_state -cne 'OFF') { throw "Input was not OFF: $Name" }
+}
+function Assert-ReadbackFields($Response, $Expected, [string]$Name) {}
+function Invoke-TimerExpiry($Step) {
+    $script:calls += 'timer-expiry'
+    ($script:report.results | Where-Object { $_.name -ceq $Step.name }).status = 'PASS'
+}
+function Confirm-TimerExpiry { $script:calls += 'timer-final-confirmed' }
+function Confirm-WorkflowLoad([string]$CaseName) { $script:calls += "workflow:$CaseName" }
+function Save-SequenceEvidence($Entry, $Result) {
+    $script:calls += 'sequence-evidence'
+    $script:report.sequence_input_off_unconfirmed = -not (
+        $Result.input_state -ceq 'OFF' -and $Result.cleanup.off_confirmed -eq $true
+    )
+}
+function Invoke-LiveCommand([string]$Command, [string]$CaseName, [string[]]$ExtraArgs,
+                            [int]$DeadlineMs, [string]$ExpectedError, [switch]$AllowCrHandoff) {
+    $script:calls += "command:$CaseName"
+    $payload = @{input_state='OFF'}
+    switch ($CaseName) {
+        'timer-status-off' {
+            $payload.seconds = 5
+            $payload.enabled = $true
+        }
+        'timer-on' {
+            $payload.input_state = 'ON'
+            $payload.timer_timing = @{on_write_started_ns=1000000000L;on_confirmed_ns=1100000000L}
+        }
+        'timer-status-disabled' {
+            $payload.seconds = 5
+            $payload.enabled = $false
+        }
+        'sequence' {
+            $payload = @{
+                input_state='OFF'
+                completed_steps=7
+                measurements=@(@{voltage_v=5;current_a=0.1;power_w=0.5})
+                input_states=@{input_state=@('ON','OFF')}
+                cleanup=@{off_confirmed=$true;attempted=$true}
+                failed_step=$null
+                original_error=@{code=$null}
+            }
+        }
+    }
+    return @{ok=$true;result=$payload}
+}
+Invoke-Expression $loop.Extent.Text
+@{
+    calls=$script:calls
+    answers=$script:answers
+    timer_powered=$timerPowered
+    timer_enabled=$timerEnableAttempted
+    input_on_attempted=$inputOnAttempted
+    sequence_off_unconfirmed=$script:report.sequence_input_off_unconfirmed
+} | ConvertTo-Json -Depth 8 -Compress
+""")
+    assert result.returncode == 0, result.stdout + result.stderr
+    evidence = json.loads(result.stdout.splitlines()[-1])
+    assert evidence['answers'] == []
+    assert evidence['timer_powered'] is False
+    assert evidence['timer_enabled'] is False
+    assert evidence['input_on_attempted'] is False
+    assert evidence['sequence_off_unconfirmed'] is False
+    calls = evidence['calls']
+    assert calls.count('timer-expiry') == 1
+    assert calls.count('timer-final-confirmed') == 1
+    assert calls.count('workflow:workflow-cc-timed-load') == 1
+    assert calls.count('workflow:workflow-cc-discharge') == 1
+    assert calls.count('sequence-evidence') == 1
+    assert 'command:timer-on' in calls and 'command:timer-off' in calls
+    assert 'command:sequence' in calls
 
 
 def test_trace_validation_preflight_only(run_script):
