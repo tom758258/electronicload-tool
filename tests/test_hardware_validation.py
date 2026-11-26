@@ -810,19 +810,29 @@ def test_configuration_readback_list_reads_observed_steps_and_rejects_bad_count(
     with pytest.raises(LoadError) as failure:
         control.execute("list-status", resource=RESOURCE, hardware_validation="readback")
     assert failure.value.code == "invalid_response" and failure.value.exit_code == 3
-    assert failure.value.details == {"query": "LIST:WID? 1", "step": 1, "observed": "1E+40"}
+    assert failure.value.details == {
+        "query": "LIST:WID? 1", "step": 1, "observed": "1E+40",
+        "minimum": "0.00002", "maximum": "3600",
+    }
 
     fake_visa.responses["LIST:WID? 1"] = readings["LIST:WID? 1"]
     fake_visa.responses.update({"LIST:RANG?": "6", "LIST:SLEW? 1": "2"})
     with pytest.raises(LoadError) as failure:
         control.execute("list-status", resource=RESOURCE, hardware_validation="readback")
-    assert failure.value.code == "invalid_response" and failure.value.details["query"] == "LIST:SLEW? 1"
+    assert failure.value.code == "invalid_response"
+    assert failure.value.details == {
+        "query": "LIST:SLEW? 1", "step": 1, "observed": "2",
+        "minimum": "0.0001", "maximum": "0.25",
+    }
 
     fake_visa.calls.clear()
     fake_visa.responses["LIST:STEP?"] = "85"
     with pytest.raises(LoadError) as failure:
         control.execute("list-status", resource=RESOURCE, hardware_validation="readback")
     assert failure.value.code == "invalid_response" and failure.value.exit_code == 3
+    assert failure.value.details == {
+        "query": "LIST:STEP?", "observed": "85", "minimum": "2", "maximum": "84",
+    }
     assert "LIST:LEV? 1" not in fake_visa.calls
 
 
