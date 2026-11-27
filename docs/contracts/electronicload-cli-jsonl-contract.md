@@ -79,8 +79,8 @@ be launched. It does not start a Worker, discover hardware or access VISA.
 | `tool_version` | Installed distribution version |
 | `worker_protocol` | `{"compatibility_policy":"v3-only","schema_versions":[3]}` |
 | `execution` | `{"model":"multi_job","context_binding":"per_command"}` |
-| `features.common.async_jobs` | `{"contract_version":1}` |
-| `features.common.job_cancel` | `{"contract_version":1,"commands":["trace-start"]}` |
+| `features["common.async_jobs"]` | `{"contract_version":1}` |
+| `features["common.job_cancel"]` | `{"contract_version":1,"commands":["trace-start"]}` |
 | `commands` | Object keyed by domain command; each entry has `kind: "async_job"`. |
 
 `set-cc`, `set-cv`, `set-cr` and `set-cr-led` also declare
@@ -121,25 +121,34 @@ Neither field changes Common process exit meanings.
 
 The installed CLI clients use the exact endpoint URL reported by the Worker:
 `send-command --url URL --worker-command NAME --arguments-json JSON --context-json JSON`,
-optional `--job-id`; `status --url URL`; `stop --url URL`; and
+optional `--job-id` at the CLI transport layer (managed consumers supply a
+unique, non-empty ID for each new submission); `status --url URL`; `stop --url URL`; and
 `wait-ready --url URL --wait-timeout-ms N`. Append `--json` when using
 these in automation. `wait-ready` defaults to 10000 ms and accepts
 1–120000 ms. It returns the status object; full Common validation and
 correlation remain consumer responsibilities.
 
-Successful clients print the Worker response directly, preserving schema 3.
-HTTP errors with JSON bodies are likewise forwarded without wrapping.
-A local argument or transport failure uses the CLI-owned error shape above.
-There is no standalone cancel helper; send `POST /cancel` directly.
+Forwarding clients print the decoded JSON response directly; HTTP errors
+with JSON bodies are likewise forwarded without wrapping. A valid Worker
+response retains schema 3, but the forwarding client does not validate the
+Common envelope or require an object. Handled local argument, transport and
+response-decoding errors use the CLI-owned error shape above. There is no
+standalone cancel helper; send `POST /cancel` directly.
 
 | Surface | Exit 0 | Exit 2 | Exit 3 |
 | --- | --- | --- | --- |
 | Standalone instrument CLI | Successful command | Argument, identity, validation or support-policy refusal | Communication/execution or cleanup failure |
-| Forwarding HTTP client | HTTP 2xx (admission or control acknowledgement, not job success) | HTTP 400, 409, 429; local validation error | Other HTTP failures, transport/response failure |
-| `wait-ready` | Ready status observed | Local validation error | Readiness timeout or transport/response failure |
+| Forwarding HTTP client | HTTP 2xx with decodable, serializable JSON (admission or control acknowledgement, not job success, for a valid Worker response) | HTTP 400, 409, 429 with decodable, serializable JSON; local validation error | Other handled HTTP failures, transport or response-decoding errors |
+| `wait-ready` | Helper readiness predicate satisfied | Local validation error | Readiness timeout or handled transport/response-decoding error |
 | Worker runtime | Normal shutdown without fatal error | Startup validation refusal before runtime | Fatal runtime or bind failure |
 
-These are current Electronic Load exit mappings, not another Tool's mappings.
+These are current Electronic Load mappings for handled outcomes, not another
+Tool's mappings or a guarantee that every malformed response produces a
+structured error. In particular, `wait-ready` expects a JSON object and an
+HTTP 200 with a JSON array, scalar or null can raise an unhandled
+`AttributeError` rather than a CLI-owned error with exit 3. Consumers must
+reject invalid responses and treat missing structured output or an unexpected
+process exit as a client/protocol failure, not readiness or job success.
 Use the Common completion rules for Worker summary, EOF and observed exit;
 do not translate an accepted response to a completed result.
 
@@ -244,9 +253,25 @@ record is dispatch evidence, never a measured waveform or completion signal.
 
 Standalone uses `--dry-run` and returns `mode: "dry-run"`; Worker
 uses `context.mode: "dry_run"` with `planning_model_id`.
-Plans return domain fields including `hardware_access: false`; they
-validate without simulator/physical I/O or file creation. The exact plan
-fields are command-specific: see [readback](electronicload-worker-contract.md#configuration-readback),
+Plans validate without simulator/physical I/O or file creation. The result
+fields are command-specific. `hardware_access: false` is returned by control,
+configuration readback, Protection, Sequence, TRACE and basic workflow plans;
+it is not a required field of every preview.
+
+The ordinary read-only plans (`identify`, `input-state`, `measure`,
+`measure-min-max`, `measure-discharge`, `scpi-version`, `display-mode`, `error`)
+instead return `queries`, `backend`, `transport`, `timeout_ms`,
+`read_termination`, `write_termination`, `live_access` and
+`resource_required_for_live`, plus `max_reads` for Error Queue all-entry
+reads and validation markers when applicable. This shape also applies to
+Worker dry-run through the shared read-only Core path; `live_access` reflects
+the actual scope, not permission to run hardware. The separate standalone
+`asrl-readonly` contributor preview returns `queries`, `backend`, `transport`,
+`timeout_ms`, `open_timeout_ms`, `idn_timeout_ms`, `serial_options`,
+`live_access`, `resource_required_for_live` and validation markers. Neither
+read-only shape includes `hardware_access`. Do not require or fabricate it.
+
+For other plans see [readback](electronicload-worker-contract.md#configuration-readback),
 [Sequence](electronicload-worker-contract.md#software-sequence),
 [basic workflows](electronicload-worker-contract.md#basic-workflows),
 [TRACE](electronicload-worker-contract.md#offline-trace) and the

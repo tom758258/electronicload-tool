@@ -77,10 +77,12 @@ for individual validation/state rules.
 
 - HTTP 202 means a job was accepted, not completed. A second submission
   while a job is active receives Busy; there is no waiting queue.
-- Consume JSONL continuously and match `run_id`, `worker_job_id`, client
-  `job_id` and `command`. A status terminal inherits the enclosing status
-  `run_id`. Client `job_id` is correlation metadata, not idempotency or
-  deduplication.
+- Assign a unique, non-empty client `job_id` to every new domain submission,
+  as required by the Common Orchestrator Workflows. The CLI transport permits
+  omitting `--job-id`, but managed consumers must supply it. Consume JSONL
+  continuously and match `run_id`, `worker_job_id`, client `job_id` and
+  `command`. A status terminal inherits the enclosing status `run_id`.
+  Client `job_id` is correlation metadata, not idempotency or deduplication.
 - A matching `job_finished` or complete matching `last_job` snapshot
   provides terminal evidence. Require successful state and `ok: true`
   before dependent steps; wait for empty `active_job` before submission.
