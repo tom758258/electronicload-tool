@@ -4,7 +4,9 @@
 
 - [Project README](../../README.md) — project overview, installation and build.
 - [Supported Models](../core/supported-models.md) — exact LIVE support and Core architecture.
-- [Electronic Load Worker Contract](../contracts/electronicload-worker-contract.md) — command arguments, results and Worker behavior.
+- [Electronic Load CLI JSON / JSONL Contract](../contracts/electronicload-cli-jsonl-contract.md) — machine-readable results, Manifest and client output.
+- [Electronic Load Orchestrator Workflows](../contracts/electronicload-orchestrator-workflows.md) — consumer sequencing, job completion and cleanup.
+- [Electronic Load Worker Contract](../contracts/electronicload-worker-contract.md) — command arguments, execution, state and safety.
 - [Common Worker Protocol](../contracts/common-worker-protocol.md) and [Common CLI JSON / JSONL Contract](../contracts/common-cli-jsonl-contract.md) — automation interfaces.
 - [Testing Guidelines](../testing-guidelines.md) and [AGENTS.md](../../AGENTS.md) — development and validation boundaries.
 
@@ -179,6 +181,8 @@ queries USB resources only. See [ASRL contributor validation](#asrl-contributor-
 for serial options and the controlled physical procedure.
 
 ## Results and exits
+
+For the machine-readable data contract, see [Electronic Load CLI JSON / JSONL Contract](../contracts/electronicload-cli-jsonl-contract.md).
 
 Successful simulation of `measure --simulate --json` returns:
 
@@ -1209,6 +1213,8 @@ For Worker argument names, results and Stop behavior, see the
 [Worker contract](../contracts/electronicload-worker-contract.md#basic-workflows).
 
 ## Worker and Automation
+
+For external subprocess integration and completion rules, see [Electronic Load Orchestrator Workflows](../contracts/electronicload-orchestrator-workflows.md).
 
 Standalone simulation commands each start with fresh state. To exercise a CV/CR/CW
 setup followed by simulated ON/OFF, send the commands to the same simulated

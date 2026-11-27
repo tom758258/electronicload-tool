@@ -4,6 +4,11 @@ This document defines IT8812C-specific behavior under the existing
 [Common Worker Protocol](common-worker-protocol.md) and
 [Common CLI JSON / JSONL Contract](common-cli-jsonl-contract.md).
 Common contracts remain authoritative for the HTTP and JSONL envelopes.
+This contract owns command admission, execution, state, recovery and safety.
+See the [Electronic Load CLI JSON / JSONL Contract](electronicload-cli-jsonl-contract.md)
+for data shapes and the [Electronic Load Orchestrator Workflows](electronicload-orchestrator-workflows.md)
+for consumer-side sequencing. The command inventory below gives result summaries;
+follow the result contract's links for the detailed domain fields.
 
 ## Versions and lifecycle
 
@@ -250,16 +255,7 @@ Worker session state and return `state_source: "simulate"`. Use
 an empty `planned_writes` array. The new commands decline LIVE requests
 with `unsupported_live_scope` before opening VISA.
 
-`readback` returns `active_mode` (`fixed`, `transient`, or `list`),
-`function_mode`, `function`, `transient_enabled`, `input_state`,
-`short_state`, and mode-specific `configuration`. Disabled Transient reports
-`active_mode: "fixed"` and `function_mode: "FIX"` unless LIST is selected.
-The Transient summary contains waveform mode, applicable Range and levels
-A/B. The LIST summary contains Range, repeat count and step count. `fixed-status`
-returns the Fixed setpoint in its unit-specific field and the applicable
-Range. `fixed-slew-status` requires Fixed CC and reports `configured` and
-the two slew rates as decimal strings or null before simulated configuration.
-An incompatible mode fails the job with `mode_not_fixed`.
+See [Configuration readback results](electronicload-cli-jsonl-contract.md#configuration-readback-results) for the exact result fields and mode-specific shapes.
 
 `trace-status` returns `source`, `points`, `interval_s`, `delay_s`,
 `filter_enabled`, and `feed`. Interval and delay are decimal strings, and
@@ -599,40 +595,7 @@ phase alignment or physical activity/completion state is inferred. No command
 implicitly enables/disables Input or performs rollback. Stop remains a signal,
 never an implicit Input OFF; it blocks new Transient mutations and Input ON.
 
-All eight Transient commands return the same simulated domain status shape:
-
-```json
-{
-  "configured": true,
-  "function": "CC",
-  "mode": "continuous",
-  "range": "low",
-  "enabled": true,
-  "last_trigger": {
-    "sequence": 1,
-    "accepted_at_utc": "2026-01-01T00:00:00+00:00",
-    "source": "software"
-  },
-  "configuration": {
-    "transient_mode": "continuous", "range": "low",
-    "level_a_a": 1, "level_b_a": 2,
-    "width_a_s": 0.001, "width_b_s": 0.002,
-    "rise_slew_a_per_us": "0.1", "fall_slew_a_per_us": "0.1"
-  }
-}
-```
-
-`configuration` includes only the selected mode's width fields (`pulse_width_s`
-for Pulse, none for Toggle). CC levels/widths remain JSON numbers and its slew
-fields remain exact decimal strings. CV/CW levels use `level_a_v`/`level_b_v`
-and `level_a_w`/`level_b_w` as JSON numbers; CR uses `level_a_ohm`/`level_b_ohm`
-as exact decimal strings. New modes' widths are exact decimal strings with the
-same `_s` suffixes. There are no CV/CR/CW slew fields. `function` is CC/CV/CR/CW;
-`mode` remains the waveform mode. Range resolves to `low`/`high`, or null for
-CW (also in `configuration`). Before setup, `configured` and `enabled` are false,
-and `function`, `mode`, `range`, `configuration`, `last_trigger` are null.
-Before a trigger, `last_trigger` is null; its sequence starts at 1 after setup.
-Status queries and later triggers do not mutate earlier result snapshots.
+All eight Transient commands use the [Transient result schema](electronicload-cli-jsonl-contract.md#transient-results), including independent snapshots and trigger records.
 
 `transient-status` is an ordinary async domain command. `GET /status` keeps its
 existing Worker/runtime/job shape and makes no instrument queries. Use the
