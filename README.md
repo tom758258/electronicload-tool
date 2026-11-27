@@ -149,6 +149,8 @@ is implied by a documentation change.
 
 - [CLI README — detailed commands and validation](docs/cli/README.md)
 - [Supported Models and Multi-Model Architecture](docs/core/supported-models.md)
+- [Electronic Load CLI JSON / JSONL Contract](docs/contracts/electronicload-cli-jsonl-contract.md)
+- [Electronic Load Orchestrator Workflows](docs/contracts/electronicload-orchestrator-workflows.md)
 - [Electronic Load Worker Contract](docs/contracts/electronicload-worker-contract.md)
 - [Common Worker Protocol](docs/contracts/common-worker-protocol.md)
 - [Common CLI JSON / JSONL Contract](docs/contracts/common-cli-jsonl-contract.md)
