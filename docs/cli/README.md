@@ -39,7 +39,9 @@ repository root, synchronize the locked environment:
 uv sync --all-extras --locked --link-mode=copy
 ```
 
-Use the installed CLI in `.venv` or `uv run --no-sync electronicload-tool`.
+The PowerShell examples below use `.\.venv\Scripts\electronicload-tool.exe` from the
+repository root; virtual environment activation is not required. Alternatively,
+use `uv run --no-sync electronicload-tool` with the same arguments.
 The editable installation reflects Python source changes without reinstalling.
 Use the [Testing Guidelines](../testing-guidelines.md) for focused checks.
 
@@ -99,7 +101,8 @@ input-state and measurement queries.
 
 ## Command Family Index
 
-Use `electronicload-tool <command> --help` for exact argument syntax. This index
+Use `.\.venv\Scripts\electronicload-tool.exe <command> --help` for exact argument
+syntax. This index
 lists the implemented CLI surface, not a LIVE allowlist. See
 [Supported Models](../core/supported-models.md#product-live-support) for permissions.
 
@@ -274,10 +277,10 @@ Use `error` only when removing a queue entry is intended; `--all` explicitly
 consumes a bounded number of entries. Do not consume another controller’s queue.
 
 ```powershell
-electronicload-tool scpi-version --resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" --json
-electronicload-tool display-mode --resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" --json
-electronicload-tool error --resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" --json
-electronicload-tool error --resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" --all --json
+.\.venv\Scripts\electronicload-tool.exe scpi-version --resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" --json
+.\.venv\Scripts\electronicload-tool.exe display-mode --resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" --json
+.\.venv\Scripts\electronicload-tool.exe error --resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" --json
+.\.venv\Scripts\electronicload-tool.exe error --resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" --all --json
 ```
 
 The separately approved [System Query validation procedure](#system-query-validation)
@@ -473,11 +476,11 @@ The simulator provides setting/state behavior, not a circuit or DUT model.
 ### CR-LED and Current Slow Rise
 
 ```powershell
-electronicload-tool set-cr-led --resistance 50 --range auto --vdrop 1 --simulate --json
-electronicload-tool cr-led-status --simulate --json
-electronicload-tool current-slow-rise-enable --simulate --json
-electronicload-tool current-slow-rise-disable --simulate --json
-electronicload-tool current-slow-rise-status --simulate --json
+.\.venv\Scripts\electronicload-tool.exe set-cr-led --resistance 50 --range auto --vdrop 1 --simulate --json
+.\.venv\Scripts\electronicload-tool.exe cr-led-status --simulate --json
+.\.venv\Scripts\electronicload-tool.exe current-slow-rise-enable --simulate --json
+.\.venv\Scripts\electronicload-tool.exe current-slow-rise-disable --simulate --json
+.\.venv\Scripts\electronicload-tool.exe current-slow-rise-status --simulate --json
 ```
 
 `set-cr-led` requires Input OFF and uses the same resistance and Range
@@ -661,9 +664,9 @@ strings. Decimal tokens are preserved during CLI forwarding and Worker
 validation so excess precision cannot be rounded into an accepted request.
 
 ```powershell
-electronicload-tool set-cc --simulate --current 2.5 --range auto --json
-electronicload-tool set-cv --dry-run --voltage 24 --range auto --json
-electronicload-tool set-cr --simulate --resistance 10 --range auto --json
+.\.venv\Scripts\electronicload-tool.exe set-cc --simulate --current 2.5 --range auto --json
+.\.venv\Scripts\electronicload-tool.exe set-cv --dry-run --voltage 24 --range auto --json
+.\.venv\Scripts\electronicload-tool.exe set-cr --simulate --resistance 10 --range auto --json
 ```
 
 `--range` remains required, with no default. For a Worker's `set-cc`, arguments
@@ -712,9 +715,9 @@ These capabilities support simulation and dry-run. Use one simulated Worker to
 retain settings and Input state across commands.
 
 ```powershell
-electronicload-tool set-cc --simulate --current 1 --range auto --rise-slew 0.1 --fall-slew 0.2 --json
-electronicload-tool set-von --simulate --voltage 10 --latch on --json
-electronicload-tool von-status --simulate --json
+.\.venv\Scripts\electronicload-tool.exe set-cc --simulate --current 1 --range auto --rise-slew 0.1 --fall-slew 0.2 --json
+.\.venv\Scripts\electronicload-tool.exe set-von --simulate --voltage 10 --latch on --json
+.\.venv\Scripts\electronicload-tool.exe von-status --simulate --json
 ```
 
 Supply both Slew rates in A/μs or omit both for the original Fixed CC operation.
@@ -1065,10 +1068,10 @@ If the readback shows ON, the operation fails and attempts one bounded OFF
 while communication is trusted. Check the returned Input state.
 
 ```powershell
-electronicload-tool protection-status --simulate --events --json
-electronicload-tool protection-set --dry-run --software-power-limit 200 --confirm --json
-electronicload-tool protection-set --dry-run --restore-defaults hardware-power --confirm --json
-electronicload-tool protection-clear --simulate --confirm --json
+.\.venv\Scripts\electronicload-tool.exe protection-status --simulate --events --json
+.\.venv\Scripts\electronicload-tool.exe protection-set --dry-run --software-power-limit 200 --confirm --json
+.\.venv\Scripts\electronicload-tool.exe protection-set --dry-run --restore-defaults hardware-power --confirm --json
+.\.venv\Scripts\electronicload-tool.exe protection-clear --simulate --confirm --json
 ```
 
 Use a single simulated Worker to retain settings between commands. Simulation
@@ -1118,8 +1121,8 @@ before Input ON in CV, CR or CW. Fixed CR setup requires CR-LED OFF. Simulation
 also checks that any requested CC slew pair still matches the setup before Input ON.
 
 ```powershell
-electronicload-tool sequence --file sequence.json --dry-run
-electronicload-tool sequence --file sequence.json --simulate --confirm
+.\.venv\Scripts\electronicload-tool.exe sequence --file sequence.json --dry-run
+.\.venv\Scripts\electronicload-tool.exe sequence --file sequence.json --simulate --confirm
 ```
 
 The preview requires no confirmation. Runs with any `input-on` require a
@@ -1152,11 +1155,11 @@ The simulator uses a fixed 12 V source, so a discharge simulation with a
 | `cc-discharge` | `--current`, `--cutoff-voltage`, `--timeout-s`, `--confirm` when simulating | `--interval-s` (defaults to 1 s), `--cutoff-capacity-ah`, `--range`, `--csv` |
 
 ```powershell
-electronicload-tool measure-log --simulate --interval-s 1 --count 60
-electronicload-tool measure-log --simulate --interval-s 1 --duration-s 60
-electronicload-tool measure-until --simulate --interval-s 1 --metric voltage --operator le --threshold 4.5 --timeout-s 6
-electronicload-tool cc-timed-load --simulate --current 0.5 --duration-s 30 --confirm
-electronicload-tool cc-discharge --dry-run --current 0.5 --cutoff-voltage 3 --cutoff-capacity-ah 1 --timeout-s 7300
+.\.venv\Scripts\electronicload-tool.exe measure-log --simulate --interval-s 1 --count 60
+.\.venv\Scripts\electronicload-tool.exe measure-log --simulate --interval-s 1 --duration-s 60
+.\.venv\Scripts\electronicload-tool.exe measure-until --simulate --interval-s 1 --metric voltage --operator le --threshold 4.5 --timeout-s 6
+.\.venv\Scripts\electronicload-tool.exe cc-timed-load --simulate --current 0.5 --duration-s 30 --confirm
+.\.venv\Scripts\electronicload-tool.exe cc-discharge --dry-run --current 0.5 --cutoff-voltage 3 --cutoff-capacity-ah 1 --timeout-s 7300
 ```
 
 - The measurement commands preserve Input state. `measure-log` reads voltage,
@@ -1227,9 +1230,9 @@ query or configuration previews. Standalone simulated invocations do not share
 state; use one simulated Worker for multi-command control sequences.
 
 ```powershell
-electronicload-tool identify --simulate --json
-electronicload-tool error --all --simulate --json
-electronicload-tool set-cc --current 0.1 --range low --dry-run --json
+.\.venv\Scripts\electronicload-tool.exe identify --simulate --json
+.\.venv\Scripts\electronicload-tool.exe error --all --simulate --json
+.\.venv\Scripts\electronicload-tool.exe set-cc --current 0.1 --range low --dry-run --json
 ```
 
 For normal USB diagnostics, select the resource explicitly using the
@@ -1617,7 +1620,7 @@ The CLI verifies IT8812C identity before sending any System Query. The script
 reads one Error Queue entry; choose `--all` only if bounded consumption is intended.
 
 ```powershell
-electronicload-tool scpi-version --resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" --backend system --hardware-validation system-query --json
+.\.venv\Scripts\electronicload-tool.exe scpi-version --resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" --backend system --hardware-validation system-query --json
 ```
 
 The validation mode is retained independently of ordinary USB CLI permission.
