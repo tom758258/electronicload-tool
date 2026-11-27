@@ -309,16 +309,21 @@ VISA runtime evidence. The legacy LIVE override does not enable TRACE.
 or creating CSV, and never counts as physical success. Do not use these CLI
 commands as unattended or ordinary load-operation APIs.
 
-The single controlled script `scripts/live-cli-check.ps1 -Modes trace` performs
-five short trials: VOLT 10 points / 1 s OFF, CURR 10 / 1 s OFF, TWO 40 / 1 s
+The single controlled script `scripts/live-cli-check.ps1 -Modes trace` saves the
+original Trigger Source and Timer Interval with Input OFF, sets and verifies
+HOLD without changing the stored interval, and performs five short trials: VOLT 10 points / 1 s OFF, CURR 10 / 1 s OFF, TWO 40 / 1 s
 OFF, VOLT 10 / 1 ms OFF, and TWO 10 / 1 s with explicitly confirmed bounded
 Fixed CC Input ON. The last trial writes a new Full CSV with estimated elapsed
 and delta columns, then explicitly commands and confirms Input OFF. This is
 not waveform calibration, an exhaustive interval test, or Worker LIVE validation.
 TRACE Start alone has a 120-second script process deadline; other commands
 keep their existing 30-second budget and the total run stays bounded.
-Unexpected communication failures halt remaining cases; the script never
-reconnects to an untrusted VISA Session to attempt blind Input OFF.
+The script restores and verifies the original Trigger Source and Timer Interval
+with trusted communication and confirmed Input OFF, including after a safely
+recoverable trial failure. A failed run stays FAIL. An untrusted VISA Session,
+unconfirmed Feed stop or uncertain Input state blocks Trigger restoration and
+requires independent operator recovery. The script never reconnects to an
+untrusted VISA Session to attempt blind Input OFF.
 
 Use an explicit operator-selected real Resource only after separately approving
 the bounded source/DUT, manual OFF contingency and interactive confirmation:
@@ -1307,8 +1312,12 @@ FULL. A single name or a comma-separated list such as `cc,readback` selects
 each named mode once. USB and ASRL use the same modes and acceptance checks.
 `-InputTimerOnly` is a shortcut for `-Modes input-timer` and cannot be combined
 with `-Modes`. Hardware selections first identify the instrument, confirm
-Input OFF and measure V/I/P. Trigger snapshots Source and Timer before any
-legacy Transient write and restores them after its trials when safe.
+Input OFF and measure V/I/P. Any selection containing TRACE, Trigger or legacy
+Transient saves Trigger Source and Timer Interval before changes. TRACE verifies
+HOLD; legacy Transient and Trigger retain their existing required sources.
+The original settings are restored once after the selected connected trials,
+before Average finalization or isolated settings trials, when safe. Selections
+that do not need this shared lifecycle do not add these writes.
 
 | `-Modes` | FULL coverage |
 | --- | --- |
@@ -1748,13 +1757,15 @@ built-in preset settings by default: 0.1/0.2 A levels, 0.1 A/µs slews,
 15 s observation and a 60 s trial ON/OFF deadline. These are controlled
 validation presets, not proof that a particular supply or DUT is safe.
 The original Transient Pulse default remains 0.001 s; explicitly supplying
-`-PulseWidth` overrides both. A full-mode run saves original Trigger Source
-and Timer before any legacy Transient writes HOLD, then restores them after
-the Trigger trials when Input OFF is confirmed and communication trusted.
-If an earlier selected mode fails after legacy Transient may have changed
-Source, it attempts the same restore only after trusted Input OFF confirmation.
-An untrusted session or unconfirmed OFF blocks further VISA writes and requires
-independent operator action; the run stays FAIL.
+`-PulseWidth` overrides both. Standalone, mixed and full selections containing
+legacy Transient, TRACE or Trigger save the original Trigger Source and Timer
+Interval before any changes and restore both after the selected connected trials
+when Input OFF is confirmed and communication trusted. TRACE explicitly verifies
+HOLD before capture. If an earlier trial fails after a possible Source change,
+restoration requires trusted communication, confirmed Input OFF and completed
+applicable cleanup. An untrusted session, unconfirmed TRACE Feed stop or uncertain
+safety state blocks automatic restoration and requires independent operator action;
+the run stays FAIL.
 
 | Parameters | Purpose |
 | --- | --- |
