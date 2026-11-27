@@ -473,6 +473,38 @@ def test_hold_first_trigger_uses_fixed_cc_baseline_and_bounded_transition(scenar
         assert observed["events_confirmed"] == 1
 
 
+@pytest.mark.parametrize("source,scenario", [
+    ("HOLD", "expected"), ("HOLD", "short"), ("HOLD", "long"),
+    ("TIMER", "expected"), ("TIMER", "incompatible_timing"),
+    ("TIMER", "long_transition"), ("TIMER", "later_pair"),
+])
+def test_sampled_transient_trigger_with_query_latency(source, scenario):
+    # Synthetic 150 ms current queries, 50 ms gaps and consecutive transition
+    # readings. The programmed Width is not just the stable sample span.
+    if source == "HOLD":
+        count = 3 if scenario == "short" else 13 if scenario == "long" else 7
+        currents = [0, 0, 0.05, 0.05, *([0.1] * count), 0.15, 0.15, 0.2, 0.2]
+    else:
+        # Each pulse in the incompatible case can fit a 2 s Width on its own,
+        # but their start/end brackets cannot also fit the 5 s Interval.
+        count, between = (5, 13) if scenario == "incompatible_timing" else (7, 14)
+        pulse = [0.15, 0.15, *([0.1] * count), 0.15, 0.15]
+        currents = [0.2, 0.2, *pulse, *([0.2] * between), *pulse, 0.2, 0.2]
+        if scenario == "long_transition":
+            currents[2:4] = [0.15] * 4
+        elif scenario == "later_pair":
+            currents = [0.2, 0.2, 0.15, 0.1, 0.15, 0.2, 0.2, *currents]
+    samples = [{"started_s": index * 0.2, "completed_s": index * 0.2 + 0.15, "current_a": current}
+               for index, current in enumerate(currents)]
+    evidence = sampled_waveform_evidence(
+        samples, source=source, level_a=Decimal("0.1"), level_b=Decimal("0.2"), width_a=2,
+        interval=5 if source == "TIMER" else None, baseline_current=Decimal(0) if source == "HOLD" else None,
+    )
+    assert (evidence is not None) is (scenario in {"expected", "later_pair"})
+    if evidence:
+        assert evidence["events_confirmed"] == (2 if source == "TIMER" else 1)
+
+
 def test_hold_observation_dispatches_one_trigger_after_zero_fixed_baseline(
     monkeypatch,
 ):
