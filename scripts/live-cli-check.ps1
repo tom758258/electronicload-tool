@@ -542,7 +542,8 @@ function Get-SettingsFailureEvidence($ErrorResult) {
     if ($details.field -cin @('current_a','voltage_v','resistance_ohm','power_w')) { $evidence.field = $details.field }
     if ($details.no_settings_written -eq $true) { $evidence.no_settings_written = $true }
     if ($details.parse_failure -is [bool] -and $details.parse_failure) { $evidence.parse_failure = $true }
-    if ($details.list_phase -cin @('B baseline','A before baseline Recall','Baseline Recall','A','B before final Recall','Final Recall')) {
+    if ($details.list_phase -cin @('B baseline','A before baseline Recall','Baseline Recall','A','B before final Recall',
+                                 'Final Recall','Automatic readback')) {
         $evidence.list_phase = $details.list_phase
     }
     return $evidence

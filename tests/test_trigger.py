@@ -220,7 +220,9 @@ def test_readback_list_buffer_without_slot_or_trigger(
         return
     if ignored_width:
         assert status == 3 and outcome["error"]["code"] == "readback_mismatch"
-        assert outcome["error"]["details"]["restored"]
+        details = outcome["error"]["details"]
+        assert details == {"list_phase": "Automatic readback", "query": "LIST:WID? 1",
+                           "step": 1, "expected": "1", "restored": True, "input_state": "OFF"}
     else:
         assert status == 0
         result = outcome["result"]

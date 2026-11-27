@@ -1258,6 +1258,9 @@ def fake_session(_resource):
                        for key, value in (('LEV', '.2'), ('SLEW', '.1'), ('WID', '.3'))}
     if 'list-status' in sys.argv:
         fake.values['LIST:RANG'] = '61'
+    if 'list' in sys.argv:
+        fake.list_steps['LIST:WID? 1'] = '0.314159265358979'
+        fake.ignore = 'LIST:WID 1,1'
     if 'trigger-observe' in sys.argv:
         fake.mode = 'LIST'
         fake.input = True
@@ -1317,8 +1320,13 @@ try {
         '--hardware-validation','trigger','--validation-settings-json',$settings,'--observation-seconds','15',
         '--deadline-ns',[string]$deadline,'--confirm')
 } catch { Write-Host $_.Exception.Message }
+$script:report.results += [ordered]@{name='list-status';command='contributor-settings';status='NOT RUN'}
+try {
+    $null = Invoke-LiveCommand -Command 'contributor-settings' -CaseName 'list-status' -ExtraArgs @(
+        '--trial','list','--confirm-isolated')
+} catch { Write-Host $_.Exception.Message }
 # Success responses also contain private untouched baseline values.
-$script:report.results += [ordered]@{name='list-status';command='contributor-settings';execution='live';status='PASS';
+$script:report.results += [ordered]@{name='list-status-success';command='contributor-settings';execution='live';status='PASS';
     response=@{result=@{restored=$true;input_state='OFF';expected_width_s='1';
         observed=@{configuration=@{steps=@(@{width_s='1'},@{width_s='17.123456789'})}}}}}
 $script:report.results += [ordered]@{name='transient-status';command='contributor-settings';execution='live';status='PASS';
@@ -1332,7 +1340,13 @@ Save-Report
     assert 'keep the terminals isolated' in result.stdout, result.stdout + result.stderr
     assert result.stdout.index(baseline) < result.stdout.index('keep the terminals isolated')
     report_text = (report_dir / 'shareable/report.json').read_text(encoding='utf-8-sig')
-    case, slew_case, bus_case, nested_list, recall_case, capture_case, list_case, transient_case = json.loads(report_text)['cases']
+    cases = json.loads(report_text)['cases']
+    case, slew_case, bus_case, nested_list, recall_case, capture_case, auto_list, list_case, transient_case = cases
+    assert auto_list['status'] == 'FAIL' and auto_list['error_code'] == 'readback_mismatch'
+    assert auto_list['error_diagnostics'] == {
+        'list_phase': 'Automatic readback', 'query': 'LIST:WID? 1', 'step': 1, 'expected': '1',
+    }
+    assert '0.314159265358979' not in report_text
     assert recall_case['error_code'] == 'readback_mismatch'
     recall = recall_case['error_diagnostics']
     assert recall['list_phase'] == 'Baseline Recall' and recall['query'] == 'LIST:WID? 1'

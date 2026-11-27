@@ -513,10 +513,29 @@ def _list_readback_trial(session, budget):
             {field: c._decimal(value) for field, value in step.items()}
             for step in configuration["steps"]
         ]
-        if (not observed["selected"] or observed["input_state"] != "OFF"
-                or c.validate_list_cc(actual) != expected):
-            raise _mismatch("LIST readback did not match the test buffer.")
-        return {"observed": observed, "expected_width_s": str(candidate)}
+        details = {"list_phase": "Automatic readback"}
+        if not observed["selected"]:
+            details["query"] = "FUNC:MODE?"
+        elif observed["input_state"] != "OFF":
+            details["query"] = "INP:STAT?"
+        else:
+            actual = c.validate_list_cc(actual)
+            if actual == expected:
+                return {"observed": observed, "expected_width_s": str(candidate)}
+            for field, query in (("range", "LIST:RANG?"), ("repeat_count", "LIST:COUN?")):
+                if actual[field] != expected[field]:
+                    details["query"] = query
+                    break
+            else:
+                for index, (step, wanted) in enumerate(zip(actual["steps"], expected["steps"]), 1):
+                    field = next((key for key in readback.LIST_STEP_QUERIES if step[key] != wanted[key]), None)
+                    if field is not None:
+                        details.update(query=readback.LIST_STEP_QUERIES[field].format(index), step=index)
+                        # Only the candidate width is public; other values belong to the private baseline.
+                        if index == 1 and field == "width_s":
+                            details["expected"] = str(candidate)
+                        break
+        raise LoadError("readback_mismatch", "LIST readback did not match the test buffer.", 3, **details)
 
     def restore():
         _guard(session, modes=_FIXED | {"LIST"})
