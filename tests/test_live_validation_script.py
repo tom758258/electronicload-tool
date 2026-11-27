@@ -1785,6 +1785,55 @@ foreach ($name in $restoreNames) {
     ]
 
 
+@pytest.mark.parametrize("original_limit", ["250", "260"])
+def test_protection_restores_original_hardware_power_max_via_named_default(
+    run_script, original_limit,
+):
+    # R04/R05: the standard numeric limit remains 250 W, but the IT8812C
+    # may already have its 260 W MAX selected before the isolated trial.
+    # Existing tests checked MAX writes/readbacks, not the real PS restore
+    # arguments for an original 260 W setting.
+    result = run_script([original_limit], harness="""
+$script:protectionScope = @('--hardware-validation','protection')
+$script:protectionTrusted = $true
+$script:report = @{protection_restore_unconfirmed=$true;
+    protection_input_off_unconfirmed=$false}
+$script:calls = @()
+function Invoke-ProtectionStep([string]$Name, [string[]]$ArgsOverride,
+                               [switch]$Cleanup, [switch]$AllowDefaultRefusal) {
+    $script:calls += $Name
+    if ($Name -eq 'protection-default-hardware-power-restore-settings') {
+        $script:restoreArgs = @($ArgsOverride)
+    }
+    if ($Name -eq 'protection-default-hardware-power-final') {
+        return @{result=@{fixed_cc=[pscustomobject]@{range='low';current_a='0.20'};
+            settings=[pscustomobject]@{hardware_power_limit=$Scenario};
+            condition=@{raw=0;flags=@()};input_state='OFF'}}
+    }
+    return @{result=@{input_state='OFF'}}
+}
+$original = @{fixed_cc=[pscustomobject]@{range='low';current_a='0.20'};
+    settings=[pscustomobject]@{hardware_power_limit=$Scenario}}
+Restore-Protection 'protection-default-hardware-power' $original @('hardware_power_limit') $false
+@{arguments=@($script:restoreArgs);calls=@($script:calls);
+    confirmed=(-not $script:report.protection_restore_unconfirmed)} |
+    ConvertTo-Json -Depth 5 -Compress
+""")
+    assert result.returncode == 0, result.stdout + result.stderr
+    output = json.loads(result.stdout.splitlines()[-1])
+    expected = (["--restore-defaults", "hardware-power"] if original_limit == "260"
+                else ["--hardware-power-limit", "250"])
+    assert output["arguments"] == [
+        "--hardware-validation", "protection", "--confirm", *expected,
+    ]
+    assert output["calls"] == [
+        "protection-default-hardware-power-restore-guard",
+        "protection-default-hardware-power-restore-settings",
+        "protection-default-hardware-power-final",
+    ]
+    assert output["confirmed"] is True
+
+
 def test_selected_execution_loop_has_no_repeated_operator_prompts(run_script):
     # Execute the real selected-mode loop with controlled CLI responses.
     # Timer, both Workflow loads and Sequence must proceed after the initial

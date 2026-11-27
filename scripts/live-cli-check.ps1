@@ -1705,7 +1705,15 @@ function Restore-Protection([string]$Prefix, $Original, $Fields, [bool]$RestoreC
     if ($Fields.Count -gt 0) {
         $settings = [ordered]@{}
         foreach ($field in $Fields) { $settings[$field] = $Original.settings.$field }
-        $arguments = $script:protectionScope + @('--confirm') + @(Get-ProtectionSetArgs $settings)
+        # IT8812C factory hardware protection MAX is 260 W. Restore an
+        # original MAX with the existing named default, without admitting an
+        # ordinary operator-supplied numeric 260 W setting (limit remains 250 W).
+        if ($Fields.Count -eq 1 -and $Fields[0] -ceq 'hardware_power_limit' -and
+            [decimal]$settings.hardware_power_limit -eq 260) {
+            $arguments = $script:protectionScope + @('--confirm','--restore-defaults','hardware-power')
+        } else {
+            $arguments = $script:protectionScope + @('--confirm') + @(Get-ProtectionSetArgs $settings)
+        }
         $null = Invoke-ProtectionStep "$Prefix-restore-settings" -ArgsOverride $arguments
     }
     if ($RestoreCc) {
