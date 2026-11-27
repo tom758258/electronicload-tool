@@ -114,13 +114,33 @@ def sampled_waveform_evidence(samples, *, source, level_a, level_b, width_a,
         else:
             runs.append((label, [sample]))
 
+    # Only bounded, in-range transitions between different known plateaus
+    # may be skipped for Transient pulses. Retain their measured duration in
+    # the boundary uncertainty; never merge disjoint same-level plateaus.
+    transition_spans = {}
+    if not is_list and (observed_hold_origin or source == "TIMER"):
+        stable = []
+        allowed = {("S", "A"), ("A", "B")} if observed_hold_origin else {("B", "A"), ("A", "B")}
+        for index, (label, values) in enumerate(runs):
+            if label == "?" and 0 < index < len(runs) - 1:
+                left, right = runs[index - 1][0], runs[index + 1][0]
+                if (left, right) in allowed:
+                    lo, hi = sorted((levels[left], levels[right]))
+                    span = values[-1]["completed_s"] - values[0]["started_s"]
+                    if (0 <= span <= gap_limit and all(
+                            lo <= Decimal(str(item["current_a"])) <= hi for item in values)):
+                        transition_spans[len(stable)] = span
+                        continue
+            stable.append((label, values))
+        runs = stable
+
     def plateau(index, duration, *, terminal_s=None):
         values = runs[index][1]
         if len(values) < 2:
             return False
         first, last = values[0], values[-1]
         before = runs[index - 1][1][-1]
-        if first["completed_s"] - before["started_s"] > 2 * gap:
+        if first["completed_s"] - before["started_s"] > 2 * gap + transition_spans.get(index, 0):
             return False
         lower = last["started_s"] - first["completed_s"]
         if lower + 2 * gap < duration:
@@ -131,7 +151,7 @@ def sampled_waveform_evidence(samples, *, source, level_a, level_b, width_a,
             after_completed = terminal_s
         else:
             after_completed = runs[index + 1][1][0]["completed_s"]
-        if after_completed - last["started_s"] > 2 * gap:
+        if after_completed - last["started_s"] > 2 * gap + transition_spans.get(index + 1, 0):
             return False
         upper = after_completed - before["started_s"]
         return lower <= duration <= upper
@@ -149,19 +169,7 @@ def sampled_waveform_evidence(samples, *, source, level_a, level_b, width_a,
     else:
         pattern = (["B", "A", "B", "A", "B"] if source == "TIMER" else
                    ["S", "A", "B"] if observed_hold_origin else ["B", "A", "B"])
-        if observed_hold_origin and labels == ["S", "A", "?", "B"]:
-            # The IT8812C can return a few in-between current samples while
-            # moving from A to B. Permit only a brief, bounded transition
-            # between the two known plateaus, never an arbitrary extra dwell.
-            transition = runs[2][1]
-            lo, hi = sorted((Decimal(str(level_a)), Decimal(str(level_b))))
-            if (transition[-1]["completed_s"] - transition[0]["started_s"] > gap_limit
-                    or any(not lo <= Decimal(str(item["current_a"])) <= hi
-                           for item in transition)):
-                return None
-            runs.pop(2)
-            labels.pop(2)
-        if observed_hold_origin and labels == pattern and len(runs[-1][1]) < 2:
+        if observed_hold_origin and (labels != pattern or len(runs[-1][1]) < 2):
             return None
         events = 2 if source == "TIMER" else 1
         found = False

@@ -29,6 +29,9 @@ class TriggerFake(ValidationFake):
         if self.remote and command != self.ignore:
             if command == "FUNC:MODE LIST":
                 self.mode = "LIST"
+                self.range = float(self.values["LIST:RANG"])
+            if key == "LIST:WID" and self.mode == "LIST":
+                return
             if key in {"LIST:LEV", "LIST:SLEW", "LIST:WID"}:
                 index, token = value.split(",")
                 self.list_steps[f"{key}? {index}"] = token
@@ -61,12 +64,12 @@ def test_contributor_list_requires_independent_recall_then_restores_working_buff
 
         def write(self, command):
             super().write(command)
-            if command == "LIST:SAV 1":
+            if command == "LIST:SAV 1" and self.mode == "LIST":
                 self.save_count += 1
                 if (scenario not in {"stale_slot", "unknown_stale_slot"}
                         and not (scenario == "second_save_ignored" and self.save_count == 2)):
                     self.slots[1] = self.list_steps.copy()
-            if command == "LIST:RCL 1":
+            if command == "LIST:RCL 1" and self.mode == "FIX":
                 if scenario not in {"recall_ignored", "lost_after_recall"}:
                     self.list_steps = self.slots[1].copy()
                 if scenario == "lost_after_recall":
@@ -78,7 +81,7 @@ def test_contributor_list_requires_independent_recall_then_restores_working_buff
         fake.values["LIST:STEP"] = str(count)
         fake.list_steps = {f"LIST:{key}? {index}": value for index in range(1, count + 1)
                            for key, value in (("LEV", ".2"), ("SLEW", ".1"), ("WID", "0.3"))}
-    fake.range = 6
+    fake.range = 0
     fake.transient = scenario == "transient_enabled"
     if scenario == "fixed_cv":
         fake.function = "VOLT"
@@ -132,7 +135,7 @@ def test_contributor_list_requires_independent_recall_then_restores_working_buff
     assert snapshot["fixed_cc"]["range"] == "low"
     if scenario == "lost_after_recall":
         assert status == 3 and result["error"]["details"]["manual_action_required"]
-        assert fake.mode == "LIST" and fake.list_steps["LIST:WID? 1"] == "2"
+        assert fake.mode == "FIX" and fake.list_steps["LIST:WID? 1"] == "2"
         assert fake.calls[-2:] == ["LIST:RCL 1", "FUNC:MODE?"]
         return
 
@@ -153,6 +156,7 @@ def test_contributor_list_requires_independent_recall_then_restores_working_buff
         assert Decimal(details["expected"]) in (1, 2, 3)
         assert "observed" not in details or Decimal(details["observed"]) != Decimal(details["expected"])
     assert fake.list_steps == start and fake.mode == "FIX" and not fake.input
+    assert fake.range == 0
     assert now < 301_000_000_000
     writes = [command for command in fake.calls if "?" not in command]
     assert "INP ON" not in writes
@@ -168,15 +172,15 @@ def test_empty_working_list_is_initialized_and_retained_after_authorized_trial(
     class EmptyList(TriggerFake):
         def __init__(self):
             super().__init__()
-            self.range = 6
+            self.range = 0
             self.values.update({"LIST:RANG": "0", "LIST:COUN": "0", "LIST:STEP": "0"})
             self.slots = {}
 
         def write(self, command):
             super().write(command)
-            if command == "LIST:SAV 1":
+            if command == "LIST:SAV 1" and self.mode == "LIST":
                 self.slots[1] = self.list_steps.copy()
-            elif command == "LIST:RCL 1":
+            elif command == "LIST:RCL 1" and self.mode == "FIX":
                 self.list_steps = self.slots[1].copy()
 
     fake = EmptyList()
@@ -215,6 +219,7 @@ def test_empty_working_list_is_initialized_and_retained_after_authorized_trial(
     assert fake.list_steps["LIST:WID? 1"] == "1"
     assert fake.list_steps["LIST:WID? 2"] == "1"
     assert fake.mode == "FIX" and not fake.input
+    assert fake.range == 0
     assert not any(command == "INP ON" for command in fake.calls)
     if trial == "list-cc":
         assert result["save_confirmed"] and result["recall_confirmed"]
@@ -265,7 +270,7 @@ def test_readback_list_buffer_without_slot_or_trigger(
     monkeypatch, capsys, ignored_width, count, origin, remaining_s, delay_case,
 ):
     fake = TriggerFake()
-    fake.range = 6
+    fake.range = 0
     fake.function = origin
     fake.values["LIST:STEP"] = str(count)
     fake.list_steps = {f"LIST:{key}? {index}": value for index in range(1, count + 1)
@@ -326,6 +331,7 @@ def test_readback_list_buffer_without_slot_or_trigger(
         assert steps[1]["width_s"] == original["LIST:WID? 2"]
         assert steps[0]["slew_a_per_us"] == original["LIST:SLEW? 1"]
     assert fake.list_steps == original and fake.mode == "FIX" and fake.function == origin and not fake.input
+    assert fake.range == 0
     assert not any(call.startswith(("LIST:SAV", "LIST:RCL", "INP ON", "TRIG")) and "?" not in call
                    for call in fake.calls)
 
@@ -333,7 +339,7 @@ def test_readback_list_buffer_without_slot_or_trigger(
 
 @pytest.mark.parametrize("source,scenario", [
     ("HOLD", "expected"), ("HOLD", "missing"), ("HOLD", "short"),
-    ("TIMER", "expected"), ("TIMER", "wrong_interval"),
+    ("TIMER", "expected"), ("TIMER", "wrong_interval"), ("TIMER", "bad_transition"),
     ("BUS", "expected"), ("BUS", "wrong_order"), ("EXTERNAL", "expected"),
     ("BUS", "stuck"), ("EXTERNAL", "stuck"), ("BUS", "extra_cycle"), ("BUS", "early_end"),
     ("BUS", "terminal_last"),
@@ -355,6 +361,8 @@ def test_sampled_trigger_evidence_requires_levels_and_time_brackets(source, scen
             starts = [1] if source == "HOLD" else [1, 8 if scenario == "wrong_interval" else 6]
             if any(start <= t < start + (0.4 if scenario == "short" else 2) for start in starts):
                 current = 0.1
+            if source == "TIMER" and any(abs(t - (start + 2)) < 1e-9 for start in starts):
+                current = 0.35 if scenario == "bad_transition" else 0.15
         sample = {"started_s": t, "completed_s": t + 0.02, "current_a": current}
         if is_list:
             end = 4 if scenario == "early_end" else 9 if scenario == "extra_cycle" else 5
@@ -395,6 +403,8 @@ def test_hold_first_trigger_uses_fixed_cc_baseline_and_bounded_transition(scenar
             current = 0.1 if scenario == "missing_b" else 0.2
         if scenario == "wrong_order" and 0.4 <= t < 2.4:
             current = 0.2
+        if scenario == "observed" and index == 2:
+            current = 0.05
         samples.append({"started_s": t, "completed_s": t + 0.02, "current_a": current})
     observed = sampled_waveform_evidence(
         samples, source="HOLD", level_a=Decimal("0.1"), level_b=Decimal("0.2"),

@@ -194,9 +194,35 @@ def _list_settings(session, *, expected_count=None):
     return c.validate_list_cc({key: raw[key] for key in c.LIST_FIELDS})
 
 
-def _list_trial(session, slot, previous_slot_width, budget):
-    fixed = readback._fixed(session, "CC")
+def _require_restorable_list_fixed(fixed, baseline):
+    if (Decimal(str(fixed["range_readback_a"])) < Decimal(str(fixed["current_a"]))
+            or Decimal(str(fixed["current_a"])) > c.RANGE_LIMITS[baseline["range"]]):
+        raise LoadError("list_baseline_unrestorable",
+                        "Fixed CC settings cannot safely survive the LIST range selection.", 3,
+                        query="CURR:RANG?")
+
+
+def _restore_list_fixed(session, fixed):
+    # Entering LIST selects its current range, which persists after FIX.
+    # Restore the original numeric selector only with a confirmed Fixed CC
+    # selection and unchanged setpoint; do not mask an unrelated mismatch.
+    _guard(session)
+    actual = readback._fixed(session, "CC")
+    if actual["current_a"] != fixed["current_a"]:
+        raise _mismatch("Original Fixed CC setpoint was not restored.")
+    if actual["range_readback_a"] != fixed["range_readback_a"]:
+        c._input_off(session)
+        c._write(session, f"CURR:RANG {Decimal(str(fixed['range_readback_a'])):f}")
+        actual = readback._fixed(session, "CC")
+    if actual != fixed:
+        raise _mismatch("Original Fixed CC settings were not restored.")
+
+
+def _list_trial(session, slot, previous_slot_width, budget, *, fixed=None):
+    if fixed is None:
+        fixed = readback._fixed(session, "CC")
     baseline = budget.snapshot(lambda: _list_settings(session, expected_count=budget.count), preparing=True)
+    _require_restorable_list_fixed(fixed, baseline)
     width = baseline["steps"][0]["width_s"]
     first = next(Decimal(value) for value in (1, 2, 3) if value not in (width, previous_slot_width))
     second = Decimal(2) if first == 1 else Decimal(1)
@@ -207,11 +233,11 @@ def _list_trial(session, slot, previous_slot_width, budget):
 
     a, b = with_width(first), with_width(second)
 
-    def require_list(expected, label):
+    def require_list(expected, label, *, modes=frozenset({"LIST"})):
         mode, function = c._load_mode(session)
         details = {"list_phase": label}
-        if mode != "LIST" or function not in _CURRENT:
-            details["query"] = "FUNC:MODE?" if mode != "LIST" else "FUNC?"
+        if mode not in modes or function not in _CURRENT:
+            details["query"] = "FUNC:MODE?" if mode not in modes else "FUNC?"
         else:
             try:
                 actual = budget.snapshot(lambda: _list_settings(session, expected_count=budget.count))
@@ -249,18 +275,25 @@ def _list_trial(session, slot, previous_slot_width, budget):
         write("FUNC:MODE LIST")
         require_list(b, "B baseline")
         write(f"LIST:SAV {slot}")
+        # IT8812C permits Save in LIST, but Width edits and Recall only
+        # take effect in FIX. Confirm each mode before mutating the buffer.
+        write("FUNC:MODE FIX")
+        _guard(session)
         write(f"LIST:WID 1,{first:f}")
-        require_list(a, "A before baseline Recall")
+        require_list(a, "A before baseline Recall", modes=_FIXED)
         write(f"LIST:RCL {slot}")
-        require_list(b, "Baseline Recall")
+        require_list(b, "Baseline Recall", modes=_FIXED)
 
         write(f"LIST:WID 1,{first:f}")
+        write("FUNC:MODE LIST")
         require_list(a, "A")
         write(f"LIST:SAV {slot}")
+        write("FUNC:MODE FIX")
+        _guard(session)
         write(f"LIST:WID 1,{second:f}")
-        require_list(b, "B before final Recall")
+        require_list(b, "B before final Recall", modes=_FIXED)
         write(f"LIST:RCL {slot}")
-        require_list(a, "Final Recall")
+        require_list(a, "Final Recall", modes=_FIXED)
         return {"a_width_s": str(first), "b_width_s": str(second),
                 "save_confirmed": True, "recall_confirmed": True,
                 "exited_list": True, "saved_slot": slot}
@@ -279,8 +312,9 @@ def _list_trial(session, slot, previous_slot_width, budget):
             for command in writes:
                 c._input_off(session)
                 c._write(session, command)
-        if _list_settings(session, expected_count=len(baseline["steps"])) != baseline or readback._fixed(session, "CC") != fixed:
-            raise _mismatch("The original LIST buffer and Fixed CC settings were not restored.")
+        if _list_settings(session, expected_count=len(baseline["steps"])) != baseline:
+            raise _mismatch("The original LIST buffer was not restored.")
+        _restore_list_fixed(session, fixed)
 
     return exercise, restore, {"mode": "fixed", "function": "CC", "fixed_cc": fixed, "working_list": baseline}
 
@@ -467,6 +501,12 @@ def _transient_readback_trial(session):
         return {**validated, "rise_slew": values["rise_slew"], "fall_slew": values["fall_slew"]}
 
     original = settings()
+    range_name, original_selector = readback._range(session, "CC")
+    fixed_current = c._decimal_readback(session, "CURR?")
+    if range_name != original["range"] or fixed_current > original_selector:
+        raise _mismatch("Original CC selector cannot safely restore the settings.")
+    if range_name == "low" and max(original["level_a"], original["level_b"]) > original_selector:
+        raise _mismatch("Original CC selector cannot safely restore the Transient levels.")
     trigger = _trigger_snapshot(session)
     low, high = c.SLEW_LIMITS[original["range"]]
     baseline = {
@@ -478,21 +518,33 @@ def _transient_readback_trial(session):
         **baseline, "level_a": Decimal("0.2") if baseline["level_a"] == Decimal("0.1") else Decimal("0.1"),
     })
     source_changed = trigger["source"] != "HOLD"
+    selector = max(original_selector, candidate["level_a"], candidate["level_b"], fixed_current)
+    change_selector = range_name == "low" and selector != original_selector
 
     def exercise(write):
         _guard(session)
-        if settings() != original or _trigger_snapshot(session) != trigger:
+        if (settings() != original or readback._range(session, "CC")[1] != original_selector
+                or c._decimal_readback(session, "CURR?") != fixed_current
+                or _trigger_snapshot(session) != trigger):
             raise _mismatch("Original Transient settings changed before testing.")
         for field, query in readback.SLEW_QUERIES.items():
             if baseline[field] != original[field]:
                 write(f"{query} {baseline[field]:f}")
         if settings() != baseline:
             raise _mismatch("The safe Transient Slew baseline was not confirmed.")
+        if change_selector:
+            write(f"CURR:RANG {selector:f}")
+            if (readback._range(session, "CC")[0] != range_name
+                    or c._decimal_readback(session, "CURR?") != fixed_current
+                    or settings() != baseline):
+                raise _mismatch("Transient CC selector changed other settings.")
         write(f"CURR:TRAN:ALEV {candidate['level_a']:f}")
         if source_changed:
             write("TRIG:SOUR HOLD")
-        if settings() != candidate or _trigger_snapshot(session)["source"] != "HOLD":
+        if settings() != candidate:
             raise _mismatch("Transient setup did not match.")
+        if _trigger_snapshot(session)["source"] != "HOLD":
+            raise _mismatch("Transient Trigger Source did not match.")
         _guard(session)
         write("TRAN ON")
         observed = readback.snapshot(session, "transient-status")
@@ -518,20 +570,31 @@ def _transient_readback_trial(session):
         if readback._range(session, "CC")[0] != baseline["range"]:
             raise _mismatch("Transient Range changed; cannot restore level A.")
         c._write(session, f"CURR:TRAN:ALEV {baseline['level_a']:f}")
+        if (settings() != baseline
+                or c._decimal_readback(session, "CURR?") != fixed_current):
+            raise _mismatch("Transient baseline was not restored before restoring the selector.")
+        if readback._range(session, "CC")[1] != original_selector:
+            c._input_off(session)
+            c._write(session, f"CURR:RANG {original_selector:f}")
         if source_changed:
             c._input_off(session)
             c._write(session, f"TRIG:TIM {trigger['interval_s']:f}")
             c._input_off(session)
             c._write(session, f"TRIG:SOUR {SOURCE_TOKENS[trigger['source']]}")
-        if settings() != baseline or _trigger_snapshot(session) != trigger:
+        if (settings() != baseline or readback._range(session, "CC")[1] != original_selector
+                or c._decimal_readback(session, "CURR?") != fixed_current
+                or _trigger_snapshot(session) != trigger):
             raise _mismatch("Transient or Trigger test baseline was not restored.")
 
     return exercise, restore, {"transient": original, "trigger": trigger,
+                               "range_readback_a": str(original_selector), "fixed_current_a": str(fixed_current),
                                **({"baseline_initialized": True} if baseline != original else {})}
 
-def _list_readback_trial(session, budget):
+def _list_readback_trial(session, budget, *, fixed=None):
     baseline = budget.snapshot(lambda: _list_settings(session, expected_count=budget.count), preparing=True)
-    fixed = readback._fixed(session, "CC")
+    if fixed is None:
+        fixed = readback._fixed(session, "CC")
+    _require_restorable_list_fixed(fixed, baseline)
     original = baseline["steps"][0]["width_s"]
     candidate = Decimal(2) if original == 1 else Decimal(1)
     first, *rest = baseline["steps"]
@@ -583,8 +646,9 @@ def _list_readback_trial(session, budget):
             c._write(session, "FUNC:MODE FIX")
         _guard(session)
         c._write(session, f"LIST:WID 1,{original:f}")
-        if _list_settings(session, expected_count=len(baseline["steps"])) != baseline or readback._fixed(session, "CC") != fixed:
-            raise _mismatch("Original LIST buffer or Fixed CC setting was not restored.")
+        if _list_settings(session, expected_count=len(baseline["steps"])) != baseline:
+            raise _mismatch("Original LIST buffer was not restored.")
+        _restore_list_fixed(session, fixed)
 
     return exercise, restore, {"working_list": baseline, "fixed_cc": fixed}
 
@@ -624,6 +688,8 @@ def _blank_list_trial(session, trial, slot, previous_slot_width, budget):
              "width_s": Decimal("1")},
         ],
     })
+    fixed = readback._fixed(session, "CC")
+    _require_restorable_list_fixed(fixed, baseline)
     active = {}
 
     def exercise(write):
@@ -640,8 +706,8 @@ def _blank_list_trial(session, trial, slot, previous_slot_width, budget):
         # when entering the normal short LIST trial's preparation budget.
         budget.prepare_queries -= budget.blank_prepare_queries
         budget.blank_prepare_queries = 0
-        inner = (_list_trial(session, slot, previous_slot_width, budget)
-                 if trial == "list-cc" else _list_readback_trial(session, budget))
+        inner = (_list_trial(session, slot, previous_slot_width, budget, fixed=fixed)
+                 if trial == "list-cc" else _list_readback_trial(session, budget, fixed=fixed))
         active["restore"] = inner[1]
         result = inner[0](write)
         return {**result, "baseline_initialized": True, "original_settings_restored": False}
@@ -651,7 +717,7 @@ def _blank_list_trial(session, trial, slot, previous_slot_width, budget):
             raise _mismatch("LIST initialization was not fully verified; manual review required.")
         active["restore"]()
 
-    return exercise, restore, {"working_list": baseline, "original_list_was_blank": True}
+    return exercise, restore, {"working_list": baseline, "fixed_cc": fixed, "original_list_was_blank": True}
 
 
 def _prepare_trial(session, trial, slot, previous_slot_width, *, readback_trial=False, deadline_ns=None):
@@ -720,13 +786,13 @@ class _ListBudget:
         if trial == "list-cc":
             # Seven exercise snapshots; cleanup can read a different buffer,
             # rewrite its headers/steps with OFF guards, then verify baseline.
-            self.exercise_queries = 7 * self.snapshot_queries + 55
-            self.restore_queries = (3 + 3 * 84) + 2 * self.snapshot_queries + 40
+            self.exercise_queries = 7 * self.snapshot_queries + 75
+            self.restore_queries = (3 + 3 * 84) + 2 * self.snapshot_queries + 50
         else:
             # Two exercise snapshots, one cleanup snapshot, Fixed settings
             # and interlocks. Budget each selection leg for the actual origin.
             self.exercise_queries = 2 * self.snapshot_queries + 16
-            self.restore_queries = self.snapshot_queries + 20
+            self.restore_queries = self.snapshot_queries + 30
             if needs_selection:
                 if selection["transient_enabled"]:
                     self.prepare_queries += 10
@@ -849,9 +915,10 @@ def execute(trial, *, mode, resource, backend, model_id, confirmed, slot=None, p
             "von": ["VOLT:ON <test/original>", "VOLT:LATC <test/original>"],
             "slew": [f"{stem} <test/original>" for stem in readback.SLEW_QUERIES.values()],
             "short": ["INP:SHOR 1", "INP:SHOR 0"],
-            "list-cc": ["LIST:WID 1,<B>", "FUNC:MODE LIST", f"LIST:SAV {slot}", "LIST:WID 1,<A>",
-                        f"LIST:RCL {slot}", "LIST:WID 1,<A>", f"LIST:SAV {slot}",
-                        "LIST:WID 1,<B>", f"LIST:RCL {slot}", "FUNC:MODE FIX"],
+            "list-cc": ["LIST:WID 1,<B>", "FUNC:MODE LIST", f"LIST:SAV {slot}", "FUNC:MODE FIX",
+                        "LIST:WID 1,<A>", f"LIST:RCL {slot}", "LIST:WID 1,<A>",
+                        "FUNC:MODE LIST", f"LIST:SAV {slot}", "FUNC:MODE FIX",
+                        "LIST:WID 1,<B>", f"LIST:RCL {slot}"],
         }
         queries = {
             "von": [readback.VON_THRESHOLD_QUERY, readback.VON_LATCH_QUERY],
@@ -888,7 +955,7 @@ def execute(trial, *, mode, resource, backend, model_id, confirmed, slot=None, p
             "average": ["SENS:AVER:COUN <test>", "SENS:AVER:COUN <original>"],
         })
         queries.update({
-            "transient": ["CURR:RANG?", "CURR:TRAN:MODE?", "TRIG:SOUR?", "TRIG:TIM?",
+            "transient": ["CURR:RANG?", "CURR?", "CURR:TRAN:MODE?", "TRIG:SOUR?", "TRIG:TIM?",
                           *(stem + "?" for stem in readback.TRANSIENT_LEVEL_QUERIES.values()),
                           "CURR:TRAN:AWID?", "CURR:TRAN:BWID?"],
             "list": queries["list-cc"],
@@ -902,7 +969,14 @@ def execute(trial, *, mode, resource, backend, model_id, confirmed, slot=None, p
             conditional.setdefault(trial, []).append(mode_change)
             conditional[trial].append({"condition": "Original Transient enabled, HOLD and restorable settings confirmed with Input OFF",
                                        "writes": ["TRAN OFF", "TRAN ON"]})
+        if trial in {"list", "list-cc"}:
+            conditional.setdefault(trial, []).append({
+                "condition": "Trusted FIX cleanup finds the LIST-selected CC selector differs from the original",
+                "writes": ["CURR:RANG <original selector>"]})
         if trial == "transient":
+            conditional[trial].append({
+                "condition": "Low CC selector must cover the candidate levels and original Fixed current; restore after Level A",
+                "writes": ["CURR:RANG <required selector>", "CURR:RANG <original selector>"]})
             conditional[trial].append({"condition": "Original Trigger Source differs from HOLD",
                                        "writes": ["TRIG:SOUR HOLD", "TRIG:TIM <original>", "TRIG:SOUR <original>"]})
         if readback_trial:

@@ -172,7 +172,7 @@ def test_isolated_auxiliary_trial_restores_or_stops_without_input_on(monkeypatch
     ("fixed-cr", "CURR", False, None), ("fixed-cw", "CURR", False, None),
     ("transient", "VOLT", False, None), ("average", "CURR", False, None),
     ("fixed-cc", "CURR", True, None), ("fixed-cc", "CURR", False, None),
-    ("transient", "CURR", True, None),
+    ("transient", "CURR", True, None), ("transient", "CURR", False, "transient_zero_selector"),
     ("fixed-cc", "VOLT", False, "selector"), ("fixed-cc", "VOLT", False, "within"),
     ("fixed-cc", "VOLT", False, "outside"), ("fixed-cc", "VOLT", False, "zero_selector"),
     ("fixed-cc", "VOLT", False, "function_changed"),
@@ -187,10 +187,10 @@ def test_automatic_readback_trials_restore_original_mode_and_settings(
         fake.range = fake.current = 0.1
     elif trial == "fixed-cc" and not enabled:
         fake.range = 60
-    if fault == "zero_selector":
+    if fault in {"zero_selector", "transient_zero_selector"}:
         fake.range = 0
     original_range = fake.range
-    if fault and fault != "zero_selector":
+    if fault and fault not in {"zero_selector", "transient_zero_selector"}:
         def inject(device, command):
             if command == "CURR 0.2":
                 if fault == "selector":
@@ -202,6 +202,21 @@ def test_automatic_readback_trials_restore_original_mode_and_settings(
 
         fake.after_write = inject
     fake.values.update({"INP:TIM": "0", "TRIG:TIM": "5", "SENS:AVER:COUN": "14"})
+    if fault == "transient_zero_selector":
+        fake.values.update({"CURR:TRAN:MODE": "PULS", "CURR:TRAN:ALEV": "0",
+                            "CURR:TRAN:BLEV": "0", "CURR:TRAN:AWID": "2",
+                            "TRIG:SOUR": "EXT"})
+    if trial == "transient":
+        original_write = fake.write
+
+        def selector_limited_write(command):
+            if (command.startswith("CURR:TRAN:ALEV ")
+                    and Decimal(command.split()[1]) > Decimal(str(fake.range))):
+                fake.calls.append(command)
+                return
+            original_write(command)
+
+        monkeypatch.setattr(fake, "write", selector_limited_write)
     initial = dict(fake.values)
     current = fake.current
     session(fake, monkeypatch)
@@ -247,6 +262,9 @@ def test_automatic_readback_trials_restore_original_mode_and_settings(
             assert writes == ["CURR:RANG 0.1", "CURR 0.1", "CURR:RANG 6.0", "CURR 0.0"]
         else:
             assert writes == ["CURR 0.1", "CURR 0.0"]
+    if fault == "transient_zero_selector":
+        assert payload["result"]["observed"]["configuration"]["level_a_a"] == 0.1
+        assert fake.range == 0
     assert "INP ON" not in fake.calls
     for key, value in initial.items():
         try:
