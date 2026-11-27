@@ -85,7 +85,9 @@ def run_script(tmp_path):
                 "'New-CliProcessInfo','New-LiveCliProcess','Invoke-SelectedPreflight',"
                 "'Test-SourceConnectedTrials','Confirm-OperatorStart','Confirm-IsolatedBatch',"
                 "'Confirm-ProtectionOperator','Invoke-PoweredProtectionTrial','Restore-Protection',"
-                "'Get-ProtectionSetArgs','Invoke-TriggerTrial','Assert-TriggerOff')) {\n"
+                "'Get-ProtectionSetArgs','Invoke-TriggerTrial','Assert-TriggerOff',"
+                "'Invoke-TriggerStep','Assert-TriggerSnapshot','Test-TriggerRestoreSafe',"
+                "'Invoke-TriggerValidation','Restore-TriggerAfterFailure','Assert-TraceResult')) {\n"
                 "        Invoke-Expression $node.Extent.Text\n"
                 "    }\n}\n" + harness, encoding='utf-8')
             args = [str(harness_path)]
@@ -137,6 +139,34 @@ def assert_validation_average_plan(cases, connected, extensions=False):
             assert names.index(baseline) < names.index(case['name']) < names.index(final)
 
 
+def assert_validation_trigger_plan(cases, modes):
+    managed = 'trace' in modes or 'trigger' in modes or any(m.startswith('transient-') for m in modes)
+    names = list(cases)
+    assert ('trigger-snapshot' in cases) is managed
+    assert ('trigger-restore' in cases) is managed
+    assert ('trace-trigger-hold' in cases) is ('trace' in modes)
+    if not managed:
+        return
+    assert cases['trigger-snapshot']['command'] == 'trigger-status'
+    assert cases['trigger-restore']['command'] == 'trigger-configure'
+    assert names.index('measure-off') < names.index('trigger-snapshot')
+    assert names.index('trigger-restore') < names.index(
+        'measurement-extensions-average' if 'measurement-extensions' in modes else 'validation-average-restore')
+    for case in cases.values():
+        if case['command'] in ('set-transient-cc', 'set-transient-cv', 'set-transient-cr', 'set-transient-cw'):
+            assert names.index('trigger-snapshot') < names.index(case['name']) < names.index('trigger-restore')
+    if 'trace' in modes:
+        hold = cases['trace-trigger-hold']
+        assert hold['command'] == 'trigger-configure'
+        assert hold['arguments'] == ['--hardware-validation', 'trigger', '--source', 'HOLD']
+        assert hold['planned_writes'] == ['SYST:REM', 'TRIG:SOUR HOLD']
+        assert names.index('trigger-snapshot') < names.index('trace-trigger-hold') < names.index('trace-voltage-configure')
+        assert names.index('trace-powered-final-state') < names.index('trigger-restore')
+    if 'trigger' not in modes:
+        assert not any(name.startswith(('trigger-hold-', 'trigger-timer-', 'trigger-bus-', 'trigger-external-'))
+                       for name in names)
+
+
 def assert_report(result, expected, modes):
     assert result.returncode == (0 if expected == 'PLAN ONLY' else 2), result.stdout + result.stderr
     paths = re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)
@@ -153,6 +183,10 @@ def assert_report(result, expected, modes):
     cases = {case['name']: case for case in report['cases']}
     assert all(case['status'] == 'NOT RUN' for case in cases.values())
     expected_names = ['input-state', 'measure-off']
+    assert_validation_trigger_plan(cases, modes)
+    managed = any(mode.startswith('transient-') for mode in modes)
+    if managed:
+        expected_names += ['trigger-snapshot']
     connected = any(mode in ('cc', 'cv', 'cr', 'cw') or mode.startswith('transient-') for mode in modes)
     assert_validation_average_plan(cases, connected)
     if connected:
@@ -224,6 +258,8 @@ def assert_report(result, expected, modes):
         assert refusal['command'] == 'set-cv'
         assert refusal['arguments'][-2:] == ['--hardware-validation', 'cv']
         assert refusal['expected_error'] == 'current_slow_rise_enabled'
+    if managed:
+        expected_names += ['trigger-restore']
     if connected:
         expected_names += ['validation-average-restore']
     assert list(cases) == expected_names
@@ -576,6 +612,7 @@ def test_default_usb_and_explicit_asrl_full_plan_share_the_matrix(run_script):
     assert all(case['command'] != 'pytest' for case in cases)
     by_name = {case['name']: case for case in cases}
     assert_validation_average_plan(by_name, True, True)
+    assert_validation_trigger_plan(by_name, expected)
     assert names.index('trigger-restore') < names.index('measurement-extensions-average') < names.index('average-status')
     for name in ('fixed-slew-status', 'von-status', 'short-status', 'average-status'):
         case = by_name[name]
@@ -854,6 +891,7 @@ $script:totalDeadlineMs = if ($Scenario -eq 'command-timeout') { 600 } else { 90
 $script:expectedLibrary = 'fake'
 $script:expectedManufacturer = 'fake'
 $script:triggerSelected = $true
+$script:triggerManaged = $true
 $script:triggerTrusted = $true
 $inputOnAttempted = $true
 $timerEnableAttempted = $true
@@ -953,6 +991,7 @@ $script:totalDeadlineMs = 900000
 $script:expectedLibrary = 'fake'
 $script:expectedManufacturer = 'fake'
 $script:triggerSelected = $Scenario -eq 'late-on-with-trigger'
+$script:triggerManaged = $script:triggerSelected
 $script:triggerTrusted = $true
 $script:timerPowered = $true
 $inputOnAttempted = $true
@@ -2089,8 +2128,10 @@ def test_trace_validation_script_plan_only_and_noninteractive_refusal(run_script
     assert report['hardware_touched'] is False
     assert report['trace_start_deadline_ms'] == 120000
     cases = {case['name']: case for case in report['cases']}
-    assert len(cases) == 25
+    assert len(cases) == 28
     assert_validation_average_plan(cases, True)
+    assert_validation_trigger_plan(cases, ['trace'])
+    assert report['trigger_restore_status'] == 'NOT RUN'
     assert all(case['status'] == 'NOT RUN' for case in cases.values())
     assert sum(case['command'] == 'trace-configure' for case in cases.values()) == 5
     assert sum(case['command'] == 'trace-start' for case in cases.values()) == 5
@@ -2110,6 +2151,189 @@ def test_trace_validation_script_plan_only_and_noninteractive_refusal(run_script
     assert not (Path(paths[-1]).parents[1] / 'trace-powered.csv').exists()
 
 
+@pytest.mark.parametrize('scenario', [
+    'success', 'snapshot_invalid', 'hold_mismatch', 'interval_mismatch', 'trace_timeout',
+    'untrusted', 'feed_unconfirmed', 'off_unconfirmed', 'restore_mismatch',
+    'transient_success', 'transient_failure',
+])
+def test_managed_trigger_lifecycle_uses_original_snapshot(run_script, scenario):
+    # Exercise the real selected-mode loop and shared restoration functions.
+    # The controlled replies never open VISA or request a new operator confirmation.
+    result = run_script([scenario], harness="""
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    $source, [ref]$null, [ref]$null)
+$loop = $ast.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.ForStatementAst] -and
+        $node.Extent.Text.StartsWith('for ($i = 1; $i -le $planned.Count; $i++)')
+}, $true)
+if ($null -eq $loop) { throw 'Selected-mode execution loop was not found.' }
+$transient = $Scenario.StartsWith('transient_')
+$planned = @(
+    @{name='identify';command='identify';args=@()},
+    @{name='input-state';command='input-state';args=@()},
+    @{name='measure-off';command='measure';args=@()}
+)
+if ($transient) {
+    $planned += @{name='transient-setup';command='set-transient-cc';args=@()}
+} else {
+    $planned += @(
+        @{name='trace-trigger-hold';command='trigger-configure';
+          args=@('--hardware-validation','trigger','--source','HOLD');execution='live';
+          expected=@{source='HOLD';state_source='instrument_readback'}},
+        @{name='trace-voltage-start';command='trace-start';args=@('--hardware-validation','trace');
+          trace_expected=@{source='VOLT';points=10;interval='1'}}
+    )
+}
+$planned += @{name='validation-average-restore';command='set-average';
+    args=@('--hardware-validation','measurement-extensions','--count','2','--confirm');
+    execution='live';average_end=$true}
+$script:triggerPlans = @(
+    @{name='trigger-snapshot';command='trigger-status';args=@('--hardware-validation','trigger')},
+    @{name='trigger-restore';command='trigger-configure';
+      args=@('--hardware-validation','trigger','--source','MANUAL','--interval-s','0.01')}
+)
+$script:report = @{status='NOT RUN';prechecks=@{input_off='NOT RUN'};
+    trigger_restore_status='NOT RUN';trigger_input_off_unconfirmed=$false;
+    trace_safe_shutdown_unconfirmed=$false;
+    results=@(foreach ($step in ($planned[1..($planned.Count - 1)] + $script:triggerPlans)) {
+        [ordered]@{name=$step.name;command=$step.command;arguments=$step.args;status='NOT RUN'}
+    })}
+$script:watch = [Diagnostics.Stopwatch]::StartNew()
+$script:totalDeadlineMs = 900000
+$script:perCommandDeadlineMs = 30000
+$traceStartDeadlineMs = 120000
+$script:triggerManaged = $true
+$script:triggerSelected = $false
+$script:traceSelected = -not $transient
+$script:triggerTrusted = $true
+$script:triggerOffConfirmed = $true
+$script:triggerSourceMayHaveChanged = $false
+$script:originalTriggerSnapshot = $null
+$script:triggerTrials = @()
+$script:triggerScope = @('--hardware-validation','trigger')
+$script:traceCommunicationUntrusted = $false
+$script:traceFeedStopUnconfirmed = $false
+$script:expectedLibrary = 'fake-library'
+$script:expectedManufacturer = 'fake-manufacturer'
+$triggerCompleted = $false
+$averageOriginal = 8
+$averageChangeAttempted = $true
+$inputOnAttempted = $false
+$timerEnableAttempted = $false
+$transientEnableAttempted = $false
+$slowRiseEnableAttempted = $false
+$readbackSelection = $null
+$script:calls = @()
+$script:restoreArgs = @()
+function Read-Host { throw 'Unexpected extra operator confirmation.' }
+function Invoke-LiveCommand([string]$Command, [string]$CaseName, [string[]]$ExtraArgs,
+                            [int]$DeadlineMs, [int]$TerminationMs, [string]$ExpectedError,
+                            [switch]$AllowCrHandoff, [switch]$Cleanup) {
+    $script:calls += $CaseName
+    $entry = $script:report.results | Where-Object { $_.name -ceq $CaseName }
+    $entry.status = 'PASS'
+    $payload = @{input_state='OFF';state_source='instrument_readback';
+        visa=@{library='fake-library';manufacturer='fake-manufacturer'}}
+    switch ($CaseName) {
+        'trigger-snapshot' {
+            $payload.source = if ($Scenario -ceq 'snapshot_invalid') { 'UNKNOWN' } else { 'EXTERNAL' }
+            $payload.interval_s = '7.25'
+        }
+        'transient-setup' {
+            if ($Scenario -ceq 'transient_failure') {
+                Fail-Case $CaseName 'readback_mismatch' 'Synthetic Transient failure.'
+            }
+        }
+        'trace-trigger-hold' {
+            $payload.source = if ($Scenario -ceq 'hold_mismatch') { 'BUS' } else { 'HOLD' }
+            $payload.interval_s = if ($Scenario -ceq 'interval_mismatch') { '1' } else { '7.25' }
+        }
+        'trace-voltage-start' {
+            if ($Scenario -cin @('trace_timeout','untrusted','feed_unconfirmed','off_unconfirmed')) {
+                if ($Scenario -ceq 'untrusted') {
+                    $script:triggerTrusted = $false
+                    $script:traceCommunicationUntrusted = $true
+                }
+                if ($Scenario -ceq 'feed_unconfirmed') {
+                    $script:traceFeedStopUnconfirmed = $true
+                    $script:report.trace_safe_shutdown_unconfirmed = $true
+                }
+                if ($Scenario -ceq 'off_unconfirmed') { $script:inputOnAttempted = $true }
+                Fail-Case $CaseName 'trace_timeout' 'Synthetic TRACE failure.'
+            }
+            $payload.source = 'VOLT'
+            $payload.points = 10
+            $payload.interval_s = '1'
+            $payload.sample_count = 10
+            $payload.read_timestamp_utc_plus_8 = '2026-01-01T00:00:00+08:00'
+            $payload.samples = @(1..10 | ForEach-Object { [pscustomobject]@{sample_index=$_;voltage_v=5.0} })
+        }
+        'trigger-restore' {
+            if (-not $Cleanup) { throw 'Restore did not use the cleanup budget.' }
+            $script:restoreArgs = $ExtraArgs
+            $payload.source = if ($Scenario -ceq 'restore_mismatch') { 'HOLD' } else { 'EXTERNAL' }
+            $payload.interval_s = '7.25'
+        }
+        'validation-average-restore' {
+            $payload.average_count = 8
+        }
+    }
+    if ($Command -in @('trigger-configure','trigger-status','trace-start','set-average')) {
+        $payload.validation_only = $true
+        $payload.validation_scope = $ExtraArgs[[Array]::IndexOf($ExtraArgs, '--hardware-validation') + 1]
+    }
+    return @{ok=$true;result=[pscustomobject]$payload}
+}
+$failure = $null
+try { Invoke-Expression $loop.Extent.Text } catch {
+    $failure = $_.Exception.Message
+    $script:report.status = 'FAIL'
+    Restore-TriggerAfterFailure
+}
+@{calls=$script:calls;restore_args=$script:restoreArgs;failure=$failure;
+    restore_status=$script:report.trigger_restore_status;run_status=$script:report.status;
+    cases=$script:report.results} | ConvertTo-Json -Depth 8 -Compress
+""")
+    assert result.returncode == 0, result.stdout + result.stderr
+    evidence = json.loads(result.stdout.splitlines()[-1])
+    calls = evidence['calls']
+    cases = {case['name']: case for case in evidence['cases']}
+    if scenario == 'snapshot_invalid':
+        assert calls[-1] == 'trigger-snapshot'
+        assert cases['trigger-snapshot']['status'] == 'FAIL'
+        assert evidence['restore_status'] == 'NOT RUN'
+        assert evidence['failure'] and evidence['run_status'] == 'FAIL'
+        return
+    change = 'transient-setup' if scenario.startswith('transient_') else 'trace-trigger-hold'
+    assert calls.index('trigger-snapshot') < calls.index(change)
+    if scenario in ('hold_mismatch', 'interval_mismatch'):
+        assert 'trace-voltage-start' not in calls
+        assert cases['trace-trigger-hold']['status'] == 'FAIL'
+    elif not scenario.startswith('transient_'):
+        assert calls.index('trace-trigger-hold') < calls.index('trace-voltage-start')
+    blocked = scenario in ('untrusted', 'feed_unconfirmed', 'off_unconfirmed')
+    if blocked:
+        assert 'trigger-restore' not in calls and 'cleanup-trigger-input-state' not in calls
+        assert cases['trigger-restore']['status'] == 'NOT RUN'
+        assert cases['trigger-restore']['manual_action_required'] is True
+    else:
+        assert calls.count('trigger-restore') == 1
+        assert evidence['restore_args'] == [
+            '--hardware-validation', 'trigger', '--source', 'EXTERNAL', '--interval-s', '7.25',
+        ]
+    assert evidence['restore_status'] == ('FAIL' if blocked or scenario == 'restore_mismatch' else 'PASS')
+    if scenario in ('success', 'transient_success'):
+        assert evidence['failure'] is None
+        last_trial = 'transient-setup' if scenario == 'transient_success' else 'trace-voltage-start'
+        assert calls.index(last_trial) < calls.index('trigger-restore') < calls.index('validation-average-restore')
+    else:
+        assert evidence['failure'] and evidence['run_status'] == 'FAIL'
+        assert 'validation-average-restore' not in calls
+        if not blocked and scenario != 'restore_mismatch':
+            assert calls.index('cleanup-trigger-input-state') < calls.index('trigger-restore')
+
+
 def test_trigger_validation_script_plan_and_noninteractive_refusal(run_script):
     plan = run_script(['-Modes', 'trigger'])
     assert plan.returncode == 2, plan.stdout + plan.stderr
@@ -2126,6 +2350,7 @@ def test_trigger_validation_script_plan_and_noninteractive_refusal(run_script):
     assert report['trigger_observation_seconds'] == 15
     assert report['trigger_max_on_seconds'] == 60
     assert_validation_average_plan(cases, True)
+    assert_validation_trigger_plan(cases, ['trigger'])
     assert not any(name.startswith('trigger-manual-') for name in cases)
     for source in ('hold', 'timer', 'bus', 'external'):
         assert cases[f'trigger-{source}-configure']['command'] == 'trigger-configure'
@@ -2162,12 +2387,15 @@ def test_trigger_validation_script_plan_and_noninteractive_refusal(run_script):
                   ['-TriggerObservationSeconds', '40', '-TriggerListWidthA', '20', '-TriggerListWidthB', '20']):
         refused_plan = run_script(['-Modes', 'trigger', '-PlanOnly', *flags])
         assert refused_plan.returncode == 2, refused_plan.stdout + refused_plan.stderr
-    mixed = run_script(['-Modes', 'transient-cc,trigger', '-PlanOnly'])
+    mixed = run_script(['-Modes', 'transient-cc,trace,trigger', '-PlanOnly'])
     assert mixed.returncode == 0, mixed.stdout + mixed.stderr
     mixed_report_path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', mixed.stdout)[-1])
-    mixed_names = [case['name'] for case in json.loads(
-        mixed_report_path.read_text(encoding='utf-8-sig'))['cases']]
+    mixed_cases = {case['name']: case for case in json.loads(
+        mixed_report_path.read_text(encoding='utf-8-sig'))['cases']}
+    assert_validation_trigger_plan(mixed_cases, ['transient-cc', 'trace', 'trigger'])
+    mixed_names = list(mixed_cases)
     assert mixed_names.index('trigger-snapshot') < mixed_names.index('transient-continuous-auto-setup')
+    assert mixed_names.index('trace-powered-final-state') < mixed_names.index('trigger-hold-configure')
 
 
 @pytest.mark.parametrize('ready', [True, False])
@@ -2523,6 +2751,7 @@ def test_system_query_focused_plan(run_script):
     ('cv,list-cc', 'asrl', ASRL, True),
     ('cr,auxiliary-controls', 'usb', RESOURCE, True),
     ('transient-cw,readback,list-cc', 'usb', RESOURCE, True),
+    ('trace,transient-cw', 'asrl', ASRL, True),
     ('list-cc,auxiliary-controls', 'asrl', ASRL, True),
     ('workflow,auxiliary-controls,list-cc,measurement-extensions', 'asrl', ASRL, False),
     ('full', 'usb', RESOURCE, True),
@@ -2552,6 +2781,7 @@ def test_selected_modes_never_use_simulation(run_script, mode, connection, resou
     connected = any(name in ('cc', 'cv', 'cr', 'cw', 'trace', 'trigger', 'input-timer', 'protection',
                              'sequence', 'workflow') or name.startswith('transient-') for name in selected)
     assert_validation_average_plan(cases, connected, 'measurement-extensions' in selected)
+    assert_validation_trigger_plan(cases, selected)
     assert len(cases) == len(report['cases'])
     assert report['summary_counts'] == {
         'total': len(cases), 'passed': 0, 'failed': 0, 'skipped': 0, 'not_run': len(cases),
