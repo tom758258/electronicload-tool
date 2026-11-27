@@ -107,6 +107,36 @@ def run_script(tmp_path):
     return run
 
 
+def assert_validation_average_plan(cases, connected, extensions=False):
+    original, baseline, restore = ('validation-average-original', 'validation-average-baseline',
+                                   'validation-average-restore')
+    names = list(cases)
+    if not connected:
+        assert {original, baseline, restore}.isdisjoint(cases)
+        return
+    assert names.index('measure-off') < names.index(original) < names.index(baseline)
+    assert cases[original]['command'] == 'average-status'
+    assert cases[original]['arguments'] == ['--hardware-validation', 'readback']
+    assert cases[baseline]['command'] == 'set-average'
+    assert cases[baseline]['arguments'] == [
+        '--hardware-validation', 'measurement-extensions', '--count', '2', '--confirm',
+    ]
+    assert cases[baseline]['planned_writes'] == ['SYST:REM', 'SENS:AVER:COUN 2']
+    assert 'SENS:AVER:COUN?' in cases[baseline]['queries']
+    final = 'measurement-extensions-average' if extensions else restore
+    assert names.index(baseline) < names.index(final)
+    if extensions:
+        assert restore not in cases
+        assert cases[final]['planned_writes'] == ['SYST:REM', 'SENS:AVER:COUN 8']
+    else:
+        assert cases[final]['arguments'][-2:] == ['<original>', '--confirm']
+        assert cases[final]['planned_writes'] == ['SYST:REM', 'SENS:AVER:COUN <original>']
+    for case in cases.values():
+        if case['command'] in ('input-on', 'cc-timed-load', 'cc-discharge', 'sequence',
+                               'trigger-observe', 'protection-trial'):
+            assert names.index(baseline) < names.index(case['name']) < names.index(final)
+
+
 def assert_report(result, expected, modes):
     assert result.returncode == (0 if expected == 'PLAN ONLY' else 2), result.stdout + result.stderr
     paths = re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)
@@ -123,6 +153,10 @@ def assert_report(result, expected, modes):
     cases = {case['name']: case for case in report['cases']}
     assert all(case['status'] == 'NOT RUN' for case in cases.values())
     expected_names = ['input-state', 'measure-off']
+    connected = any(mode in ('cc', 'cv', 'cr', 'cw') or mode.startswith('transient-') for mode in modes)
+    assert_validation_average_plan(cases, connected)
+    if connected:
+        expected_names += ['validation-average-original', 'validation-average-baseline']
     if 'cc' in modes:
         expected_names += ['set-cc-high', 'cc-handoff-from-cr', 'set-cc-high-readback',
                            'set-cc-auto', 'set-cc-low', 'set-cc-low-readback', 'input-on',
@@ -190,6 +224,8 @@ def assert_report(result, expected, modes):
         assert refusal['command'] == 'set-cv'
         assert refusal['arguments'][-2:] == ['--hardware-validation', 'cv']
         assert refusal['expected_error'] == 'current_slow_rise_enabled'
+    if connected:
+        expected_names += ['validation-average-restore']
     assert list(cases) == expected_names
     assert report['summary_counts']['total'] == report['summary_counts']['not_run'] == len(expected_names)
     assert len(report['cases']) == len(expected_names)  # No duplicate selected trials.
@@ -256,13 +292,14 @@ def test_protection_explicit_mode_report_without_visa(run_script):
     }
     cases = {case['name']: case for case in report['cases']}
     assert list(cases)[:2] == ['input-state', 'measure-off']
-    assert list(cases)[2:6] == [
+    assert_validation_average_plan(cases, True)
+    assert list(cases)[4:8] == [
         'protection-start-state', 'protection-prepare-cc',
         'protection-prepare-cc-readback', 'protection-software-current-original',
     ]
     assert cases['protection-prepare-cc']['arguments'] == ['--current', '0.20', '--range', 'low']
     assert cases['protection-prepare-cc-readback']['arguments'] == ['--hardware-validation', 'readback']
-    assert all(name.startswith('protection-') for name in list(cases)[2:])
+    assert all(name.startswith('protection-') for name in list(cases)[4:-1])
     assert all(case['status'] == 'NOT RUN' for case in cases.values())
     assert report['summary_counts']['total'] == report['summary_counts']['not_run'] == len(cases)
     for trial in ('software-current', 'software-power', 'hardware-power'):
@@ -538,6 +575,8 @@ def test_default_usb_and_explicit_asrl_full_plan_share_the_matrix(run_script):
     assert all(case.get('execution') in (None, 'live') for case in cases)
     assert all(case['command'] != 'pytest' for case in cases)
     by_name = {case['name']: case for case in cases}
+    assert_validation_average_plan(by_name, True, True)
+    assert names.index('trigger-restore') < names.index('measurement-extensions-average') < names.index('average-status')
     for name in ('fixed-slew-status', 'von-status', 'short-status', 'average-status'):
         case = by_name[name]
         assert case['command'] == 'contributor-settings' and case['execution'] == 'live'
@@ -662,6 +701,7 @@ def test_input_timer_script_plan_and_live_refusal(run_script, mode_args, planned
     assert report['declared_source_limits']['current_a'] == 0.8
     assert report['declared_source_limits']['voltage_v'] == 5
     cases = {case['name']: case for case in report['cases']}
+    assert_validation_average_plan(cases, True)
     args = cases['timer-setup']['arguments']
     assert args[args.index('--seconds') + 1] == '5'
     assert '10 s cutoff' in cases['timer-on']['condition']
@@ -1523,7 +1563,8 @@ ConvertTo-Json -InputObject $results -Depth 8 -Compress
         assert ('Sequence:' in notices) == ('sequence' in modes)
         assert ('EXTERNAL Trigger equipment' in notices) == ('trigger' in modes)
         assert ('Protection:' in notices) == ('protection' in modes)
-        assert ('Average count' in notices) == ('measurement-extensions' in modes)
+        assert ('Average count 2 measurement baseline' in notices) is connected
+        assert ('Average count may be set to 8' in notices) == ('measurement-extensions' in modes)
         assert ('Scratch Slot 3' in notices) == ('list-cc' in modes)
         assert ('Automatic Readback temporarily' in notices) == (
             'readback' in modes and not item['legacy']
@@ -1834,11 +1875,12 @@ Restore-Protection 'protection-default-hardware-power' $original @('hardware_pow
     assert output["confirmed"] is True
 
 
-def test_selected_execution_loop_has_no_repeated_operator_prompts(run_script):
+@pytest.mark.parametrize('scenario', ['success', 'mixed', 'baseline_mismatch', 'trial_failure', 'restore_mismatch'])
+def test_selected_execution_loop_has_no_repeated_operator_prompts(run_script, scenario):
     # Execute the real selected-mode loop with controlled CLI responses.
     # Timer, both Workflow loads and Sequence must proceed after the initial
     # authorization without another Read-Host/Read-ValidationAnswer call.
-    result = run_script([], harness="""
+    result = run_script([scenario], harness="""
 $source = (Join-Path (Get-Location) 'scripts/live-cli-check.ps1')
 $ast = [System.Management.Automation.Language.Parser]::ParseFile(
     $source, [ref]$null, [ref]$null)
@@ -1853,6 +1895,10 @@ $planned = @(
     @{name='identify';command='identify';args=@()},
     @{name='input-state';command='input-state';args=@()},
     @{name='measure-off';command='measure';args=@()},
+    @{name='validation-average-original';command='average-status';args=@('--hardware-validation','readback');
+      execution='live';expected=@{state_source='instrument_readback'};average_snapshot=$true},
+    @{name='validation-average-baseline';command='set-average';args=@('--hardware-validation','measurement-extensions','--count','2','--confirm');
+      execution='live';expected=@{average_count=2};average_baseline=$true},
     @{name='timer-setup';command='set-input-timer';args=@()},
     @{name='timer-enable';command='input-timer-enable';args=@()},
     @{name='timer-status-off';command='input-timer-status';args=@()},
@@ -1864,8 +1910,18 @@ $planned = @(
     @{name='timer-final-state';command='input-state';args=@()},
     @{name='workflow-cc-timed-load';command='cc-timed-load';args=@();workflow_load=$true},
     @{name='workflow-cc-discharge';command='cc-discharge';args=@();workflow_load=$true},
-    @{name='sequence';command='sequence';args=@()}
+    @{name='sequence';command='sequence';args=@()},
+    @{name='validation-average-restore';command='set-average';args=@('--hardware-validation','measurement-extensions','--count','2','--confirm');
+      execution='live';average_end=$true}
 )
+$averageOriginal = $null
+$averageChangeAttempted = $false
+$script:averageWrites = @()
+if ($Scenario -ceq 'mixed') {
+    $planned[-1] = @{name='measurement-extensions-average';command='set-average';
+        args=@('--hardware-validation','measurement-extensions','--count','8','--confirm');
+        execution='live';expected=@{average_count=8};average_end=$true}
+}
 $script:report = @{
     results=@(foreach ($step in $planned[1..($planned.Count - 1)]) {
         [ordered]@{name=$step.name;status='NOT RUN'}
@@ -1907,7 +1963,6 @@ function Assert-Runtime($Response, [string]$Name) {
 function Assert-InputOff($Response, [string]$Name) {
     if ($Response.result.input_state -cne 'OFF') { throw "Input was not OFF: $Name" }
 }
-function Assert-ReadbackFields($Response, $Expected, [string]$Name) {}
 function Invoke-TimerExpiry($Step) {
     $script:calls += 'timer-expiry'
     ($script:report.results | Where-Object { $_.name -ceq $Step.name }).status = 'PASS'
@@ -1925,6 +1980,23 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName, [string[]]$Extr
     $script:calls += "command:$CaseName"
     $payload = @{input_state='OFF'}
     switch ($CaseName) {
+        'validation-average-original' {
+            $payload.validation_only = $true
+            $payload.validation_scope = 'readback'
+            $payload.state_source = 'instrument_readback'
+            $payload.average_count = 14
+        }
+        { $_ -cin @('validation-average-baseline','validation-average-restore','measurement-extensions-average') } {
+            $count = [int]$ExtraArgs[[Array]::IndexOf($ExtraArgs, '--count') + 1]
+            $script:averageWrites += $count
+            $payload.validation_only = $true
+            $payload.validation_scope = 'measurement-extensions'
+            $payload.average_count = if ($Scenario -ceq 'baseline_mismatch' -and $count -eq 2) { 14 }
+                elseif ($Scenario -ceq 'restore_mismatch' -and $count -eq 14) { 2 } else { $count }
+        }
+        'workflow-cc-timed-load' {
+            if ($Scenario -ceq 'trial_failure') { throw 'Simulated failed Workflow trial' }
+        }
         'timer-status-off' {
             $payload.seconds = 5
             $payload.enabled = $true
@@ -1951,9 +2023,13 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName, [string[]]$Extr
     }
     return @{ok=$true;result=$payload}
 }
-Invoke-Expression $loop.Extent.Text
+$failure = $null
+try { Invoke-Expression $loop.Extent.Text } catch { $failure = $_.Exception.Message }
 @{
     calls=$script:calls
+    average_writes=$script:averageWrites
+    average_pending=$averageChangeAttempted
+    failure=$failure
     answers=$script:answers
     timer_powered=$timerPowered
     timer_enabled=$timerEnableAttempted
@@ -1964,6 +2040,24 @@ Invoke-Expression $loop.Extent.Text
     assert result.returncode == 0, result.stdout + result.stderr
     evidence = json.loads(result.stdout.splitlines()[-1])
     assert evidence['answers'] == []
+    success = scenario in ('success', 'mixed')
+    interrupted = scenario in ('baseline_mismatch', 'trial_failure')
+    assert evidence['average_writes'] == ([2] if interrupted else [2, 8 if scenario == 'mixed' else 14])
+    assert evidence['average_pending'] is not success
+    assert (evidence['failure'] is None) is success
+    if interrupted:
+        assert 'command:validation-average-restore' not in evidence['calls']
+        assert 'command:measurement-extensions-average' not in evidence['calls']
+        if scenario == 'baseline_mismatch':
+            assert 'command:timer-on' not in evidence['calls']
+        else:
+            assert 'command:workflow-cc-timed-load' in evidence['calls']
+            assert 'command:workflow-cc-discharge' not in evidence['calls']
+        return
+    calls = evidence['calls']
+    assert calls.index('command:validation-average-baseline') < calls.index('command:timer-on')
+    final = 'measurement-extensions-average' if scenario == 'mixed' else 'validation-average-restore'
+    assert calls.index('command:sequence') < calls.index(f'command:{final}')
     assert evidence['timer_powered'] is False
     assert evidence['timer_enabled'] is False
     assert evidence['input_on_attempted'] is False
@@ -1995,7 +2089,8 @@ def test_trace_validation_script_plan_only_and_noninteractive_refusal(run_script
     assert report['hardware_touched'] is False
     assert report['trace_start_deadline_ms'] == 120000
     cases = {case['name']: case for case in report['cases']}
-    assert len(cases) == 22
+    assert len(cases) == 25
+    assert_validation_average_plan(cases, True)
     assert all(case['status'] == 'NOT RUN' for case in cases.values())
     assert sum(case['command'] == 'trace-configure' for case in cases.values()) == 5
     assert sum(case['command'] == 'trace-start' for case in cases.values()) == 5
@@ -2030,6 +2125,7 @@ def test_trigger_validation_script_plan_and_noninteractive_refusal(run_script):
     assert all(case['status'] == 'NOT RUN' for case in cases.values())
     assert report['trigger_observation_seconds'] == 15
     assert report['trigger_max_on_seconds'] == 60
+    assert_validation_average_plan(cases, True)
     assert not any(name.startswith('trigger-manual-') for name in cases)
     for source in ('hold', 'timer', 'bus', 'external'):
         assert cases[f'trigger-{source}-configure']['command'] == 'trigger-configure'
@@ -2343,7 +2439,8 @@ def test_sequence_plan_or_noninteractive_refusal(run_script):
     assert not report["hardware_touched"]
     assert RESOURCE not in report_text and not (path.parents[1] / "private").exists()
     assert all(case["status"] == "NOT RUN" for case in report["cases"])
-    cases = report["cases"][2:]
+    assert_validation_average_plan({case["name"]: case for case in report["cases"]}, True)
+    cases = report["cases"][4:-1]
     assert [case["name"] for case in cases] == ["sequence-cc", "sequence-cv", "sequence-cr", "sequence-cw"]
     assert report["per_command_deadline_ms"] == 30000 and report["total_deadline_ms"] == 900000
     for case in cases:
@@ -2408,6 +2505,7 @@ def test_system_query_focused_plan(run_script):
     assert result.returncode == 0, result.stdout + result.stderr
     path = Path(re.findall(r'Report: (.+?/shareable/report\.json)', result.stdout)[-1])
     report = json.loads(path.read_text(encoding='utf-8-sig'))
+    assert_validation_average_plan({case['name']: case for case in report['cases']}, False)
     cases = report['cases'][2:]
     assert [case['command'] for case in cases] == ['scpi-version', 'display-mode', 'scpi-error-next']
     assert all(case['arguments'] == ['--hardware-validation', 'system-query'] for case in cases)
@@ -2451,6 +2549,9 @@ def test_selected_modes_never_use_simulation(run_script, mode, connection, resou
     cases = {case['name']: case for case in report['cases']}
     selected = FULL_MODES if mode == 'full' else [name for name in FULL_MODES if name in mode.split(',')]
     assert report['modes'] == selected
+    connected = any(name in ('cc', 'cv', 'cr', 'cw', 'trace', 'trigger', 'input-timer', 'protection',
+                             'sequence', 'workflow') or name.startswith('transient-') for name in selected)
+    assert_validation_average_plan(cases, connected, 'measurement-extensions' in selected)
     assert len(cases) == len(report['cases'])
     assert report['summary_counts'] == {
         'total': len(cases), 'passed': 0, 'failed': 0, 'skipped': 0, 'not_run': len(cases),

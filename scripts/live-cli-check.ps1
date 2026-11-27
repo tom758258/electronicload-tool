@@ -132,6 +132,8 @@ $scriptCurrentCeilingA = 2.0
 $reportDirectory = $null
 $watch = $null
 $phase = 'plan'
+$averageOriginal = $null
+$averageChangeAttempted = $false
 $inputOnAttempted = $false
 $transientEnableAttempted = $false
 $activeTransientScope = $null
@@ -301,6 +303,7 @@ function Save-Report {
                                      'power_w','rise_slew_a_per_us','fall_slew_a_per_us','threshold_v',
                                      'latch','short_state','average_count','source','points','interval_s',
                                      'delay_s','filter_enabled','feed','selected')) {
+                    if ($field -ceq 'average_count' -and $entry.name -ceq 'validation-average-original') { continue }
                     if ($null -ne $entry.response.result.$field) {
                         $case[$field] = $entry.response.result.$field
                     }
@@ -328,6 +331,7 @@ function Save-Report {
             if ($entry.execution -ceq 'live') {
                 foreach ($field in @('voltage_min_v','voltage_max_v','current_min_a','current_max_a',
                                      'capacity_ah','discharge_time_s','average_count','last_measurement')) {
+                    if ($field -ceq 'average_count' -and $entry.name -cin @('validation-average-original','validation-average-restore')) { continue }
                     if ($null -ne $entry.response.result.$field) {
                         $case[$field] = $entry.response.result.$field
                     }
@@ -1475,6 +1479,7 @@ function Confirm-OperatorStart([string[]]$Modes, $Isolated, [bool]$ConnectedTria
     # Only source-connected trials require the external source to be prepared.
     if ($ConnectedTrials) {
         Write-Host "- Confirm the external source is manually set to $SourceVoltageLimitV V with a $SourceCurrentLimitA A current limit."
+        Write-Host '- Authorize the verified Average count 2 measurement baseline with Input OFF before source-connected trials; restore the original count after successful trials unless Measurement Extensions is selected.'
     }
     Write-Host '- Confirm physical load Input OFF, safe wiring/DUT and tolerance of every selected setting (use -Verbose or the report).'
     Write-Host '- Confirm no other application controls this instrument and an independent manual Input OFF procedure is available.'
@@ -2338,6 +2343,28 @@ try {
             $isolated += $step
         }
     }
+    # Keep initial diagnostics and explicit legacy Expected readback unchanged.
+    # All source-connected trials use the same measurement baseline, including
+    # standalone and mixed selections. Preserve the original count privately.
+    $averageBaselineRequired = Test-SourceConnectedTrials $selectedModes
+    $averageEndSteps = @()
+    if ($averageBaselineRequired) {
+        $averageSetupArgs = @('--hardware-validation','measurement-extensions','--count','2','--confirm')
+        $planned += @(
+            @{name='validation-average-original';command='average-status';args=$readbackScope;execution='live';
+              expected=@{state_source='instrument_readback'};average_snapshot=$true;
+              condition='Input OFF; record original Average privately before the measurement baseline'},
+            @{name='validation-average-baseline';command='set-average';args=$averageSetupArgs;execution='live';
+              expected=@{average_count=2};average_baseline=$true;
+              condition='Input OFF; verify Average 2 before source-connected trials'}
+        )
+        if ('measurement-extensions' -notin $selectedModes) {
+            # Validate a representative legal count offline; the actual count
+            # is supplied only from the verified snapshot during LIVE.
+            $averageEndSteps += @{name='validation-average-restore';command='set-average';args=$averageSetupArgs;
+                execution='live';average_end=$true;condition='After successful source-connected trials, Input OFF; restore and verify the original Average'}
+        }
+    }
     if ($workflowSelected) {
         $scope = @('--hardware-validation','workflow')
         $planned += @(
@@ -2363,10 +2390,19 @@ try {
         $scope = @('--hardware-validation','measurement-extensions')
         $planned += @(
             @{name='measurement-extensions-min-max';command='measure-min-max';args=$scope;execution='live'},
-            @{name='measurement-extensions-discharge';command='measure-discharge';args=$scope;execution='live'},
-            @{name='measurement-extensions-average';command='set-average';args=$scope + @('--count','8','--confirm');
-              expected=@{average_count=8};execution='live';condition='Input OFF and operator approves leaving Average at 8'}
+            @{name='measurement-extensions-discharge';command='measure-discharge';args=$scope;execution='live'}
         )
+        $averageTrial = @{name='measurement-extensions-average';command='set-average';args=$scope + @('--count','8','--confirm');
+            expected=@{average_count=8};execution='live';condition='Input OFF and operator approves leaving Average at 8'}
+        if ($averageBaselineRequired) {
+            # Keep the explicit leave-at-8 contract, but only after all
+            # source-connected trials so it cannot contaminate their baseline.
+            $averageTrial.average_end = $true
+            $averageTrial.condition = 'After successful source-connected trials; ' + $averageTrial.condition
+            $averageEndSteps += $averageTrial
+        } else {
+            $planned += $averageTrial
+        }
     }
     if ('auxiliary-controls' -in $selectedModes) {
         $isolated += @(foreach ($trial in @('von','short','slew')) {
@@ -2643,7 +2679,7 @@ try {
             })
         }
     }
-    $planned += $isolated
+    $planned += $averageEndSteps + $isolated
     foreach ($step in ($planned | Where-Object { $_.ContainsKey('cr_handoff_after') })) {
         $step.condition = "$($step.cr_handoff_after) refused a resistance origin before remote"
     }
@@ -2651,8 +2687,8 @@ try {
     $allSteps = @($planned | Select-Object -First 3) +
         @($triggerPlans | Select-Object -First 1) +
         @($planned | Select-Object -Skip 3 -First ([Math]::Max(0, $protectionIndex - 3))) +
-        $protectionPlans + @($planned | Select-Object -Skip $protectionIndex | Where-Object { -not $_.isolated }) +
-        $slowRiseCleanup + @($triggerPlans | Select-Object -Skip 1) + $isolated
+        $protectionPlans + @($planned | Select-Object -Skip $protectionIndex | Where-Object { -not $_.isolated -and -not $_.average_end }) +
+        $slowRiseCleanup + @($triggerPlans | Select-Object -Skip 1) + $averageEndSteps + $isolated
     $report.results = @($allSteps | ForEach-Object {
         $entry = [ordered]@{name=$_.name;command=$_.command;arguments=$_.args;status='NOT RUN'}
         if ($_.ContainsKey('execution')) { $entry['execution'] = $_.execution }
@@ -2680,6 +2716,12 @@ try {
                 if ($step.ContainsKey('reuse_from')) { $entry[$field] = @() }
                 elseif ($null -ne $plan.result.$field) { $entry[$field] = @($plan.result.$field) }
             }
+        }
+        if ($step.name -ceq 'validation-average-restore') {
+            # The report describes the conditional original-value restore,
+            # never the actual private recovery count or the dry-run stand-in.
+            $entry.arguments = @('--hardware-validation','measurement-extensions','--count','<original>','--confirm')
+            $entry.planned_writes = @('SYST:REM','SENS:AVER:COUN <original>')
         }
         if ($step.command -in @('set-cc', 'set-cv', 'set-cr', 'set-cr-led',
                                 'set-transient-cc', 'set-transient-cv', 'set-transient-cr') -and 'auto' -in $step.args) {
@@ -2711,6 +2753,10 @@ try {
     Write-Host "Mode: $(if ($PlanOnly) { 'PLAN ONLY' } else { 'LIVE' })"
     Write-Host "Selected modes: $($selectedModes -join ', ')."
     Write-Host 'Plan: Identify, confirm Input OFF and measure before physical trials.'
+    if ($averageBaselineRequired) {
+        Write-Host 'Measurement baseline: Average 2 for all source-connected trials; verified before loading.'
+        Write-Host 'On successful completion, restore the original Average or leave 8 when Measurement Extensions is selected.'
+    }
     if ($systemQuerySelected) { Write-Host 'System Query: read version, display mode and one Error Queue entry.' }
     if ($readbackSelected) {
         if ($legacyReadback) {
@@ -2758,7 +2804,10 @@ try {
     Write-Host 'The script does not configure, measure or verify the external source.'
     foreach ($step in $allSteps) {
         $condition = $(if ($step.condition) { " [if $($step.condition)]" } else { '' })
-        Write-Verbose ("  {0}: {1} {2}{3}" -f $step.name, $step.command, ($step.args -join ' '), $condition)
+        $displayArgs = if ($step.name -ceq 'validation-average-restore') {
+            @('--hardware-validation','measurement-extensions','--count','<original>','--confirm')
+        } else { $step.args }
+        Write-Verbose ("  {0}: {1} {2}{3}" -f $step.name, $step.command, ($displayArgs -join ' '), $condition)
     }
     if ('cc' -in $selectedModes) { Write-Host "CC Current=$currentText A." }
     Write-Host "Script ceiling=$($report.script_current_ceiling_a) A; $Connection System VISA."
@@ -2827,7 +2876,7 @@ try {
         if ($protectionSelected -and $i -eq $protectionIndex) { Invoke-ProtectionValidation $readbackSelection }
         if ($i -eq $planned.Count) { break }
         $step = $planned[$i]
-        if ($step.isolated -and $triggerSelected -and -not $triggerCompleted) {
+        if (($step.isolated -or $step.average_end) -and $triggerSelected -and -not $triggerCompleted) {
             Invoke-TriggerValidation
             $triggerCompleted = $true
         }
@@ -2854,6 +2903,21 @@ try {
             $timerPowered = $true
         }
         $liveArgs = $step.args
+        if ($step.average_baseline -or $step.average_end) {
+            if ($null -eq $averageOriginal) {
+                Fail-Case $step.name 'readback_mismatch' 'Original Average was not confirmed.'
+            }
+            if ($step.average_baseline) { $averageChangeAttempted = $true }
+            if ($step.average_end -and ($inputOnAttempted -or $timerEnableAttempted -or
+                $transientEnableAttempted -or $slowRiseEnableAttempted -or $traceCommunicationUntrusted -or
+                ($triggerSelected -and (-not $script:triggerTrusted -or -not $script:triggerOffConfirmed)) -or
+                $report.sequence_input_off_unconfirmed -or $report.protection_input_off_unconfirmed)) {
+                Fail-Case $step.name 'input_not_off' 'Average finalization blocked by uncertain safety state.'
+            }
+            if ($step.name -ceq 'validation-average-restore') {
+                $liveArgs = @('--hardware-validation','measurement-extensions','--count',[string]$averageOriginal,'--confirm')
+            }
+        }
         if ($step.isolated -and -not $isolatedBatchConfirmed) {
             $isolatedBatchConfirmed = Confirm-IsolatedBatch $isolatedBatchConfirmed $connectedTrials $step.name
         }
@@ -2921,6 +2985,20 @@ try {
             if ($step.ContainsKey('expected')) {
                 Assert-ReadbackFields $result.result $step.expected $step.name
             }
+        }
+        if ($step.average_snapshot) {
+            $count = $result.result.average_count
+            if (($count -isnot [int] -and $count -isnot [long]) -or $count -lt 2 -or $count -gt 16) {
+                Fail-Case $step.name 'invalid_response' 'Original Average was not a supported integer count.'
+            }
+            $averageOriginal = $count
+            Write-Host "Private recovery baseline: original Average count = $averageOriginal. Keep this console record private."
+        }
+        if ($step.average_end) {
+            if ($step.name -ceq 'validation-average-restore') {
+                Assert-ReadbackFields $result.result @{average_count=$averageOriginal} $step.name
+            }
+            $averageChangeAttempted = $false
         }
         if ($step.workflow_load) {
             Confirm-WorkflowLoad $step.name
@@ -3026,6 +3104,9 @@ try {
     if ($report.results.error_code -contains 'list_save_unconfirmed') {
         throw 'LIST validation is incomplete because Save was not confirmed.'
     }
+    if ($averageChangeAttempted) {
+        throw 'Average finalization was not confirmed.'
+    }
     $report.status = if ($readbackSelected -and ($report.results.readback_comparison -contains 'OBSERVED ONLY')) {
         'OBSERVED ONLY'
     } else { 'PASS' }
@@ -3052,7 +3133,7 @@ try {
     if (-not $timerPowered) { Write-Host "Validation did not complete: $($_.Exception.Message)" }
 } finally {
     # PowerShell pipeline interruption can bypass catch and the exit after finally.
-    $validationInterrupted = ($triggerSelected -or $protectionSelected -or $sequenceSelected -or $asrlSelected) -and
+    $validationInterrupted = ($triggerSelected -or $protectionSelected -or $sequenceSelected -or $asrlSelected -or $averageChangeAttempted) -and
         $phase -in @('identify','cases') -and $report.status -eq 'NOT RUN'
     if ($validationInterrupted) { $report.status = 'FAIL' }
     if ($inputOnAttempted) {
@@ -3185,6 +3266,12 @@ try {
             $report.trigger_restore_status = 'FAIL'
             Write-Host 'WARNING: Trigger Source and Timer Interval restoration blocked by uncertain safety state; operator action required.'
         }
+    }
+    if ($averageChangeAttempted) {
+        # Never initiate an additional VISA session just to restore the
+        # measurement baseline after a failed or interrupted run.
+        $report.status = 'FAIL'
+        Write-Host 'WARNING: Average may have changed; automatic finalization did not complete. After independently confirming Input OFF and safe communication, recover the original count from the private console baseline.'
     }
     if ($sequenceSelected -and $report.sequence_input_off_unconfirmed) {
         Write-Host 'Sequence Input OFF is unconfirmed. Use the independent manual OFF procedure immediately.'
