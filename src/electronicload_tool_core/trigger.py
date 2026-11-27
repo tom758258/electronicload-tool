@@ -119,7 +119,8 @@ def sampled_waveform_evidence(samples, *, source, level_a, level_b, width_a,
     # measured duration in the boundary uncertainty; never merge disjoint
     # same-level plateaus.
     transition_spans = {}
-    if is_list or observed_hold_origin or source == "TIMER":
+    bounded_edges = is_list or observed_hold_origin or source == "TIMER"
+    if bounded_edges:
         stable = []
         allowed = {("S", "A"), ("A", "B")} if observed_hold_origin else {("B", "A"), ("A", "B")}
         if is_list:
@@ -137,7 +138,7 @@ def sampled_waveform_evidence(samples, *, source, level_a, level_b, width_a,
             stable.append((label, values))
         runs = stable
 
-    list_brackets = []
+    plateau_brackets = []
 
     def plateau(index, duration, *, terminal_s=None):
         values = runs[index][1]
@@ -148,7 +149,7 @@ def sampled_waveform_evidence(samples, *, source, level_a, level_b, width_a,
         if first["completed_s"] - before["started_s"] > 2 * gap + transition_spans.get(index, 0):
             return False
         lower = last["started_s"] - first["completed_s"]
-        if not is_list and lower + 2 * gap < duration:
+        if not bounded_edges and lower + 2 * gap < duration:
             return False
         if index + 1 == len(runs):
             if terminal_s is None:
@@ -159,7 +160,7 @@ def sampled_waveform_evidence(samples, *, source, level_a, level_b, width_a,
         if after_completed - last["started_s"] > 2 * gap + transition_spans.get(index + 1, 0):
             return False
         upper = after_completed - before["started_s"]
-        if is_list:
+        if bounded_edges:
             # Use the observed local edge bounds, not an extra global margin.
             # RUN bounds the end of the final dwell; the terminal current is
             # still excluded from the running plateau evidence.
@@ -169,7 +170,7 @@ def sampled_waveform_evidence(samples, *, source, level_a, level_b, width_a,
             exit_upper = min(after_completed, end_lower + gap + transition_spans.get(index + 1, 0))
             lower = end_lower - first["completed_s"]
             upper = exit_upper - entry_lower
-            list_brackets.append((entry_lower, first["completed_s"], end_lower, exit_upper))
+            plateau_brackets.append((entry_lower, first["completed_s"], end_lower, exit_upper))
         return lower <= duration <= upper
 
     labels = [run[0] for run in runs]
@@ -189,7 +190,7 @@ def sampled_waveform_evidence(samples, *, source, level_a, level_b, width_a,
         # shared transition cannot be spent independently on both steps.
         earliest, latest = float("-inf"), float("inf")
         elapsed = 0.0
-        for index, (entry_lower, entry_upper, exit_lower, exit_upper) in enumerate(list_brackets):
+        for index, (entry_lower, entry_upper, exit_lower, exit_upper) in enumerate(plateau_brackets):
             earliest = max(earliest, entry_lower - elapsed)
             latest = min(latest, entry_upper - elapsed)
             elapsed += widths[index % 2]
@@ -208,13 +209,17 @@ def sampled_waveform_evidence(samples, *, source, level_a, level_b, width_a,
         for start in range(len(labels) - len(pattern) + 1):
             if labels[start:start + len(pattern)] != pattern or (source == "HOLD" and start != 0):
                 continue
+            plateau_brackets.clear()
             if not all(plateau(index, widths[0]) for index in range(start + 1, start + len(pattern), 2)):
                 continue
             if source == "TIMER":
-                first, second = start + 1, start + 3
-                earliest = runs[second - 1][1][-1]["started_s"] - runs[first][1][0]["completed_s"]
-                latest = runs[second][1][0]["completed_s"] - runs[first - 1][1][-1]["started_s"]
-                if not earliest <= float(interval) <= latest:
+                # Both pulse starts and ends must fit one Width/Interval timeline.
+                earliest, latest = float("-inf"), float("inf")
+                for i, (entry_lower, entry_upper, exit_lower, exit_upper) in enumerate(plateau_brackets):
+                    offset = i * float(interval)
+                    earliest = max(earliest, entry_lower - offset, exit_lower - offset - widths[0])
+                    latest = min(latest, entry_upper - offset, exit_upper - offset - widths[0])
+                if earliest > latest:
                     continue
             found = True
             break
