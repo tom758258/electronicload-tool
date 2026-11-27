@@ -1244,7 +1244,7 @@ def fake_session(_resource):
             super().write(command)
             if ('list-cc' in sys.argv and sys.argv[sys.argv.index('--slot') + 1] == '1'
                     and command.startswith('LIST:WID 1,')):
-                self.list_steps['LIST:SLEW? 2'] = '0.5'
+                self.list_steps['LIST:SLEW? 2'] = '0.50001'
 
         def query(self, command):
             if command == 'VOLT:ON?' and self.values['VOLT:LATC'] == '0':
@@ -1253,7 +1253,7 @@ def fake_session(_resource):
 
     fake = SettingsFake()
     fake.range = 6
-    fake.values.update({'INP:TIM': '0', 'VOLT:ON': '0.536', 'VOLT:LATC': '1', 'CURR:SLEW:POS': '0.5'})
+    fake.values.update({'INP:TIM': '0', 'VOLT:ON': '0.536', 'VOLT:LATC': '1', 'CURR:SLEW:POS': '0.50001'})
     fake.list_steps = {f'LIST:{key}? {index}': value for index in (1, 2)
                        for key, value in (('LEV', '.2'), ('SLEW', '.1'), ('WID', '.3'))}
     if 'list-status' in sys.argv:
@@ -1362,12 +1362,12 @@ Save-Report
     assert nested_list['manual_action_required']
     nested = nested_list['error_diagnostics']['original_error']
     assert nested['error_code'] == 'invalid_response' and nested['query'] == 'LIST:SLEW? 2'
-    assert float(nested['observed']) == 0.5 and float(nested['maximum']) == 0.25
+    assert float(nested['observed']) == 0.50001 and float(nested['maximum']) == 0.5
     assert RESOURCE not in report_text
     assert slew_case['status'] == 'FAIL' and slew_case['error_code'] == 'invalid_response'
     diagnostic = slew_case['error_diagnostics']
     assert diagnostic['query'] == 'CURR:SLEW:POS?' and diagnostic['range'] == 'low'
-    assert float(diagnostic['observed']) == 0.5 and float(diagnostic['maximum']) == 0.25
+    assert float(diagnostic['observed']) == 0.50001 and float(diagnostic['maximum']) == 0.5
     assert diagnostic['no_settings_written'] is True
     assert list_case['restored'] and list_case['expected_width_s'] == '1'
     assert transient_case['restored'] and transient_case['expected_level_a'] == '0.2'
@@ -1996,7 +1996,7 @@ def test_trigger_validation_script_plan_and_noninteractive_refusal(run_script):
         capture_name = f'trigger-{source}-dispatch' if software else f'trigger-{source}-observed'
         assert names.index(f'trigger-{source}-on') < names.index(capture_name) < names.index(f'trigger-{source}-off')
         assert 'MEAS:CURR?' in capture['queries']
-        assert ('STAT:QUES:COND?' in capture['queries']) == (source in ('bus', 'external'))
+        assert ('STAT:QUES:COND?' in capture['queries']) == (source in ('hold', 'bus', 'external'))
         assert capture['planned_writes'] == (
             ['SYST:REM', 'TRIG:IMM' if source == 'hold' else '*TRG'] if software else [])
     assert cases['trigger-bus-setup']['command'] == 'set-list-cc'
