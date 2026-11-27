@@ -1244,7 +1244,7 @@ def fake_session(_resource):
             super().write(command)
             if ('list-cc' in sys.argv and sys.argv[sys.argv.index('--slot') + 1] == '1'
                     and command.startswith('LIST:WID 1,')):
-                self.list_steps['LIST:SLEW? 2'] = '0.5'
+                self.list_steps['LIST:SLEW? 2'] = '0.50001'
 
         def query(self, command):
             if command == 'VOLT:ON?' and self.values['VOLT:LATC'] == '0':
@@ -1253,7 +1253,7 @@ def fake_session(_resource):
 
     fake = SettingsFake()
     fake.range = 6
-    fake.values.update({'INP:TIM': '0', 'VOLT:ON': '0.536', 'VOLT:LATC': '1', 'CURR:SLEW:POS': '0.5'})
+    fake.values.update({'INP:TIM': '0', 'VOLT:ON': '0.536', 'VOLT:LATC': '1', 'CURR:SLEW:POS': '0.50001'})
     fake.list_steps = {f'LIST:{key}? {index}': value for index in (1, 2)
                        for key, value in (('LEV', '.2'), ('SLEW', '.1'), ('WID', '.3'))}
     if 'list-status' in sys.argv:
@@ -1362,12 +1362,12 @@ Save-Report
     assert nested_list['manual_action_required']
     nested = nested_list['error_diagnostics']['original_error']
     assert nested['error_code'] == 'invalid_response' and nested['query'] == 'LIST:SLEW? 2'
-    assert float(nested['observed']) == 0.5 and float(nested['maximum']) == 0.25
+    assert float(nested['observed']) == 0.50001 and float(nested['maximum']) == 0.5
     assert RESOURCE not in report_text
     assert slew_case['status'] == 'FAIL' and slew_case['error_code'] == 'invalid_response'
     diagnostic = slew_case['error_diagnostics']
     assert diagnostic['query'] == 'CURR:SLEW:POS?' and diagnostic['range'] == 'low'
-    assert float(diagnostic['observed']) == 0.5 and float(diagnostic['maximum']) == 0.25
+    assert float(diagnostic['observed']) == 0.50001 and float(diagnostic['maximum']) == 0.5
     assert diagnostic['no_settings_written'] is True
     assert list_case['restored'] and list_case['expected_width_s'] == '1'
     assert transient_case['restored'] and transient_case['expected_level_a'] == '0.2'
@@ -1515,6 +1515,8 @@ ConvertTo-Json -InputObject $results -Depth 8 -Compress
         assert answers[0]['name'] == 'identify'
         notices = '\n'.join(answers[0]['notices'])
         assert ('Confirm the external source is manually set' in notices) is connected
+        if 'list-cc' in modes:
+            assert 'empty working LIST' in notices
         assert ('Input Timer:' in notices) == ('input-timer' in modes)
         assert ('Workflow:' in notices) == ('workflow' in modes)
         assert ('10 s hardware cutoff' in notices) == bool(modes & {'input-timer', 'workflow'})
@@ -1783,6 +1785,55 @@ foreach ($name in $restoreNames) {
     ]
 
 
+@pytest.mark.parametrize("original_limit", ["250", "260"])
+def test_protection_restores_original_hardware_power_max_via_named_default(
+    run_script, original_limit,
+):
+    # R04/R05: the standard numeric limit remains 250 W, but the IT8812C
+    # may already have its 260 W MAX selected before the isolated trial.
+    # Existing tests checked MAX writes/readbacks, not the real PS restore
+    # arguments for an original 260 W setting.
+    result = run_script([original_limit], harness="""
+$script:protectionScope = @('--hardware-validation','protection')
+$script:protectionTrusted = $true
+$script:report = @{protection_restore_unconfirmed=$true;
+    protection_input_off_unconfirmed=$false}
+$script:calls = @()
+function Invoke-ProtectionStep([string]$Name, [string[]]$ArgsOverride,
+                               [switch]$Cleanup, [switch]$AllowDefaultRefusal) {
+    $script:calls += $Name
+    if ($Name -eq 'protection-default-hardware-power-restore-settings') {
+        $script:restoreArgs = @($ArgsOverride)
+    }
+    if ($Name -eq 'protection-default-hardware-power-final') {
+        return @{result=@{fixed_cc=[pscustomobject]@{range='low';current_a='0.20'};
+            settings=[pscustomobject]@{hardware_power_limit=$Scenario};
+            condition=@{raw=0;flags=@()};input_state='OFF'}}
+    }
+    return @{result=@{input_state='OFF'}}
+}
+$original = @{fixed_cc=[pscustomobject]@{range='low';current_a='0.20'};
+    settings=[pscustomobject]@{hardware_power_limit=$Scenario}}
+Restore-Protection 'protection-default-hardware-power' $original @('hardware_power_limit') $false
+@{arguments=@($script:restoreArgs);calls=@($script:calls);
+    confirmed=(-not $script:report.protection_restore_unconfirmed)} |
+    ConvertTo-Json -Depth 5 -Compress
+""")
+    assert result.returncode == 0, result.stdout + result.stderr
+    output = json.loads(result.stdout.splitlines()[-1])
+    expected = (["--restore-defaults", "hardware-power"] if original_limit == "260"
+                else ["--hardware-power-limit", "250"])
+    assert output["arguments"] == [
+        "--hardware-validation", "protection", "--confirm", *expected,
+    ]
+    assert output["calls"] == [
+        "protection-default-hardware-power-restore-guard",
+        "protection-default-hardware-power-restore-settings",
+        "protection-default-hardware-power-final",
+    ]
+    assert output["confirmed"] is True
+
+
 def test_selected_execution_loop_has_no_repeated_operator_prompts(run_script):
     # Execute the real selected-mode loop with controlled CLI responses.
     # Timer, both Workflow loads and Sequence must proceed after the initial
@@ -1994,7 +2045,7 @@ def test_trigger_validation_script_plan_and_noninteractive_refusal(run_script):
         capture_name = f'trigger-{source}-dispatch' if software else f'trigger-{source}-observed'
         assert names.index(f'trigger-{source}-on') < names.index(capture_name) < names.index(f'trigger-{source}-off')
         assert 'MEAS:CURR?' in capture['queries']
-        assert ('STAT:QUES:COND?' in capture['queries']) == (source in ('bus', 'external'))
+        assert ('STAT:QUES:COND?' in capture['queries']) == (source in ('hold', 'bus', 'external'))
         assert capture['planned_writes'] == (
             ['SYST:REM', 'TRIG:IMM' if source == 'hold' else '*TRG'] if software else [])
     assert cases['trigger-bus-setup']['command'] == 'set-list-cc'

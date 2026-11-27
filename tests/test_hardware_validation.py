@@ -143,8 +143,13 @@ def test_isolated_auxiliary_trial_restores_or_stops_without_input_on(monkeypatch
         assert [call for call in fake.calls if '?' not in call] == [
             'SYST:REM', 'TRAN OFF', 'INP:SHOR 1', 'INP:SHOR 0', 'TRAN ON']
     elif trial == 'slew_unrestorable':
-        assert exit_code == 3 and result['error']['details']['no_settings_written']
-        assert all(call.endswith('?') for call in fake.calls)
+        assert exit_code == 0 and result['result']['restored']
+        assert result['result']['baseline_initialized'] is True
+        assert result['result']['original_settings_restored'] is False
+        assert Decimal(fake.values['CURR:SLEW:POS']) == Decimal('.1')
+        assert Decimal(fake.values['CURR:SLEW:NEG']) == Decimal('.1')
+        assert 'CURR:SLEW:POS 0.1' in fake.calls
+        assert 'INP ON' not in fake.calls
     elif trial == 'short_untrusted':
         assert exit_code == 3 and result['error']['details']['manual_action_required']
         assert [call for call in fake.calls if '?' not in call] == ['SYST:REM', 'INP:SHOR 1']
@@ -248,6 +253,34 @@ def test_automatic_readback_trials_restore_original_mode_and_settings(
             assert Decimal(fake.values[key]) == Decimal(value)
         except ArithmeticError:
             assert fake.values[key] == value
+
+
+def test_automatic_transient_readback_accepts_scpi_slew_max_and_retains_safe_baseline(
+    monkeypatch, capsys,
+):
+    fake = ValidationFake()
+    fake.range = 6
+    fake.values.update({
+        "CURR:TRAN:MODE": "PULS", "CURR:TRAN:AWID": "2",
+        "CURR:SLEW:POS": "0.5", "CURR:SLEW:NEG": "0.5",
+        "TRIG:SOUR": "HOLD", "TRIG:TIM": "1", "INP:TIM": "0",
+    })
+    session(fake, monkeypatch)
+    status = cli.main([
+        "contributor-settings", "--trial", "transient", "--readback-trial",
+        "--resource", RESOURCE, "--json", "--confirm-isolated",
+    ])
+    payload = json.loads(capsys.readouterr().out)
+    assert status == 0, payload
+    result = payload["result"]
+    assert result["restored"] and result["input_state"] == "OFF"
+    assert result["baseline_initialized"] is True
+    assert result["original_settings_restored"] is False
+    assert fake.values["CURR:SLEW:POS"] == "0.1"
+    assert fake.values["CURR:SLEW:NEG"] == "0.1"
+    assert Decimal(fake.values["CURR:TRAN:ALEV"]) == Decimal(".1")
+    assert not fake.transient and not fake.input
+    assert "INP ON" not in fake.calls
 
 
 @pytest.mark.parametrize("origin", ["CURR", "VOLT", "RES", "POW", "LIST", "transient", "short", "timer", "slow", "led", "wrong-origin", "input"])
@@ -865,7 +898,7 @@ def test_configuration_readback_list_reads_observed_steps_and_rejects_bad_count(
     assert failure.value.code == "invalid_response"
     assert failure.value.details == {
         "query": "LIST:SLEW? 1", "step": 1, "observed": "2",
-        "minimum": "0.0001", "maximum": "0.25",
+        "minimum": "0.0001", "maximum": "0.5",
     }
 
     fake_visa.calls.clear()
@@ -874,7 +907,7 @@ def test_configuration_readback_list_reads_observed_steps_and_rejects_bad_count(
         control.execute("list-status", resource=RESOURCE, hardware_validation="readback")
     assert failure.value.code == "invalid_response"
     assert failure.value.details == {
-        "query": "LIST:SLEW? 1", "step": 1, "minimum": "0.0001", "maximum": "0.25",
+        "query": "LIST:SLEW? 1", "step": 1, "minimum": "0.0001", "maximum": "0.5",
         "parse_failure": True,
     }
 

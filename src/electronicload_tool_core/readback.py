@@ -106,7 +106,7 @@ def fixed_slew_status(session):
             return {"configured": False, "rise_slew_a_per_us": None, "fall_slew_a_per_us": None}
     else:
         range_name, _ = _range(session, "CC")
-    minimum, maximum = _bounds(c.SLEW_LIMITS, range_name)
+    minimum, maximum = _bounds(c.SLEW_READBACK_LIMITS, range_name)
     readings = {"configured": True}
     for field, stem in SLEW_QUERIES.items():
         query = stem + "?"
@@ -157,7 +157,7 @@ def _transient(session, selection, *, summary=False):
         if field in {"level_a", "level_b"}:
             minimum, maximum = level_bounds
         elif field in SLEW_QUERIES:
-            minimum, maximum = _bounds(c.SLEW_LIMITS, range_name)
+            minimum, maximum = _bounds(c.SLEW_READBACK_LIMITS, range_name)
         else:
             minimum, maximum = Decimal("0.00002"), Decimal("3600")
         if not minimum <= value <= maximum:
@@ -202,7 +202,7 @@ def _list_configuration(session, *, summary=False, expected_count=None):
     range_name = metadata["range"]
     limits = {
         "current_a": _bounds(SETPOINT_LIMITS["CC"], range_name),
-        "slew_a_per_us": _bounds(c.SLEW_LIMITS, range_name),
+        "slew_a_per_us": _bounds(c.SLEW_READBACK_LIMITS, range_name),
         "width_s": c.LIST_WIDTH_LIMITS,
     }
     steps = []

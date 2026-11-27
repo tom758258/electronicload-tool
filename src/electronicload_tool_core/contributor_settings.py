@@ -100,7 +100,8 @@ def _slew(session, range_name):
         raise LoadError("unsafe_mode", "The CC Range changed during the same-range Slew trial.", 3)
     values = readback.fixed_slew_status(session)
     rise, fall = (Decimal(values[field + "_a_per_us"]) for field in readback.SLEW_QUERIES)
-    c.validate_fixed_cc_slew(range_name, rise, fall)
+    # Readback is validated against the instrument limits by fixed_slew_status.
+    # The smaller user-programmable limits still apply to every trial write.
     return rise, fall
 
 
@@ -117,29 +118,43 @@ def _round_trip(session, trial):
         range_name = readback._range(session, "CC")[0]
         read, commands = lambda: _slew(session, range_name), _slew_writes
         baseline = read()
+        minimum, maximum = c.SLEW_LIMITS[range_name]
+        # A physical MAX value can be readable but outside our permitted write
+        # envelope. Establish a known safe test baseline instead of blindly
+        # restoring the higher original value.
+        safe_baseline = tuple(value if minimum <= value <= maximum else Decimal("0.1")
+                              for value in baseline)
         candidate = tuple(Decimal(value) for value in ("0.1", "0.2"))
-        if baseline == candidate:
+        if safe_baseline == candidate:
             candidate = candidate[::-1]
         c.validate_fixed_cc_slew(range_name, *candidate)
 
     def exercise(write):
         if read() != baseline:
             raise _mismatch("The original settings changed before the trial.")
+        if trial == "slew" and safe_baseline != baseline:
+            for command in commands(safe_baseline):
+                write(command)
+            if read() != safe_baseline:
+                raise _mismatch("The safe Slew baseline was not confirmed.")
         for command in commands(candidate):
             write(command)
         if read() != candidate:
             raise _mismatch("The test settings did not match the instrument readback.")
-        return {"original": [str(value) for value in baseline], "observed": [str(value) for value in candidate]}
+        return {"original": [str(value) for value in baseline],
+                "observed": [str(value) for value in candidate],
+                **({"baseline_initialized": True, "original_settings_restored": False}
+                   if trial == "slew" and safe_baseline != baseline else {})}
 
     def restore():
         _guard(session)
         if trial == "slew" and readback._range(session, "CC")[0] != range_name:
             raise _mismatch("Cannot restore Slew because the CC Range changed.")
-        for command in commands(baseline):
+        for command in commands(safe_baseline if trial == "slew" else baseline):
             c._input_off(session)
             c._write(session, command)
-        if read() != baseline:
-            raise _mismatch("The restored settings did not match the original readback.")
+        if read() != (safe_baseline if trial == "slew" else baseline):
+            raise _mismatch("The restored settings did not match the test baseline.")
 
     if trial == "von":
         original = {"threshold_v": baseline[0], "latch": baseline[1]}
@@ -434,13 +449,31 @@ def _fixed_readback_trial(session, function):
 def _transient_readback_trial(session):
     def settings():
         mode = readback.transient_mode(session, "CURR")
-        return c.validate_transient_cc({
-            "range": readback._range(session, "CC")[0], "transient_mode": mode,
-            **readback.transient_values(session, "CURR", mode),
+        range_name = readback._range(session, "CC")[0]
+        values = {**readback.transient_values(session, "CURR", mode)}
+        read_min, read_max = c.SLEW_READBACK_LIMITS[range_name]
+        for field in ("rise_slew", "fall_slew"):
+            if not read_min <= values[field] <= read_max:
+                raise LoadError("invalid_response", "Transient Slew readback exceeds instrument limits.",
+                                3, field=field)
+        # Validate the remaining physical fields without treating a valid
+        # original SCPI slew as permission for a later out-of-bounds write.
+        low, high = c.SLEW_LIMITS[range_name]
+        validated = c.validate_transient_cc({
+            "range": range_name, "transient_mode": mode,
+            **{key: (min(max(value, low), high) if key in ("rise_slew", "fall_slew") else value)
+               for key, value in values.items()},
         })
+        return {**validated, "rise_slew": values["rise_slew"], "fall_slew": values["fall_slew"]}
 
-    baseline = settings()
+    original = settings()
     trigger = _trigger_snapshot(session)
+    low, high = c.SLEW_LIMITS[original["range"]]
+    baseline = {
+        **original,
+        **{key: (value if low <= value <= high else Decimal("0.1"))
+           for key, value in original.items() if key in {"rise_slew", "fall_slew"}},
+    }
     candidate = c.validate_transient_cc({
         **baseline, "level_a": Decimal("0.2") if baseline["level_a"] == Decimal("0.1") else Decimal("0.1"),
     })
@@ -448,8 +481,13 @@ def _transient_readback_trial(session):
 
     def exercise(write):
         _guard(session)
-        if settings() != baseline or _trigger_snapshot(session) != trigger:
+        if settings() != original or _trigger_snapshot(session) != trigger:
             raise _mismatch("Original Transient settings changed before testing.")
+        for field, query in readback.SLEW_QUERIES.items():
+            if baseline[field] != original[field]:
+                write(f"{query} {baseline[field]:f}")
+        if settings() != baseline:
+            raise _mismatch("The safe Transient Slew baseline was not confirmed.")
         write(f"CURR:TRAN:ALEV {candidate['level_a']:f}")
         if source_changed:
             write("TRIG:SOUR HOLD")
@@ -468,7 +506,9 @@ def _transient_readback_trial(session):
         if (not observed["enabled"] or observed["input_state"] != "OFF"
                 or observed["function"] != "CC" or not matches or settings() != candidate):
             raise _mismatch("Transient readback did not match the enabled test configuration.")
-        return {"observed": observed, "expected_level_a": str(candidate["level_a"])}
+        return {"observed": observed, "expected_level_a": str(candidate["level_a"]),
+                **({"baseline_initialized": True, "original_settings_restored": False}
+                   if baseline != original else {})}
 
     def restore():
         c._input_off(session)
@@ -484,10 +524,10 @@ def _transient_readback_trial(session):
             c._input_off(session)
             c._write(session, f"TRIG:SOUR {SOURCE_TOKENS[trigger['source']]}")
         if settings() != baseline or _trigger_snapshot(session) != trigger:
-            raise _mismatch("Transient or Trigger settings were not restored.")
+            raise _mismatch("Transient or Trigger test baseline was not restored.")
 
-    return exercise, restore, {"transient": baseline, "trigger": trigger}
-
+    return exercise, restore, {"transient": original, "trigger": trigger,
+                               **({"baseline_initialized": True} if baseline != original else {})}
 
 def _list_readback_trial(session, budget):
     baseline = budget.snapshot(lambda: _list_settings(session, expected_count=budget.count), preparing=True)
@@ -571,6 +611,49 @@ def _average_readback_trial(session):
     return exercise, restore, {"average_count": original}
 
 
+# An initially empty IT8812C working LIST has no writable 0-step restoration.
+# For explicitly authorized isolated validation, a verified two-step LIST is
+# the retained baseline after the trial, not a claim to restore empty memory.
+def _blank_list_trial(session, trial, slot, previous_slot_width, budget):
+    baseline = c.validate_list_cc({
+        "range": "low", "repeat_count": 1,
+        "steps": [
+            {"current_a": Decimal("0.1"), "slew_a_per_us": Decimal("0.1"),
+             "width_s": Decimal("1")},
+            {"current_a": Decimal("0.2"), "slew_a_per_us": Decimal("0.1"),
+             "width_s": Decimal("1")},
+        ],
+    })
+    active = {}
+
+    def exercise(write):
+        _guard(session)
+        if (c._decimal_readback(session, "LIST:STEP?") != 0
+                or c._decimal_readback(session, "LIST:COUN?") != 0
+                or c._decimal_readback(session, "LIST:RANG?") != 0):
+            raise _mismatch("The previously empty LIST changed before initialization.")
+        for command in list_program_writes(baseline):
+            write(command)
+        if budget.snapshot(lambda: _list_settings(session, expected_count=2)) != baseline:
+            raise _mismatch("The initialized LIST test baseline did not match.")
+        # Initialization has finished; do not reserve its spent queries again
+        # when entering the normal short LIST trial's preparation budget.
+        budget.prepare_queries -= budget.blank_prepare_queries
+        budget.blank_prepare_queries = 0
+        inner = (_list_trial(session, slot, previous_slot_width, budget)
+                 if trial == "list-cc" else _list_readback_trial(session, budget))
+        active["restore"] = inner[1]
+        result = inner[0](write)
+        return {**result, "baseline_initialized": True, "original_settings_restored": False}
+
+    def restore():
+        if "restore" not in active:
+            raise _mismatch("LIST initialization was not fully verified; manual review required.")
+        active["restore"]()
+
+    return exercise, restore, {"working_list": baseline, "original_list_was_blank": True}
+
+
 def _prepare_trial(session, trial, slot, previous_slot_width, *, readback_trial=False, deadline_ns=None):
     target = trial[-2:].upper() if trial.startswith("fixed-") else "CC"
     selection = None
@@ -589,13 +672,16 @@ def _prepare_trial(session, trial, slot, previous_slot_width, *, readback_trial=
     if trial == "short":
         functions = _short_trial(session)
     elif trial == "list-cc":
-        functions = _list_trial(session, slot, previous_slot_width, budget)
+        functions = (_blank_list_trial(session, trial, slot, previous_slot_width, budget)
+                     if budget.initially_blank else
+                     _list_trial(session, slot, previous_slot_width, budget))
     elif trial.startswith("fixed-"):
         functions = _fixed_readback_trial(session, target)
     elif trial == "transient":
         functions = _transient_readback_trial(session)
     elif trial == "list":
-        functions = _list_readback_trial(session, budget)
+        functions = (_blank_list_trial(session, trial, slot, previous_slot_width, budget)
+                     if budget.initially_blank else _list_readback_trial(session, budget))
     elif trial == "average":
         functions = _average_readback_trial(session)
     else:
@@ -617,10 +703,20 @@ class _ListBudget:
 
     def __init__(self, session, trial, deadline_ns, selection, needs_selection):
         self.deadline_ns = deadline_ns
-        self.count = readback._list_integer(session, readback.LIST_HEADER_QUERIES[1], 2, 84)
+        count = readback._list_integer(session, readback.LIST_HEADER_QUERIES[1], 0, 84)
+        self.initially_blank = count == 0
+        if self.initially_blank and (c._decimal_readback(session, "LIST:COUN?") != 0
+                                     or c._decimal_readback(session, "LIST:RANG?") != 0):
+            raise LoadError("list_baseline_unrestorable",
+                            "Only the verified empty LIST may be initialized.", 3)
+        self.count = 2 if self.initially_blank else count
         self.snapshot_queries = 3 + 3 * self.count
         self.query_ns = int(max(QUERY_DELAY_S, getattr(session, "query_delay", 0) or 0) * 1e9)
-        self.prepare_queries = 16
+        # Every initialization write requires OFF guards, then full readback.
+        # This reserve is consumed before the normal LIST preparation starts.
+        self.blank_prepare_queries = (3 * 9 + self.snapshot_queries + 3
+                                      if self.initially_blank else 0)
+        self.prepare_queries = 16 + self.blank_prepare_queries
         if trial == "list-cc":
             # Seven exercise snapshots; cleanup can read a different buffer,
             # rewrite its headers/steps with OFF guards, then verify baseline.

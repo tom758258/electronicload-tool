@@ -161,6 +161,100 @@ def test_contributor_list_requires_independent_recall_then_restores_working_buff
 
 
 
+@pytest.mark.parametrize("trial,deadline_s", [("list", 30), ("list-cc", 300)])
+def test_empty_working_list_is_initialized_and_retained_after_authorized_trial(
+    monkeypatch, capsys, trial, deadline_s,
+):
+    class EmptyList(TriggerFake):
+        def __init__(self):
+            super().__init__()
+            self.range = 6
+            self.values.update({"LIST:RANG": "0", "LIST:COUN": "0", "LIST:STEP": "0"})
+            self.slots = {}
+
+        def write(self, command):
+            super().write(command)
+            if command == "LIST:SAV 1":
+                self.slots[1] = self.list_steps.copy()
+            elif command == "LIST:RCL 1":
+                self.list_steps = self.slots[1].copy()
+
+    fake = EmptyList()
+    now = 1_000_000_000
+    query = fake.query
+
+    def query_with_delay(command):
+        nonlocal now
+        result = query(command)
+        now += 150_000_000
+        return result
+
+    monkeypatch.setattr(fake, "query", query_with_delay)
+    monkeypatch.setattr(contributor_settings, "monotonic_ns", lambda: now)
+    session(fake, monkeypatch)
+    args = ["contributor-settings", "--trial", trial, "--resource", RESOURCE, "--json",
+            "--deadline-ns", str(now + deadline_s * 10**9)]
+    if trial == "list":
+        args.append("--readback-trial")
+    else:
+        args.extend(["--slot", "1"])
+    assert cli.main(args) == 2 and not fake.calls
+    capsys.readouterr()
+    status = cli.main([*args, "--confirm-isolated"])
+    payload = json.loads(capsys.readouterr().out)
+    assert status == 0, payload
+    result = payload["result"]
+    assert result["restored"] and result["input_state"] == "OFF"
+    assert result["baseline_initialized"] is True
+    assert result["original_settings_restored"] is False
+    assert fake.values["LIST:STEP"] == "2"
+    assert fake.values["LIST:COUN"] == "1"
+    assert fake.values["LIST:RANG"] == "6"
+    assert fake.list_steps["LIST:LEV? 1"] == "0.1"
+    assert fake.list_steps["LIST:LEV? 2"] == "0.2"
+    assert fake.list_steps["LIST:WID? 1"] == "1"
+    assert fake.list_steps["LIST:WID? 2"] == "1"
+    assert fake.mode == "FIX" and not fake.input
+    assert not any(command == "INP ON" for command in fake.calls)
+    if trial == "list-cc":
+        assert result["save_confirmed"] and result["recall_confirmed"]
+        assert "LIST:SAV 1" in fake.calls and "LIST:RCL 1" in fake.calls
+    else:
+        assert not any(command.startswith(("LIST:SAV", "LIST:RCL")) for command in fake.calls)
+
+
+def test_blank_list_partial_header_is_rejected_before_any_write(monkeypatch, capsys):
+    fake = TriggerFake()
+    fake.values.update({"LIST:RANG": "0", "LIST:STEP": "0", "LIST:COUN": "1"})
+    session(fake, monkeypatch)
+    status = cli.main([
+        "contributor-settings", "--trial", "list", "--readback-trial",
+        "--resource", RESOURCE, "--json", "--confirm-isolated",
+    ])
+    payload = json.loads(capsys.readouterr().out)
+    assert status == 3
+    assert payload["error"]["code"] == "list_baseline_unrestorable"
+    assert payload["error"]["details"]["no_settings_written"]
+    assert all("?" in command for command in fake.calls)
+
+def test_blank_list_uncertain_initialization_write_never_blindly_restores(monkeypatch, capsys):
+    fake = TriggerFake()
+    fake.values.update({"LIST:RANG": "0", "LIST:STEP": "0", "LIST:COUN": "0"})
+    fake.write_fail = "LIST:STEP 2"
+    session(fake, monkeypatch)
+    status = cli.main([
+        "contributor-settings", "--trial", "list", "--readback-trial",
+        "--resource", RESOURCE, "--json", "--confirm-isolated",
+    ])
+    payload = json.loads(capsys.readouterr().out)
+    assert status == 3
+    assert payload["error"]["code"] == "settings_restore_unconfirmed"
+    assert payload["error"]["details"]["manual_action_required"]
+    assert fake.calls.count("LIST:STEP 2") == 1
+    assert "INP ON" not in fake.calls
+    assert not any(command.startswith("LIST:WID ") for command in fake.calls)
+
+
 @pytest.mark.parametrize("ignored_width,count,origin,remaining_s,delay_case", [
     (False, 2, "CURR", 30, None), (True, 2, "CURR", 30, None),
     (False, 2, "VOLT", 30, None), (False, 2, "RES", 30, None), (False, 2, "POW", 30, None),
@@ -283,6 +377,90 @@ def test_sampled_trigger_evidence_requires_levels_and_time_brackets(source, scen
         assert evidence["events_confirmed"] == (2 if source == "TIMER" else 1)
         if is_list:
             assert evidence["list_run_completed"] is True
+
+
+@pytest.mark.parametrize("scenario", ["observed", "wrong_order", "bad_transition",
+                                      "long_transition", "missing_b", "short_a"])
+def test_hold_first_trigger_uses_fixed_cc_baseline_and_bounded_transition(scenario):
+    samples = []
+    for index in range(22):
+        t = index * 0.2
+        if t < 0.4:
+            current = 0.0
+        elif t < (1.2 if scenario == "short_a" else 2.4):
+            current = 0.1
+        elif t < (3.2 if scenario == "long_transition" else 2.6):
+            current = 0.35 if scenario == "bad_transition" else 0.15
+        else:
+            current = 0.1 if scenario == "missing_b" else 0.2
+        if scenario == "wrong_order" and 0.4 <= t < 2.4:
+            current = 0.2
+        samples.append({"started_s": t, "completed_s": t + 0.02, "current_a": current})
+    observed = sampled_waveform_evidence(
+        samples, source="HOLD", level_a=Decimal("0.1"), level_b=Decimal("0.2"),
+        width_a=2, baseline_current=Decimal("0"),
+    )
+    assert (observed is not None) is (scenario == "observed")
+    if observed:
+        assert observed["events_confirmed"] == 1
+
+
+def test_hold_observation_dispatches_one_trigger_after_zero_fixed_baseline(
+    monkeypatch,
+):
+    fake = TriggerFake()
+    fake.range = 0.2
+    fake.current = 0
+    fake.input = True
+    fake.transient = True
+    fake.values.update({
+        "TRIG:SOUR": "HOLD", "TRIG:TIM": "1",
+        "CURR:TRAN:MODE": "PULS", "CURR:TRAN:AWID": "2",
+        "INP:TIM": "0", "VOLT:ON": "0.1",
+        "MEAS:VOLT": "5", "MEAS:CURR": "0",
+        "STAT:QUES:COND": "16384",
+    })
+    now = 1_000_000_000
+    triggered_at = None
+    query = fake.query
+    write = fake.write
+
+    def live_query(command):
+        nonlocal now
+        if command == "MEAS:CURR?":
+            duration = (now - triggered_at) / 1e9 if triggered_at is not None else -1
+            fake.values["MEAS:CURR"] = ("0" if duration < 0.4 else
+                                        "0.1" if duration < 2.4 else
+                                        "0.15" if duration < 2.6 else "0.2")
+        reply = query(command)
+        now += 150_000_000
+        return reply
+
+    def live_write(command):
+        nonlocal triggered_at
+        write(command)
+        if command == "TRIG:IMM":
+            triggered_at = now
+
+    def live_sleep(duration):
+        nonlocal now
+        now += int(duration * 1e9)
+
+    monkeypatch.setattr(fake, "query", live_query)
+    monkeypatch.setattr(fake, "write", live_write)
+    monkeypatch.setattr(hardware_validation, "monotonic_ns", lambda: now)
+    monkeypatch.setattr(hardware_validation, "sleep", live_sleep)
+    session(fake, monkeypatch)
+    expected = {"function": "CC", "trigger": {"source": "HOLD"},
+                "configuration": {**transient("pulse", "low"), "pulse_width": "2"}}
+    result = hardware_validation.execute_trigger_observation(
+        mode="live", resource=RESOURCE, backend="system", model_id=control.MODEL_ID,
+        expected=expected, seconds=15, confirmed=True, deadline_ns=now + 15 * 10**9,
+    )
+    assert result["observation"]["events_confirmed"] == 1
+    assert result["trigger_source"] == "HOLD"
+    assert fake.calls.count("TRIG:IMM") == 1
+    assert "INP ON" not in fake.calls and "INP OFF" not in fake.calls
 
 
 def test_contributor_trigger_observation_plan_and_refusal_before_visa(monkeypatch, capsys):

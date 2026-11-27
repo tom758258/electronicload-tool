@@ -51,7 +51,7 @@ def software_trigger(source: str) -> str:
 
 
 def sampled_waveform_evidence(samples, *, source, level_a, level_b, width_a,
-                              width_b=None, repeats=1, interval=None):
+                              width_b=None, repeats=1, interval=None, baseline_current=None):
     """Recognize time-bracketed sampled plateaus, not continuous calibration."""
     if len(samples) < 3:
         return None
@@ -63,7 +63,11 @@ def sampled_waveform_evidence(samples, *, source, level_a, level_b, width_a,
     if gap <= 0 or gap > gap_limit:
         return None
     is_list = width_b is not None
-    levels = {"A": level_a, "B": level_b}
+    # HOLD starts at the configured Fixed CC level until its first software
+    # Trigger. Keep the historical B baseline for TIMER and older callers.
+    observed_hold_origin = source == "HOLD" and baseline_current is not None
+    levels = ({"S": Decimal(str(baseline_current)), "A": level_a, "B": level_b}
+              if observed_hold_origin else {"A": level_a, "B": level_b})
     if is_list:
         levels["Z"] = Decimal(0)
     distances = [abs(left - right) for index, left in enumerate(levels.values())
@@ -143,7 +147,22 @@ def sampled_waveform_evidence(samples, *, source, level_a, level_b, width_a,
             return None
         events = repeats
     else:
-        pattern = ["B", "A", "B", "A", "B"] if source == "TIMER" else ["B", "A", "B"]
+        pattern = (["B", "A", "B", "A", "B"] if source == "TIMER" else
+                   ["S", "A", "B"] if observed_hold_origin else ["B", "A", "B"])
+        if observed_hold_origin and labels == ["S", "A", "?", "B"]:
+            # The IT8812C can return a few in-between current samples while
+            # moving from A to B. Permit only a brief, bounded transition
+            # between the two known plateaus, never an arbitrary extra dwell.
+            transition = runs[2][1]
+            lo, hi = sorted((Decimal(str(level_a)), Decimal(str(level_b))))
+            if (transition[-1]["completed_s"] - transition[0]["started_s"] > gap_limit
+                    or any(not lo <= Decimal(str(item["current_a"])) <= hi
+                           for item in transition)):
+                return None
+            runs.pop(2)
+            labels.pop(2)
+        if observed_hold_origin and labels == pattern and len(runs[-1][1]) < 2:
+            return None
         events = 2 if source == "TIMER" else 1
         found = False
         for start in range(len(labels) - len(pattern) + 1):

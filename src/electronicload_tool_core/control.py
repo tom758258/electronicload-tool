@@ -50,6 +50,10 @@ TRANSIENT_FIELDS = frozenset({"transient_mode", "range", "level_a", "level_b", "
 # not a documented decimal step. Programming Guide V2.1 pp.48,50-51.
 SLEW_LIMITS = {"low": (Decimal("0.0001"), Decimal("0.25")),
                "high": (Decimal("0.001"), Decimal("2.5"))}
+# The IT8812C SCPI readback/MAX limits are higher than the conservative
+# user-programmable limits above. Do not use these limits to authorize writes.
+SLEW_READBACK_LIMITS = {"low": (Decimal("0.0001"), Decimal("0.5")),
+                        "high": (Decimal("0.001"), Decimal("5"))}
 # IT8811/12/12B/12C User Manual V2.7, section 3.18.
 LIST_WIDTH_LIMITS = (Decimal("0.00002"), Decimal("3600"))
 # Exact IT8812C Product LIVE control commands; the model, USB/System VISA,
