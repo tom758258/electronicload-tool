@@ -737,8 +737,9 @@ def execute_trigger_observation(*, mode, resource, backend, model_id, expected, 
                             TRIGGER_INTERVAL_QUERY, "MEAS:CURR?",
                             *(["LIST:RANG?", "LIST:COUN?", "LIST:STEP?", "LIST:LEV? {step}",
                                "LIST:SLEW? {step}", "LIST:WID? {step}", "CURR?", "STAT:QUES:COND?"] if is_list else
-                              ["CURR?", "MEAS:VOLT?", "VOLT:ON?", "STAT:QUES:COND?", "CURR:RANG?",
-                               "CURR:TRAN:MODE?", "CURR:TRAN:ALEV?", "CURR:TRAN:BLEV?",
+                              [*(["CURR?", "MEAS:VOLT?", "VOLT:ON?", "STAT:QUES:COND?"]
+                                 if source == "HOLD" else []),
+                               "CURR:RANG?", "CURR:TRAN:MODE?", "CURR:TRAN:ALEV?", "CURR:TRAN:BLEV?",
                                "CURR:SLEW:POS?", "CURR:SLEW:NEG?", "CURR:TRAN:AWID?"])],
                 "observation_seconds": seconds}
     now = monotonic_ns()
