@@ -1563,7 +1563,8 @@ ConvertTo-Json -InputObject $results -Depth 8 -Compress
         assert ('Sequence:' in notices) == ('sequence' in modes)
         assert ('EXTERNAL Trigger equipment' in notices) == ('trigger' in modes)
         assert ('Protection:' in notices) == ('protection' in modes)
-        assert ('Average count' in notices) == ('measurement-extensions' in modes)
+        assert ('Average count 2 measurement baseline' in notices) is connected
+        assert ('Average count may be set to 8' in notices) == ('measurement-extensions' in modes)
         assert ('Scratch Slot 3' in notices) == ('list-cc' in modes)
         assert ('Automatic Readback temporarily' in notices) == (
             'readback' in modes and not item['legacy']
