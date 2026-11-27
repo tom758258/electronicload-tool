@@ -174,7 +174,8 @@ def _short_trial(session):
 def _list_settings(session, *, expected_count=None):
     raw = readback._list_configuration(session, expected_count=expected_count)
     if raw["range"] is None:
-        raise LoadError("list_baseline_unrestorable", "The original LIST current range cannot be restored.", 3)
+        raise LoadError("list_baseline_unrestorable", "The original LIST current range cannot be restored.", 3,
+                        query="LIST:RANG?", observed=str(raw["range_readback_a"]))
     return c.validate_list_cc({key: raw[key] for key in c.LIST_FIELDS})
 
 
@@ -193,8 +194,37 @@ def _list_trial(session, slot, previous_slot_width, budget):
 
     def require_list(expected, label):
         mode, function = c._load_mode(session)
-        if mode != "LIST" or function not in _CURRENT or budget.snapshot(lambda: _list_settings(session, expected_count=budget.count)) != expected:
-            raise _mismatch(f"LIST {label} did not match the expected configuration.")
+        details = {"list_phase": label}
+        if mode != "LIST" or function not in _CURRENT:
+            details["query"] = "FUNC:MODE?" if mode != "LIST" else "FUNC?"
+        else:
+            try:
+                actual = budget.snapshot(lambda: _list_settings(session, expected_count=budget.count))
+            except LoadError as exc:
+                exc.details["list_phase"] = label
+                raise
+            if actual == expected:
+                return
+            for field, query in (("range", "LIST:RANG?"), ("repeat_count", "LIST:COUN?")):
+                if actual[field] != expected[field]:
+                    details["query"] = query
+                    break
+            else:
+                for index, (observed, wanted) in enumerate(zip(actual["steps"], expected["steps"]), 1):
+                    for field, template in readback.LIST_STEP_QUERIES.items():
+                        if observed[field] != wanted[field]:
+                            details.update(query=template.format(index), step=index)
+                            # Only A/B widths are public trial values. An ignored
+                            # write or Recall can expose an unrelated saved value.
+                            if index == 1 and field == "width_s":
+                                details["expected"] = str(wanted[field])
+                                if observed[field] in (first, second):
+                                    details["observed"] = str(observed[field])
+                            break
+                    if "query" in details:
+                        break
+        raise LoadError("readback_mismatch", f"LIST {label} did not match the expected configuration.", 3,
+                        **details)
 
     def exercise(write):
         if c._check_mode_change(session) or budget.snapshot(lambda: _list_settings(session, expected_count=budget.count)) != baseline:
@@ -336,6 +366,11 @@ def _fixed_readback_trial(session, function):
         return validator(value) if function == "CW" else validator(value, range_name)
 
     original = validate(baseline[field])
+    cc_selector = Decimal(str(baseline["range_readback_a"])) if function == "CC" else None
+    change_selector = function == "CC" and range_name == "low"
+    if change_selector and cc_selector < original:
+        raise LoadError("readback_mismatch", "Original CC selector cannot safely restore the setpoint.", 3,
+                        field=field, query="CURR:RANG?", range=range_name)
     candidates = {"CC": ("0.1", "0.2"), "CV": ("3", "4"),
                   "CR": ("5", "10") if range_name == "low" else ("1000", "2000"),
                   "CW": ("0.10", "0.20")}[function]
@@ -347,25 +382,48 @@ def _fixed_readback_trial(session, function):
         candidate = next(validate(value) for value in candidates if Decimal(value) != original)
     prefix = c.TRANSIENT_FUNCTIONS[function]
 
-    def observe(value):
+    def observe(value, *, testing=False):
         snapshot = readback.snapshot(session, "fixed-status")
+        actual = snapshot.get(field)
+        matches = actual is not None and (
+            c._current_within(actual, value, range_name) if function == "CC" and testing
+            else Decimal(str(actual)) == value)
+        selector_matches = True
+        # Candidate Low CC acceptance uses the selected range and setpoint,
+        # not an undocumented numeric selector echo. Restore stays exact.
+        if function == "CC" and snapshot["function"] == function and not (testing and change_selector):
+            selector_matches = Decimal(str(snapshot["range_readback_a"])) == cc_selector
         if (snapshot["input_state"] != "OFF" or snapshot["function"] != function
-                or snapshot["range"] != range_name or Decimal(str(snapshot[field])) != value
-                or snapshot.get("range_auto") != baseline.get("range_auto")):
-            raise _mismatch("Fixed readback differs from the expected setting.")
+                or snapshot["range"] != range_name or not matches
+                or snapshot.get("range_auto") != baseline.get("range_auto") or not selector_matches):
+            details = {"field": field, "range": snapshot["range"],
+                       "query": f"{prefix}?"}
+            if snapshot["function"] != function:
+                details["query"] = "FUNC?"
+            elif not selector_matches:
+                details["query"] = "CURR:RANG?"
+            elif testing and actual is not None:
+                details.update(expected=str(value), observed=str(actual))
+            raise LoadError("readback_mismatch", "Fixed readback differs from the expected setting.", 3, **details)
         return snapshot
 
     def exercise(write):
         observe(original)
+        if change_selector:
+            # IT8812C accepts a numeric selector before a nonzero Low CC level.
+            write(f"CURR:RANG {candidate:f}")
         write(f"{prefix} {candidate:f}")
-        return {"observed": observe(candidate), "expected_setpoint": str(candidate)}
+        return {"observed": observe(candidate, testing=True), "expected_setpoint": str(candidate)}
 
     def restore():
-        _selection_guard(session)
-        # Setpoint-only changes preserve the Range selector; do not attempt a
-        # restore into a different or unrecognized range.
+        selected = _selection_guard(session)
+        if selected["active_mode"] != "fixed" or selected["function"] != function:
+            raise _mismatch("Fixed selection changed; original setpoint cannot be safely restored.")
         if function != "CW" and readback._range(session, function)[0] != range_name:
             raise _mismatch("Fixed Range changed; original setpoint cannot be safely restored.")
+        if change_selector:
+            c._input_off(session)
+            c._write(session, f"CURR:RANG {cc_selector:f}")
         c._input_off(session)
         c._write(session, f"{prefix} {original:f}")
         observe(original)
@@ -455,10 +513,29 @@ def _list_readback_trial(session, budget):
             {field: c._decimal(value) for field, value in step.items()}
             for step in configuration["steps"]
         ]
-        if (not observed["selected"] or observed["input_state"] != "OFF"
-                or c.validate_list_cc(actual) != expected):
-            raise _mismatch("LIST readback did not match the test buffer.")
-        return {"observed": observed, "expected_width_s": str(candidate)}
+        details = {"list_phase": "Automatic readback"}
+        if not observed["selected"]:
+            details["query"] = "FUNC:MODE?"
+        elif observed["input_state"] != "OFF":
+            details["query"] = "INP:STAT?"
+        else:
+            actual = c.validate_list_cc(actual)
+            if actual == expected:
+                return {"observed": observed, "expected_width_s": str(candidate)}
+            for field, query in (("range", "LIST:RANG?"), ("repeat_count", "LIST:COUN?")):
+                if actual[field] != expected[field]:
+                    details["query"] = query
+                    break
+            else:
+                for index, (step, wanted) in enumerate(zip(actual["steps"], expected["steps"]), 1):
+                    field = next((key for key in readback.LIST_STEP_QUERIES if step[key] != wanted[key]), None)
+                    if field is not None:
+                        details.update(query=readback.LIST_STEP_QUERIES[field].format(index), step=index)
+                        # Only the candidate width is public; other values belong to the private baseline.
+                        if index == 1 and field == "width_s":
+                            details["expected"] = str(candidate)
+                        break
+        raise LoadError("readback_mismatch", "LIST readback did not match the test buffer.", 3, **details)
 
     def restore():
         _guard(session, modes=_FIXED | {"LIST"})
@@ -703,6 +780,9 @@ def execute(trial, *, mode, resource, backend, model_id, confirmed, slot=None, p
             key = "fixed-" + function.lower()
             prefix = c.TRANSIENT_FUNCTIONS[function]
             writes[key] = [f"{prefix} <test>", f"{prefix} <original>"]
+            if function == "CC":
+                conditional[key] = [{"condition": "Original CC range is Low; selectors precede the respective test and restore setpoints",
+                                     "writes": ["CURR:RANG <test>", "CURR:RANG <original selector>"]}]
             queries[key] = [f"{prefix}?", *([f"{prefix}:RANG?"] if function != "CW" else []),
                             *(["VOLT:RANG:AUTO?"] if function == "CV" else []),
                             *([c.LED_QUERY] if function == "CR" else [])]

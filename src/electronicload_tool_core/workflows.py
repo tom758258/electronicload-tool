@@ -57,6 +57,7 @@ class _BoundedCCSession:
         self.deadline = None
         self.on_dispatch = None
         self.off_write_started_ns = None
+        self.off_reply_received_ns = None
         self.timeout_ms = None
         self.sample_deadline = None
 
@@ -79,7 +80,13 @@ class _BoundedCCSession:
 
     def query(self, command):
         self._budget(query=True)
-        return self.session.query(command)
+        response = self.session.query(command)
+        if (self.off_write_started_ns is not None and command == "INP:STAT?"
+                and str(response).strip() == "0"):
+            # Record the received OFF reply, even if Core rejects it as late.
+            # This is diagnostic evidence, never an accepted OFF confirmation.
+            self.off_reply_received_ns = monotonic_ns()
+        return response
 
     def write(self, command):
         if command == "INP ON" and self.on_dispatch is not None:
@@ -229,8 +236,12 @@ def _measure(session, command, settings, quantities, stop, result, record_row, *
                 if quantity == "current":
                     current = Decimal(str(values["current_a"]))
                     if load_started is not None:
-                        if (abs(current - CONTRIBUTOR_CURRENT) > CURRENT_TOLERANCE
-                                or read_measurement(session, "input-state")["input_state"] != "ON"):
+                        current_matches = abs(current - CONTRIBUTOR_CURRENT) <= CURRENT_TOLERANCE
+                        state = read_measurement(session, "input-state")["input_state"] if current_matches else None
+                        if not current_matches or state != "ON":
+                            # Rejected evidence does not count toward samples or capacity.
+                            result["failed_measurement"] = {
+                                **reading, **({"input_state": state} if state is not None else {})}
                             raise LoadError("workflow_load_unconfirmed", "Discharge current or Input ON was lost.", 3)
                         if monotonic() >= deadline:
                             raise LoadError("workflow_timeout", "Discharge sample exceeded its deadline.", 3)
@@ -363,6 +374,10 @@ def _run_cc(session, settings, stop, result, run_load, *, on_write_started=None)
                     raise LoadError("workflow_timeout", "Input OFF was confirmed after the maximum loading time.", 3)
                 result.update(off_write_started_ns=session.off_write_started_ns, off_confirmed_ns=off_confirmed_ns)
         except (Exception, KeyboardInterrupt) as exc:
+            if timed and session.off_write_started_ns is not None:
+                result["off_write_started_ns"] = session.off_write_started_ns
+                if session.off_reply_received_ns is not None:
+                    result["off_reply_received_ns"] = session.off_reply_received_ns
             observe("UNKNOWN")
             if isinstance(exc, LoadError):
                 cleanup["error"] = exc.as_dict()

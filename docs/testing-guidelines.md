@@ -437,8 +437,11 @@ Transient timing tests. Follow the
 Run `tests/test_protection.py`, Protection cases in `tests/test_worker.py`
 and `tests/test_live_validation_script.py`, and the affected help/version
 checks. Run Ruff on modified Python files. Recording Fake VISA covers the
-Input OFF guards, identity, exact readback, partial or uncertain writes and
-Clear's one bounded OFF attempt. The routine PowerShell tests exercise
+Input OFF guards, identity, exact readback, partial or uncertain writes,
+restoration before automatic Clear after physical isolation, delayed condition
+readback without retrying Clear, and Clear's one bounded OFF attempt. Verify
+that failed bounded Clear retains its error and restores/verifies settings only
+with trusted communication and Input OFF. The routine PowerShell tests exercise
 `preflight-cli.ps1 -ProtectionOnly` and the complete plan in the noninteractive
 refusal report for `live-cli-check.ps1 -Modes protection`, with a fictional
 Resource and a VISA blocker. When changing the PlanOnly exit itself, also
@@ -586,12 +589,19 @@ a recording fake. Check the interactive Script boundary for all 21 single
 modes, mixed selections and Full: selected preparation, cutoff and slot
 overwrite notices precede the initial Enter; source setup appears only for
 source-connected trials, not read-only or Input-OFF-only selections; no repeat
-readiness, slot text
-or Input OFF confirmation follows it. Isolation-only runs require no second
-Enter; powered-to-isolated runs pause once for the actual disconnection.
-Protection prompts only for actual source isolation before Clear and
-reconnection before the next powered trial, not for each Input ON. EXTERNAL
-Trigger retains only the physical pulse after capture-ready. Verify cancellation
+general readiness, slot text or Input OFF confirmation follows it. Isolation-only
+runs require no second Enter; powered-to-isolated runs pause once for actual
+disconnection. Protection prompts only for source isolation before automatic
+restoration/Clear and reconnection before the next powered trial, not for each
+Input ON. EXTERNAL retains its equipment readiness confirmation with Input OFF
+immediately before its trial and the physical pulse after capture-ready.
+Exercise the real Protection restore/clear orchestration with simulated
+command exchanges for success, persistent faults, late clean status,
+uncertain communication and unexpected ON. Check candidate Low CC range and
+current resolution, exact original restoration, and classify a confirmed software Trigger
+write separately from failed waveform acceptance. Preserve safe LIST nested
+errors, discharge cutoff evidence and late OFF timestamps without relaxing
+the existing limits. Verify cancellation
 and unchanged per-request CLI confirmation, OFF/restore and refusal rules
 without real VISA. Use the existing PowerShell harness and relevant plan tests;
 do not repeat unrelated Core or Worker tests for this Script-only change. Check
@@ -615,6 +625,19 @@ For automatic Contributor Trigger observation, exercise the affected
 `test_trigger.py` waveform cases and `test_live_validation_script.py` plan,
 refusal, deadline and cleanup cases. Check level order, timing brackets,
 missing or sparse samples, finite LIST RUN completion versus a stuck final
-dwell, rejection of infeasible timing before VISA, and source-specific dispatch with a final Input ON guard (no extra software trigger for TIMER or EXTERNAL). Only EXTERNAL retains the physical signal after initial preparation; sampled
-instrument evidence is not independent calibration.
+dwell, rejection of infeasible timing before VISA, and source-specific dispatch
+with a final Input ON guard (no extra software trigger for TIMER or EXTERNAL).
+Only EXTERNAL retains the separate readiness confirmation with Input OFF and
+physical signal after capture-ready. Refusing readiness must not enable Input
+and must retain guarded LIST exit and Trigger restoration. Sampled instrument
+evidence is not independent calibration.
 
+
+For Trigger failure attribution, include known pre-write identity/session failures
+and unknown process termination. Check the capture guard's LIST diagnostics as
+well as the initial list-status. For isolated LIST Save/Recall, verify the failing
+phase and first differing field without publishing private working-buffer or slot
+values; malformed step replies retain step and bounds, not raw text. Cover the
+conservative zero-selector refusal before writes, trusted unexpected ON followed
+by OFF during Protection Clear, and late Workflow OFF reply in the shareable
+report using the existing harnesses.

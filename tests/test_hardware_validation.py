@@ -162,16 +162,40 @@ def test_isolated_auxiliary_trial_restores_or_stops_without_input_on(monkeypatch
 
 
 
-@pytest.mark.parametrize("trial,function,enabled", [
-    ("fixed-cc", "VOLT", False), ("fixed-cv", "CURR", False), ("fixed-cr", "CURR", False),
-    ("fixed-cw", "CURR", False), ("transient", "VOLT", False), ("average", "CURR", False),
-    ("fixed-cc", "CURR", True), ("transient", "CURR", True),
+@pytest.mark.parametrize("trial,function,enabled,fault", [
+    ("fixed-cc", "VOLT", False, None), ("fixed-cv", "CURR", False, None),
+    ("fixed-cr", "CURR", False, None), ("fixed-cw", "CURR", False, None),
+    ("transient", "VOLT", False, None), ("average", "CURR", False, None),
+    ("fixed-cc", "CURR", True, None), ("fixed-cc", "CURR", False, None),
+    ("transient", "CURR", True, None),
+    ("fixed-cc", "VOLT", False, "selector"), ("fixed-cc", "VOLT", False, "within"),
+    ("fixed-cc", "VOLT", False, "outside"), ("fixed-cc", "VOLT", False, "zero_selector"),
+    ("fixed-cc", "VOLT", False, "function_changed"),
 ])
-def test_automatic_readback_trials_restore_original_mode_and_settings(monkeypatch, capsys, trial, function, enabled):
+def test_automatic_readback_trials_restore_original_mode_and_settings(
+        monkeypatch, capsys, trial, function, enabled, fault):
     fake = ValidationFake()
     fake.function = function
     fake.transient = enabled
     fake.range = 6
+    if trial == "fixed-cc" and function == "VOLT":
+        fake.range = fake.current = 0.1
+    elif trial == "fixed-cc" and not enabled:
+        fake.range = 60
+    if fault == "zero_selector":
+        fake.range = 0
+    original_range = fake.range
+    if fault and fault != "zero_selector":
+        def inject(device, command):
+            if command == "CURR 0.2":
+                if fault == "selector":
+                    device.range = 6.0  # A Low range reply need not echo the candidate.
+                elif fault == "function_changed":
+                    device.function = "POW"
+                else:
+                    device.current = {"within": 0.20004, "outside": 0.20006}[fault]
+
+        fake.after_write = inject
     fake.values.update({"INP:TIM": "0", "TRIG:TIM": "5", "SENS:AVER:COUN": "14"})
     initial = dict(fake.values)
     current = fake.current
@@ -179,13 +203,45 @@ def test_automatic_readback_trials_restore_original_mode_and_settings(monkeypatc
     args = ["contributor-settings", "--trial", trial, "--resource", RESOURCE, "--json"]
     assert cli.main(args) == 2 and not fake.calls
     capsys.readouterr()
-    assert cli.main([*args, "--confirm-isolated"]) == 0
+    failed = fault in {"outside", "zero_selector", "function_changed"}
+    assert cli.main([*args, "--confirm-isolated"]) == (3 if failed else 0)
     output = capsys.readouterr()
-    result = json.loads(output.out)["result"]
+    payload = json.loads(output.out)
+    if fault == "zero_selector":
+        assert payload["error"]["code"] == "readback_mismatch"
+        assert payload["error"]["details"]["query"] == "CURR:RANG?"
+        assert payload["error"]["details"]["no_settings_written"]
+        assert all("?" in call for call in fake.calls)
+        assert fake.current == current and fake.range == original_range and fake.function == function
+        return
+    if fault == "function_changed":
+        assert payload["error"]["code"] == "settings_restore_unconfirmed"
+        details = payload["error"]["details"]
+        assert details["manual_action_required"] and details["original_error"]["code"] == "readback_mismatch"
+        assert details["original_error"]["details"]["query"] == "FUNC?"
+        assert fake.function == "POW" and not fake.input
+        assert [call for call in fake.calls if call.startswith(("CURR:RANG ", "CURR "))] == [
+            "CURR:RANG 0.2", "CURR 0.2"]
+        assert "INP ON" not in fake.calls
+        return
+    if failed:
+        assert payload["error"]["code"] == "readback_mismatch"
+        result = payload["error"]["details"]
+        assert result["query"] == "CURR?"
+    else:
+        result = payload["result"]
     assert result["restored"] and result["input_state"] == "OFF"
     assert fake.function == function and fake.mode == "FIX"
     assert not fake.input and fake.transient == enabled
-    assert fake.current == current
+    assert fake.current == current and fake.range == original_range
+    if trial == "fixed-cc":
+        writes = [call for call in fake.calls if call.startswith(("CURR:RANG ", "CURR "))]
+        if original_range == 0.1:
+            assert writes == ["CURR:RANG 0.2", "CURR 0.2", "CURR:RANG 0.1", "CURR 0.1"]
+        elif original_range == 6:
+            assert writes == ["CURR:RANG 0.1", "CURR 0.1", "CURR:RANG 6.0", "CURR 0.0"]
+        else:
+            assert writes == ["CURR 0.1", "CURR 0.0"]
     assert "INP ON" not in fake.calls
     for key, value in initial.items():
         try:
@@ -797,20 +853,51 @@ def test_configuration_readback_list_reads_observed_steps_and_rejects_bad_count(
     with pytest.raises(LoadError) as failure:
         control.execute("list-status", resource=RESOURCE, hardware_validation="readback")
     assert failure.value.code == "invalid_response" and failure.value.exit_code == 3
-    assert failure.value.details == {"query": "LIST:WID? 1", "step": 1, "observed": "1E+40"}
+    assert failure.value.details == {
+        "query": "LIST:WID? 1", "step": 1, "observed": "1E+40",
+        "minimum": "0.00002", "maximum": "3600",
+    }
 
     fake_visa.responses["LIST:WID? 1"] = readings["LIST:WID? 1"]
     fake_visa.responses.update({"LIST:RANG?": "6", "LIST:SLEW? 1": "2"})
     with pytest.raises(LoadError) as failure:
         control.execute("list-status", resource=RESOURCE, hardware_validation="readback")
-    assert failure.value.code == "invalid_response" and failure.value.details["query"] == "LIST:SLEW? 1"
+    assert failure.value.code == "invalid_response"
+    assert failure.value.details == {
+        "query": "LIST:SLEW? 1", "step": 1, "observed": "2",
+        "minimum": "0.0001", "maximum": "0.25",
+    }
 
     fake_visa.calls.clear()
+    fake_visa.responses["LIST:SLEW? 1"] = "not-a-number"
+    with pytest.raises(LoadError) as failure:
+        control.execute("list-status", resource=RESOURCE, hardware_validation="readback")
+    assert failure.value.code == "invalid_response"
+    assert failure.value.details == {
+        "query": "LIST:SLEW? 1", "step": 1, "minimum": "0.0001", "maximum": "0.25",
+        "parse_failure": True,
+    }
+
+    fake_visa.calls.clear()
+    fake_visa.responses["LIST:SLEW? 1"] = readings["LIST:SLEW? 1"]
     fake_visa.responses["LIST:STEP?"] = "85"
     with pytest.raises(LoadError) as failure:
         control.execute("list-status", resource=RESOURCE, hardware_validation="readback")
     assert failure.value.code == "invalid_response" and failure.value.exit_code == 3
+    assert failure.value.details == {
+        "query": "LIST:STEP?", "observed": "85", "minimum": "2", "maximum": "84",
+    }
     assert "LIST:LEV? 1" not in fake_visa.calls
+
+    fake_visa.calls.clear()
+    fake_visa.responses["LIST:STEP?"] = readings["LIST:STEP?"]
+    fake_visa.responses["LIST:RANG?"] = "61"
+    with pytest.raises(LoadError) as failure:
+        control.execute("list-status", resource=RESOURCE, hardware_validation="readback")
+    assert failure.value.code == "invalid_range_readback"
+    assert failure.value.details == {
+        "query": "LIST:RANG?", "observed": "61", "minimum": "0", "maximum": "60.0",
+    }
 
 
 def test_configuration_readback_mismatch_in_simulated_von_write_is_reported():

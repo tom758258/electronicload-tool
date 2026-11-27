@@ -467,7 +467,9 @@ def test_workflow_contributor_cli_uses_one_readonly_visa_session(fake_visa, caps
 
 
 @pytest.mark.parametrize("scenario", ["timed", "timed_latency", "timed_fractional_clock", "early_wake", "early_drop", "late_drop",
-                                       "sample_gap", "capacity", "stop", "lost", "late_off", "voltage"])
+                                       "sample_gap", "capacity", "stop", "lost", "late_off", "late_off_reply",
+                                       "late_on_reply", "late_off_budget_reply", "voltage",
+                                       "discharge_drop", "discharge_input_off"])
 def test_contributor_cc_owns_bounded_on_and_cleanup(clock, monkeypatch, capsys, scenario):
     class PhysicalLoad(ValidationFake):
         query_delay = 0.15
@@ -486,6 +488,8 @@ def test_contributor_cc_owns_bounded_on_and_cleanup(clock, monkeypatch, capsys, 
                 self.off_at = clock.now
                 if scenario == "late_off":
                     clock.now = self.dispatched + 10.01  # Native backend did not meet the configured timeout.
+                if scenario == "late_off_budget_reply":
+                    clock.now = self.dispatched + 9.0
 
         def query(self, command):
             if (scenario in {"timed_latency", "timed_fractional_clock", "late_drop", "sample_gap"}
@@ -496,9 +500,23 @@ def test_contributor_cc_owns_bounded_on_and_cleanup(clock, monkeypatch, capsys, 
                 delay = 0.45 if scenario == "sample_gap" and clock.now - self.dispatched > 2 else self.query_delay
                 clock.wait(delay)
                 return response
+            if (command == "INP:STAT?"
+                    and scenario in {"late_off_reply", "late_on_reply", "late_off_budget_reply"}
+                    and hasattr(self, "off_at")):
+                response = super().query(command)
+                clock.now = self.dispatched + 10.01
+                return "1" if scenario == "late_on_reply" else response
             if command == "MEAS:CURR?" and scenario == "lost":
                 self.calls.append(command)
                 raise TimeoutError()
+            if command == "MEAS:CURR?" and self.input:
+                if scenario == "discharge_drop":
+                    self.calls.append(command)
+                    return "0"
+                if scenario == "discharge_input_off" and self.calls.count(command) == 1:
+                    self.input = False
+                    self.calls.append(command)
+                    return "0.1"
             if command == "MEAS:VOLT?" and scenario == "voltage" and self.input:
                 self.calls.append(command)
                 return "4.4"
@@ -534,7 +552,7 @@ def test_contributor_cc_owns_bounded_on_and_cleanup(clock, monkeypatch, capsys, 
         monkeypatch.setattr(clock, "wait", drop_early)
     clock.now = 10.000000123 if scenario == "timed_fractional_clock" else 10
     reported_start = []
-    discharge = scenario in {"capacity", "voltage"}
+    discharge = scenario in {"capacity", "voltage", "discharge_drop", "discharge_input_off"}
     command = "cc-discharge" if discharge else "cc-timed-load"
     settings = (["--cutoff-voltage", "4.5", "--cutoff-capacity-ah", "0.00010", "--interval-s", "0.5",
                  "--timeout-s", "6"] if discharge else ["--duration-s", "5"])
@@ -553,11 +571,32 @@ def test_contributor_cc_owns_bounded_on_and_cleanup(clock, monkeypatch, capsys, 
         assert "INP OFF" not in fake.calls and fake.calls[-1] == "MEAS:CURR?"
         return
     assert fake.calls.count("INP OFF") == 1
-    if scenario == "late_off":
+    if scenario in {"late_off", "late_off_reply", "late_on_reply", "late_off_budget_reply"}:
         assert status == 3 and outcome["error"]["code"] == "workflow_cleanup_unconfirmed"
-        assert outcome["error"]["details"]["manual_action_required"]
+        details = outcome["error"]["details"]
+        assert details["manual_action_required"] and not details["cleanup"]["off_confirmed"]
+        assert details["input_state"] == "UNKNOWN"
+        assert details["off_write_started_ns"] >= details["on_write_started_ns"]
+        assert "off_confirmed_ns" not in details
+        if scenario in {"late_off_reply", "late_off_budget_reply"}:
+            assert details["off_reply_received_ns"] - details["on_write_started_ns"] > 10**10
+            expected = "workflow_timeout" if scenario == "late_off_budget_reply" else "input_off_not_confirmed"
+            assert details["cleanup"]["error"]["code"] == expected
+        else:
+            assert "off_reply_received_ns" not in details
         return
     assert not fake.input
+    if scenario in {"discharge_drop", "discharge_input_off"}:
+        assert status == 3 and outcome["error"]["code"] == "workflow_load_unconfirmed"
+        details = outcome["error"]["details"]
+        expected = {"voltage_v": 5, "current_a": 0}
+        if scenario == "discharge_input_off":
+            expected.update(current_a=0.1, input_state="OFF")
+        assert details["failed_measurement"] == expected
+        assert details["sample_count"] == (1 if scenario == "discharge_input_off" else 0)
+        assert details["capacity_ah"] == 0 and details["cleanup"]["off_confirmed"]
+        assert details["off_confirmed_ns"] - details["on_write_started_ns"] <= 10**10
+        return
     if scenario in {"stop", "voltage", "early_drop", "sample_gap"} or (scenario == "late_drop" and status != 0):
         assert status == 3
         error = outcome["error"]

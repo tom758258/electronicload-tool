@@ -1,6 +1,7 @@
 """Trigger Source behavior, physical command routing with recording fakes and CLI JSON."""
 
 import json
+from decimal import Decimal
 from threading import Event
 
 import pytest
@@ -146,6 +147,11 @@ def test_contributor_list_requires_independent_recall_then_restores_working_buff
     else:
         assert status == 3
         assert result["error"]["code"] == "readback_mismatch" and result["error"]["details"]["restored"]
+        details = result["error"]["details"]
+        assert details["list_phase"] in {"Baseline Recall", "Final Recall"}
+        assert details["query"] == "LIST:WID? 1" and details["step"] == 1
+        assert Decimal(details["expected"]) in (1, 2, 3)
+        assert "observed" not in details or Decimal(details["observed"]) != Decimal(details["expected"])
     assert fake.list_steps == start and fake.mode == "FIX" and not fake.input
     assert now < 301_000_000_000
     writes = [command for command in fake.calls if "?" not in command]
@@ -214,7 +220,9 @@ def test_readback_list_buffer_without_slot_or_trigger(
         return
     if ignored_width:
         assert status == 3 and outcome["error"]["code"] == "readback_mismatch"
-        assert outcome["error"]["details"]["restored"]
+        details = outcome["error"]["details"]
+        assert details == {"list_phase": "Automatic readback", "query": "LIST:WID? 1",
+                           "step": 1, "expected": "1", "restored": True, "input_state": "OFF"}
     else:
         assert status == 0
         result = outcome["result"]
@@ -309,6 +317,8 @@ def test_contributor_trigger_observation_plan_and_refusal_before_visa(monkeypatc
 @pytest.mark.parametrize("source,scenario", [
     ("BUS", "input_drop"), ("BUS", "completed"), ("BUS", "stuck"),
     ("EXTERNAL", "completed"), ("EXTERNAL", "stuck"),
+    ("BUS", "identity"), ("BUS", "open_failure"), ("BUS", "range_mismatch"),
+    ("EXTERNAL", "step_mismatch"),
 ])
 def test_automatic_list_observation_requires_input_and_run_completion(monkeypatch, capsys, source, scenario):
     fake = TriggerFake()
@@ -331,6 +341,12 @@ def test_automatic_list_observation_requires_input_and_run_completion(monkeypatc
 
     def observe_query(command):
         nonlocal now, triggered, current_reads
+        if scenario == "identity" and command == "*IDN?":
+            return "ITECH Ltd,IT8800,SYNTHETIC,1.0"
+        if scenario == "range_mismatch" and command == "LIST:RANG?":
+            return "61"
+        if scenario == "step_mismatch" and command == "LIST:SLEW? 1":
+            return "0.5"
         if command == "MEAS:CURR?":
             current_reads += 1
             if source == "EXTERNAL" and current_reads == 2:
@@ -356,6 +372,11 @@ def test_automatic_list_observation_requires_input_and_run_completion(monkeypatc
     monkeypatch.setattr(fake, "write", observe_write)
     monkeypatch.setattr(hardware_validation, "monotonic_ns", lambda: now)
     session(fake, monkeypatch)
+    if scenario == "open_failure":
+        def refuse_open(_resource):
+            raise LoadError("visa_open_failed", "Synthetic open failure.", 3)
+
+        monkeypatch.setattr(control, "open_session", refuse_open)
     expected = {"function": "LIST", "trigger": {"source": source},
                 "configuration": {"range": "low", "repeat_count": 1, "steps": steps}}
     args = ["trigger-observe", "--hardware-validation", "trigger",
@@ -364,6 +385,24 @@ def test_automatic_list_observation_requires_input_and_run_completion(monkeypatc
             "--resource", RESOURCE, "--json"]
     code = cli.main(args)
     result = json.loads(capsys.readouterr().out)
+    if scenario in {"identity", "open_failure", "range_mismatch", "step_mismatch"}:
+        assert code != 0
+        error = result["error"]
+        assert error["code"] == {"identity": "identity_mismatch", "open_failure": "visa_open_failed",
+                                 "range_mismatch": "readback_mismatch", "step_mismatch": "readback_mismatch"}[scenario]
+        details = error["details"]
+        assert details["observation_phase"] == "preflight"
+        assert details["software_trigger_write_attempted"] is False
+        assert details["software_trigger_write_confirmed"] is False
+        assert details["sample_count"] == 0
+        if scenario in {"range_mismatch", "step_mismatch"}:
+            assert details["query"] == ("LIST:RANG?" if scenario == "range_mismatch" else "LIST:SLEW? 1")
+            assert Decimal(details["observed"]) == (Decimal(61) if scenario == "range_mismatch" else Decimal("0.5"))
+            assert Decimal(details["expected"]) == (Decimal(6) if scenario == "range_mismatch" else Decimal("0.1"))
+            if scenario == "step_mismatch":
+                assert details["step"] == 1
+        assert not any(call in {"*TRG", "TRIG:IMM", "INP ON", "INP OFF"} for call in fake.calls)
+        return
     if scenario == "completed":
         assert code == 0
         evidence = result["result"]["observation"]
@@ -375,6 +414,12 @@ def test_automatic_list_observation_requires_input_and_run_completion(monkeypatc
         assert code != 0
         assert result["error"]["code"] == ("input_not_on" if scenario == "input_drop"
                                             else "trigger_observation_unconfirmed")
+        details = result["error"]["details"]
+        assert details["trigger_source"] == source
+        assert details["sample_count"] == len(details["samples"])
+        assert details["software_trigger_write_attempted"] is (source == "BUS" and scenario != "input_drop")
+        assert details["software_trigger_write_confirmed"] is details["software_trigger_write_attempted"]
+        assert details["observation_phase"] in ("preflight", "baseline", "dispatch", "waveform")
     assert "MEAS:CURR?" in fake.calls
     assert fake.calls.count("*TRG") == int(source == "BUS" and scenario != "input_drop")
     assert not any(call in {"INP ON", "INP OFF"} for call in fake.calls)

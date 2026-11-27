@@ -176,7 +176,8 @@ def _transient(session, selection, *, summary=False):
 def _list_integer(session, query, minimum, maximum):
     value = c._decimal_readback(session, query)
     if not minimum <= value <= maximum or value != value.to_integral_value():
-        raise LoadError("invalid_response", "Invalid LIST count.", 3, query=query)
+        raise LoadError("invalid_response", "Invalid LIST count.", 3, query=query, observed=str(value),
+                        minimum=str(minimum), maximum=str(maximum))
     return int(value)
 
 
@@ -185,10 +186,13 @@ def _list_configuration(session, *, summary=False, expected_count=None):
     raw = c._decimal_readback(session, range_query)
     if not 0 <= raw <= c.RANGE_LIMITS["high"]:
         raise LoadError("invalid_range_readback", "LIST range is outside model limits.", 3,
-                        query=range_query)
+                        query=range_query, observed=str(raw), minimum="0",
+                        maximum=str(c.RANGE_LIMITS["high"]))
     count = _list_integer(session, count_query, 2, 84)
     if expected_count is not None and count != expected_count:
-        raise LoadError("readback_mismatch", "LIST step count changed during the settings trial.", 3)
+        raise LoadError("readback_mismatch", "LIST step count changed during the settings trial.", 3,
+                        query=count_query, expected=str(expected_count), observed=str(count),
+                        minimum="2", maximum="84")
     repeat = _list_integer(session, repeat_query, 1, 65536)
     ranges = {value: name for name, value in c.RANGE_LIMITS.items()}
     metadata = {"range": ranges.get(raw), "range_readback_a": float(raw),
@@ -207,10 +211,15 @@ def _list_configuration(session, *, summary=False, expected_count=None):
         for field, template in LIST_STEP_QUERIES.items():
             query = template.format(index)
             minimum, maximum = limits[field]
-            value = c._decimal_readback(session, query)
+            try:
+                value = c._decimal_readback(session, query)
+            except LoadError as exc:
+                if exc.code == "invalid_response":
+                    exc.details.update(step=index, minimum=str(minimum), maximum=str(maximum), parse_failure=True)
+                raise
             if not minimum <= value <= maximum:
                 raise LoadError("invalid_response", "LIST step readback is outside model limits.", 3,
-                                query=query, step=index, observed=str(value))
+                                query=query, step=index, observed=str(value), minimum=str(minimum), maximum=str(maximum))
             step[field] = value
         steps.append(step)
     return {**metadata, "steps": steps}
