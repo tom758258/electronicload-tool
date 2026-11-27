@@ -1388,7 +1388,24 @@ Input OFF.
 
 `measurement-extensions` queries native Min/Max and Discharge values and
 verifies Average set to 8. The Average case leaves that setting after operator
-confirmation.
+confirmation. When combined with source-connected trials, its setting case runs
+after those trials (including Trigger), before the isolated settings batch.
+
+For every selection containing source-connected trials, the script reads the
+original measurement Average count privately after the common prechecks and
+initial diagnostic readbacks. With Input OFF it sets and verifies Average 2
+before those trials, regardless of the incoming count. The initial operator
+authorization covers this setting. On successful completion of the
+source-connected trials it restores and verifies the original count, unless
+Measurement Extensions is selected: that mode's final Average 8 case retains
+its existing leave-at-8 behavior. A failed or interrupted run does not open
+another VISA session just to recover Average; independently confirm Input OFF
+and safe communication before using the private recovery baseline. The
+shareable plan uses an original-value placeholder, not the private count.
+PlanOnly and noninteractive refusal perform no hardware I/O. Pure diagnostic
+and isolation-only selections do not change Average except in their explicitly
+selected Average test. The baseline does not change Product/Worker LIVE,
+physical timing, current tolerances, safety interlocks or TRACE's own filter.
 
 For `auxiliary-controls` and `list-cc`, physically disconnect the source and
 DUT. Standalone trials require Fixed CC with Input, Short, Transient and Input
