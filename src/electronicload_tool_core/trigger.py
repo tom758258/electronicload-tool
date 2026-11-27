@@ -177,6 +177,10 @@ def sampled_waveform_evidence(samples, *, source, level_a, level_b, width_a,
         pattern = ["Z", *(["A", "B"] * repeats)]
         if labels != pattern:
             return None
+        # Every A/B plateau sample must have a subsequent running-state
+        # readback. The zero baseline and excluded terminal current do not.
+        if any(item.get("list_running") is not True for _, values in runs[1:] for item in values):
+            return None
         if not all(plateau(index, widths[(index - 1) % 2],
                            terminal_s=terminal if index == len(pattern) - 1 else None)
                    for index in range(1, len(pattern))):

@@ -392,6 +392,8 @@ def test_sampled_trigger_evidence_requires_levels_and_time_brackets(source, scen
     ("EXTERNAL", "long_transition"), ("BUS", "early_end"),
     ("EXTERNAL", "incompatible_widths"), ("BUS", "run_gap"),
     ("EXTERNAL", "width_gap"), ("BUS", "sparse"),
+    ("BUS", "expected"), ("BUS", "late_run"), ("EXTERNAL", "late_run"),
+    ("BUS", "terminal_only_run"), ("EXTERNAL", "terminal_only_run"),
 ])
 def test_sampled_list_trigger_with_query_latency(source, scenario):
     # Synthetic 150 ms current and RUN queries; the terminal current is not
@@ -427,11 +429,17 @@ def test_sampled_list_trigger_with_query_latency(source, scenario):
         samples[-1]["list_status_completed_s"] += 0.1
     elif scenario == "sparse":
         del samples[5]
+    elif scenario in {"late_run", "terminal_only_run"}:
+        # A complete-looking current waveform is not a running LIST if RUN
+        # starts only during B or at the final nonterminal sample.
+        first_running = 9 if scenario == "late_run" else len(samples) - 2
+        for index, sample in enumerate(samples):
+            sample["list_running"] = first_running <= index < len(samples) - 1
     evidence = sampled_waveform_evidence(
         samples, source=source, level_a=Decimal("0.1"), level_b=Decimal("0.2"),
         width_a=width_a, width_b=width_b, repeats=repeats,
     )
-    assert (evidence is not None) is (scenario == "repeat")
+    assert (evidence is not None) is (scenario in {"expected", "repeat"})
     if evidence:
         assert evidence["events_confirmed"] == repeats
         assert evidence["list_run_completed"] is True
