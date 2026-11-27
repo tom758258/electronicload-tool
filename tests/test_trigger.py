@@ -387,6 +387,64 @@ def test_sampled_trigger_evidence_requires_levels_and_time_brackets(source, scen
             assert evidence["list_run_completed"] is True
 
 
+@pytest.mark.parametrize("source,scenario", [
+    ("BUS", "repeat"), ("EXTERNAL", "repeat"), ("BUS", "bad_transition"),
+    ("EXTERNAL", "long_transition"), ("BUS", "early_end"),
+    ("EXTERNAL", "incompatible_widths"), ("BUS", "run_gap"),
+    ("EXTERNAL", "width_gap"), ("BUS", "sparse"),
+    ("BUS", "expected"), ("BUS", "late_run"), ("EXTERNAL", "late_run"),
+    ("BUS", "terminal_only_run"), ("EXTERNAL", "terminal_only_run"),
+])
+def test_sampled_list_trigger_with_query_latency(source, scenario):
+    # Synthetic 150 ms current and RUN queries; the terminal current is not
+    # evidence of another running plateau. No physical run data is used.
+    currents = [0, 0, 0.06, *([0.1] * 5), 0.15, *([0.2] * 5), 0.2]
+    repeats = 1
+    width_a = width_b = 2
+    if scenario == "repeat":
+        currents = [0, 0, 0.06, *([0.1] * 5), 0.15, *([0.2] * 6),
+                    0.15, *([0.1] * 6), 0.15, *([0.2] * 5), 0.2]
+        repeats = 2
+    elif scenario == "bad_transition":
+        currents[8] = 0.35
+    elif scenario == "long_transition":
+        currents[7:10] = [0.15] * 3
+    elif scenario == "early_end":
+        del currents[-4:-2]
+    elif scenario == "incompatible_widths":
+        # Each dwell can fit separately, but not the same LIST timeline.
+        width_b = 2.1
+    elif scenario == "width_gap":
+        width_a = 1.7  # Width / 4 is stricter than 0.5 s.
+    samples = []
+    for index, current in enumerate(currents):
+        t = index * 0.3 + 0.15
+        sample = {"started_s": t, "completed_s": t + 0.15, "current_a": current,
+                  "list_running": 0 < index < len(currents) - 1,
+                  "list_status_started_s": t + 0.15, "list_status_completed_s": t + 0.3}
+        if index == 0:
+            sample.update(list_status_started_s=0, list_status_completed_s=0.15)
+        samples.append(sample)
+    if scenario == "run_gap":
+        samples[-1]["list_status_completed_s"] += 0.1
+    elif scenario == "sparse":
+        del samples[5]
+    elif scenario in {"late_run", "terminal_only_run"}:
+        # A complete-looking current waveform is not a running LIST if RUN
+        # starts only during B or at the final nonterminal sample.
+        first_running = 9 if scenario == "late_run" else len(samples) - 2
+        for index, sample in enumerate(samples):
+            sample["list_running"] = first_running <= index < len(samples) - 1
+    evidence = sampled_waveform_evidence(
+        samples, source=source, level_a=Decimal("0.1"), level_b=Decimal("0.2"),
+        width_a=width_a, width_b=width_b, repeats=repeats,
+    )
+    assert (evidence is not None) is (scenario in {"expected", "repeat"})
+    if evidence:
+        assert evidence["events_confirmed"] == repeats
+        assert evidence["list_run_completed"] is True
+
+
 @pytest.mark.parametrize("scenario", ["observed", "wrong_order", "bad_transition",
                                       "long_transition", "missing_b", "short_a"])
 def test_hold_first_trigger_uses_fixed_cc_baseline_and_bounded_transition(scenario):
@@ -539,8 +597,17 @@ def test_automatic_list_observation_requires_input_and_run_completion(monkeypatc
             current_reads += 1
             if source == "EXTERNAL" and current_reads == 2:
                 triggered = now
-            fake.values["MEAS:CURR"] = ("0" if triggered is None else
-                                       "0.1" if now - triggered < 2_000_000_000 else "0.2")
+            if scenario == "completed" and triggered is not None:
+                # Model the two bounded transition readings with sequential
+                # 150 ms Current/RUN exchanges and a four-second LIST.
+                elapsed = now - triggered
+                fake.values["MEAS:CURR"] = ("0" if elapsed < 300_000_000 else
+                                           "0.06" if elapsed < 600_000_000 else
+                                           "0.1" if elapsed < 2_100_000_000 else
+                                           "0.15" if elapsed < 2_400_000_000 else "0.2")
+            else:
+                fake.values["MEAS:CURR"] = ("0" if triggered is None else
+                                           "0.1" if now - triggered < 2_000_000_000 else "0.2")
         if command == "STAT:QUES:COND?":
             fake.values["STAT:QUES:COND"] = str(128 if triggered is not None and
                 (scenario == "stuck" or now - triggered < 4_000_000_000) else 0)

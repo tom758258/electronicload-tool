@@ -115,12 +115,15 @@ def sampled_waveform_evidence(samples, *, source, level_a, level_b, width_a,
             runs.append((label, [sample]))
 
     # Only bounded, in-range transitions between different known plateaus
-    # may be skipped for Transient pulses. Retain their measured duration in
-    # the boundary uncertainty; never merge disjoint same-level plateaus.
+    # may be skipped for Transient pulses and finite LIST steps. Retain their
+    # measured duration in the boundary uncertainty; never merge disjoint
+    # same-level plateaus.
     transition_spans = {}
-    if not is_list and (observed_hold_origin or source == "TIMER"):
+    if is_list or observed_hold_origin or source == "TIMER":
         stable = []
         allowed = {("S", "A"), ("A", "B")} if observed_hold_origin else {("B", "A"), ("A", "B")}
+        if is_list:
+            allowed = {("Z", "A"), ("A", "B"), ("B", "A")}
         for index, (label, values) in enumerate(runs):
             if label == "?" and 0 < index < len(runs) - 1:
                 left, right = runs[index - 1][0], runs[index + 1][0]
@@ -134,6 +137,8 @@ def sampled_waveform_evidence(samples, *, source, level_a, level_b, width_a,
             stable.append((label, values))
         runs = stable
 
+    list_brackets = []
+
     def plateau(index, duration, *, terminal_s=None):
         values = runs[index][1]
         if len(values) < 2:
@@ -143,7 +148,7 @@ def sampled_waveform_evidence(samples, *, source, level_a, level_b, width_a,
         if first["completed_s"] - before["started_s"] > 2 * gap + transition_spans.get(index, 0):
             return False
         lower = last["started_s"] - first["completed_s"]
-        if lower + 2 * gap < duration:
+        if not is_list and lower + 2 * gap < duration:
             return False
         if index + 1 == len(runs):
             if terminal_s is None:
@@ -154,6 +159,17 @@ def sampled_waveform_evidence(samples, *, source, level_a, level_b, width_a,
         if after_completed - last["started_s"] > 2 * gap + transition_spans.get(index + 1, 0):
             return False
         upper = after_completed - before["started_s"]
+        if is_list:
+            # Use the observed local edge bounds, not an extra global margin.
+            # RUN bounds the end of the final dwell; the terminal current is
+            # still excluded from the running plateau evidence.
+            end_lower = last_running if terminal_s is not None else last["started_s"]
+            entry_lower = max(before["started_s"],
+                              first["completed_s"] - gap - transition_spans.get(index, 0))
+            exit_upper = min(after_completed, end_lower + gap + transition_spans.get(index + 1, 0))
+            lower = end_lower - first["completed_s"]
+            upper = exit_upper - entry_lower
+            list_brackets.append((entry_lower, first["completed_s"], end_lower, exit_upper))
         return lower <= duration <= upper
 
     labels = [run[0] for run in runs]
@@ -161,9 +177,25 @@ def sampled_waveform_evidence(samples, *, source, level_a, level_b, width_a,
         pattern = ["Z", *(["A", "B"] * repeats)]
         if labels != pattern:
             return None
+        # Every A/B plateau sample must have a subsequent running-state
+        # readback. The zero baseline and excluded terminal current do not.
+        if any(item.get("list_running") is not True for _, values in runs[1:] for item in values):
+            return None
         if not all(plateau(index, widths[(index - 1) % 2],
                            terminal_s=terminal if index == len(pattern) - 1 else None)
                    for index in range(1, len(pattern))):
+            return None
+        # All dwell boundaries must agree on one finite LIST timeline. A
+        # shared transition cannot be spent independently on both steps.
+        earliest, latest = float("-inf"), float("inf")
+        elapsed = 0.0
+        for index, (entry_lower, entry_upper, exit_lower, exit_upper) in enumerate(list_brackets):
+            earliest = max(earliest, entry_lower - elapsed)
+            latest = min(latest, entry_upper - elapsed)
+            elapsed += widths[index % 2]
+            earliest = max(earliest, exit_lower - elapsed)
+            latest = min(latest, exit_upper - elapsed)
+        if earliest > latest:
             return None
         events = repeats
     else:
