@@ -31,22 +31,35 @@ def test_native_measurement_contributor_cli_reads_verified_hardware(fake_visa, c
 @pytest.mark.parametrize("command,arguments,expected", [
     ("scpi-version", [], {"scpi_version": "1999.0"}),
     ("display-mode", [], {"display_mode": "NORMAL"}),
-    ("scpi-error-next", [], {"error_code": 0, "message": "No error"}),
-    ("scpi-error-next", ["--all"], {"errors": [], "read_count": 1, "max_reads": 20,
+    ("error", [], {"error_code": 0, "message": "No error"}),
+    ("error", ["--all"], {"errors": [], "read_count": 1, "max_reads": 20,
                                     "empty_confirmed": True, "limit_reached": False}),
 ])
-def test_system_query_cli_simulation_and_live_refusal(capsys, fake_visa, command, arguments, expected):
+def test_system_query_cli_simulation_and_usb_live(capsys, fake_visa, command, arguments, expected):
     assert main([command, "--simulate", "--json", *arguments]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] and payload["result"] == expected
-    for flags in ([], ["--validation-allow-pending-live-support"]):
-        assert main([command, "--resource", RESOURCE, "--json", *arguments, *flags]) == 2
-        assert json.loads(capsys.readouterr().out)["error"]["code"] == "unsupported_live_scope"
+    query, reply = {
+        "scpi-version": ("SYST:VERS?", "1999.0"),
+        "display-mode": ("DISP:MODE?", "NORMAL"),
+        "error": ("SYST:ERR?", '0,"No error"'),
+    }[command]
+    fake_visa.responses[query] = reply
+    assert main([command, "--dry-run", "--json", *arguments]) == 0
+    plan = json.loads(capsys.readouterr().out)["result"]
+    assert plan["queries"] == ["*IDN?", query] and plan["live_access"] == "product"
     assert fake_visa.calls == []
+    assert main([command, "--resource", RESOURCE, "--json", *arguments]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] and payload["command"] == command and payload["mode"] == "live"
+    assert payload["result"] == {
+        **expected, "visa": {"library": "FAKE-VISA.dll", "manufacturer": "FAKE VISA"},
+    }
+    assert fake_visa.calls[-4:] == ["*IDN?", query, "session_close", "manager_close"]
 
 
 def test_system_query_cli_error_code_is_data_and_malformed_reply_fails(fake_visa, capsys):
-    args = ["scpi-error-next", "--resource", RESOURCE, "--hardware-validation", "system-query", "--json"]
+    args = ["error", "--resource", RESOURCE, "--json"]
     fake_visa.responses["SYST:ERR?"] = '-222,"Data, out of range"'
     assert main(args) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -58,16 +71,17 @@ def test_system_query_cli_error_code_is_data_and_malformed_reply_fails(fake_visa
 
 
 def test_system_query_cli_all_preview_and_argument_boundaries(fake_visa, capsys):
-    assert main(["scpi-error-next", "--all", "--dry-run", "--json"]) == 0
+    assert main(["error", "--all", "--dry-run", "--json"]) == 0
     plan = json.loads(capsys.readouterr().out)["result"]
     assert plan["queries"] == ["*IDN?", "SYST:ERR?"] and plan["max_reads"] == 20
-    for command, options in (("scpi-version", ["--all"]), ("display-mode", ["--all"]),
-                             ("scpi-error-next", ["--all=true"]),
+    for command, options in (("scpi-error-next", []),
+                             ("scpi-version", ["--all"]), ("display-mode", ["--all"]),
+                             ("error", ["--all=true"]),
                              ("identify", ["--hardware-validation", "system-query"])):
         assert main([command, "--dry-run", "--json", *options]) == 2
         assert json.loads(capsys.readouterr().out)["error"]["code"] == "argument_error"
     with pytest.raises(SystemExit) as help_exit:
-        main(["scpi-error-next", "--help"])
+        main(["error", "--help"])
     assert help_exit.value.code == 0
     output = capsys.readouterr().out
     assert "--all" in output and "remove" in output.lower()
@@ -207,6 +221,9 @@ def test_asrl_cli_preview_is_validation_only_and_keeps_omitted_options(capsys):
 
 @pytest.mark.parametrize("args,code", [
     (["identify", "--resource", "ASRL999::INSTR"], "invalid_resource"),
+    (["error", "--resource", "ASRL999::INSTR"], "invalid_resource"),
+    (["error", "--resource", "ASRL999::INSTR", "--validation-connection", "asrl"],
+     "unsupported_live_scope"),
     (["identify", "--resource", "ASRL999::RAW", "--hardware-validation", "asrl-readonly"], "invalid_resource"),
     (["measure", "--resource", "TCPIP0::example.invalid::INSTR", "--hardware-validation", "asrl-readonly"],
      "invalid_resource"),

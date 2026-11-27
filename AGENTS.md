@@ -73,6 +73,12 @@ future components as already implemented.
   non-Product-open scopes must not run live. Dry-run and simulator paths may
   use an explicitly selected registered profile as allowed by the applicable
   contracts once defined.
+- Explicitly authorized basic standalone CLI diagnostics may be opened for a
+  named model, command, transport and backend without a feature-validation
+  prerequisite. The exact allowlist belongs in Core and Supported Models;
+  identity, connection, parsing and cleanup checks still apply. This exception
+  does not extend to Worker LIVE, functional measurement extensions, settings
+  or load control, and permission is not evidence of physical validation.
 - These rules constrain future changes. Do not pre-build abstractions for an
   unsupported second vendor or refactor reasonable current model-specific code
   without a concrete requirement.

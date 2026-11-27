@@ -496,7 +496,7 @@ def main(argv: list[str] | None = None, *, timer_on_write_started: Callable[[int
                                   all_errors=getattr(args, "all", False),
                                   hardware_validation=getattr(args, "hardware_validation", None),
                                   serial_options=SerialOptions(**serial) if serial and asrl is None else None,
-                                  asrl=asrl)
+                                  asrl=asrl, standalone_cli=True)
     except LoadError as exc:
         return _emit_error(exc, command, mode, json_output)
     except KeyboardInterrupt:

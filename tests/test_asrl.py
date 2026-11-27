@@ -236,7 +236,7 @@ def test_asrl_scope_refuses_before_visa(command, extra):
 @pytest.mark.parametrize("command,arguments,replies,traffic", [
     ("input-off", [], {}, ["SYST:REM", "INP OFF", "INP:STAT?"]),
     ("input-off", ["--hardware-validation", "cv"], {}, ["*IDN?", "SYST:REM", "INP OFF", "INP:STAT?"]),
-    ("scpi-error-next", ["--hardware-validation", "system-query"],
+    ("error", ["--hardware-validation", "system-query"],
      {"SYST:ERR?": '-120,"entry"'}, ["SYST:ERR?"]),
     ("short-status", ["--hardware-validation", "readback"],
      {"INP:SHOR:STAT?": "0"}, ["INP:SHOR:STAT?"]),

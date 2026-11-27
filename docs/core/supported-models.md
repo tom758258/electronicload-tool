@@ -46,14 +46,19 @@ entries. Keep detected values, canonical tokens, aliases and stable IDs distinct
 
 ## Product LIVE Support
 
-| Model ID | Connection | Commands |
-| --- | --- | --- |
-| `itech-it8812c` | USB INSTR + System VISA (`@ivi`) | `identify`, `input-state`, `measure`, `set-cc`, `input-on`, `input-off` |
+| Model ID | Connection | Execution scope | Commands |
+| --- | --- | --- | --- |
+| `itech-it8812c` | USB INSTR + System VISA (`@ivi`) | Standalone CLI and Worker | `identify`, `input-state`, `measure`, `set-cc`, `input-on`, `input-off` |
+| `itech-it8812c` | USB INSTR + System VISA (`@ivi`) | Standalone CLI only | `scpi-version`, `display-mode`, `error` |
 
 The operator supplies the USB resource and Core verifies the exact identity.
 Fixed CC controls apply to `set-cc` and `input-on`. Input ON requires explicit
-confirmation. ASRL is available for controlled Contributor validation. See the
-[VISA connections and LIVE support](../../README.md#visa-connections-and-live-support).
+confirmation. The three standalone basic diagnostics need no Contributor scope;
+`error` explicitly consumes queue entries (one by default, at most 20 with
+`--all`). They do not change the load configuration or Input state. This is an
+explicit diagnostic authorization, not a claim of physical validation or an
+extension of Worker LIVE. ASRL remains available only for controlled
+Contributor validation. See the [CLI connection reference](../cli/README.md#visa-connection-behavior).
 
 ## Future Model Onboarding
 
@@ -66,4 +71,7 @@ confirmation. ASRL is available for controlled Contributor validation. See the
    reply paths and run focused IT8812C regression checks.
 4. Obtain separate approval for physical validation of each proposed LIVE scope.
    Authorize only the exact scope after the required validation and approval.
+   The explicitly authorized basic standalone diagnostics above are the narrow
+   exception to the physical feature-validation prerequisite; do not generalize
+   that permission to other models, transports, Worker or functional commands.
    Keep validation evidence separate from the authorization and tracked docs.

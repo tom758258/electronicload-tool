@@ -1,9 +1,9 @@
 # Electronic Load Tool
 
-Electronic Load Tool provides read-only identification and measurements,
-plus fixed-CC configuration, offline CV/CR/CW/Transient/LIST CC and deliberate Input ON/OFF through a shared Core,
-Standalone CLI and bundled Common v3 Worker. The initial supported model is
-ITECH IT8812C (`itech-it8812c`).
+Electronic Load Tool is an instrument-control and automation tool for electronic
+loads. It provides identification, diagnostics, measurements, load configuration
+and workflows through a shared Core, standalone CLI and bundled Common v3
+Worker. The initial supported model is ITECH IT8812C (`itech-it8812c`).
 
 Product LIVE is limited to the IT8812C scope listed in
 [Product LIVE Support](docs/core/supported-models.md#product-live-support).
@@ -13,7 +13,8 @@ Simulation and dry-run never grant hardware authorization.
 
 ## Features
 
-- Read-only identification, Input state and measurements for the exact supported IT8812C Product LIVE scope.
+- VISA resource discovery, identity, Input state and V/I/P measurement.
+- Standalone USB system diagnostics: SCPI version, display mode and Error Queue.
 - [RS-232 contributor validation](docs/cli/README.md#asrl-contributor-validation) for the shared IT8812C validation matrix over an explicit ASRL INSTR resource.
 - Fixed CC and deliberate Input ON/OFF with the existing hardware safety gates.
 - Offline Fixed CV/CR/CW and software Auto Range for Fixed CC/CV/CR.
@@ -31,7 +32,10 @@ Simulation and dry-run never grant hardware authorization.
 
 - `pyproject.toml` defines the single `electronicload-tool` distribution.
 - `src/electronicload_tool_core/` owns Core functionality.
-- `src/electronicload_tool_cli/` owns the CLI entry point.
+- `src/electronicload_tool_cli/` owns the CLI entry point and bundled Worker.
+- `scripts/` contains offline preflight and controlled instrument validation.
+- `tests/` contains hardware-free automated checks.
+- `docs/` contains the CLI reference, Core support policy and integration contracts.
 
 Core owns model limits, identity, support policy, queries, parsing, VISA lifetime,
 and simulation. CLI handles arguments and presentation. Core must not import
@@ -55,39 +59,13 @@ The single Python distribution and its dependencies are defined in
 [pyproject.toml](pyproject.toml) and [uv.lock](uv.lock).
 There is no implemented WebUI or Desktop component.
 
-## VISA Connections and LIVE Support
+### VISA Connections and LIVE Support
 
-Core validates VISA resource strings and owns session lifetime, identity checks,
-SCPI communication, and reply parsing. IT8812C uses separate USB INSTR and
-ASRL INSTR paths through System VISA (`@ivi`), with the same model identity
-rules and read-only command implementations.
-
-| Transport | VISA open timeout | Identity query timeout | Other I/O timeout | Framing |
-| --- | --- | --- | --- | --- |
-| USB INSTR | 5000 ms | 5000 ms | 5000 ms | LF read/write, 150 ms query delay |
-| ASRL INSTR | 1000 ms | 1000 ms | 5000 ms | VISA/PyVISA settings with selective overrides |
-
-The USB open timeout is passed to the VISA driver, which controls its
-enforcement. ASRL open and `*IDN?` have separate 1000 ms deadlines; the
-identity write and all response reads share the identity deadline. Core rejects
-late results before using the session or issuing more queries. Native VISA
-calls are synchronous, so Core cannot report an overrun or clean up until
-the driver returns. After successful ASRL identification, other queries use
-the normal I/O timeout. ASRL owns a separate native manager handle and closes
-the device handle before the manager. Open, configuration, query, and cleanup
-errors terminate the request; cleanup failures are reported alongside the
-original error. Neither connection path relies on PyVISA automatic clear or retry.
-
-Core gates LIVE access by canonical model ID, command, transport, VISA backend,
-execution scope, and required feature. IT8812C Product and Worker LIVE require
-USB INSTR and System VISA, subject to the exact command permissions in
-[Supported Models](docs/core/supported-models.md#product-live-support).
-ASRL INSTR is available only for separately authorized Standalone CLI
-Contributor validation via `--validation-connection asrl`, with the relevant
-command-specific scope and confirmation. Optional serial overrides affect ASRL
-only. Passive discovery may list ASRL resources, but automatic identification
-queries USB resources only. See [ASRL contributor validation](docs/cli/README.md#asrl-contributor-validation)
-for serial options and the controlled physical procedure.
+Normal IT8812C LIVE operation uses USB INSTR and System VISA. Standalone CLI
+also permits basic System Queries (`scpi-version`, `display-mode`, `error`)
+without a Contributor scope. Worker LIVE and ASRL Contributor permissions are
+separate. See [Supported Models](docs/core/supported-models.md#product-live-support)
+and the [CLI connection reference](docs/cli/README.md#visa-connection-behavior).
 
 ## Install
 
@@ -138,6 +116,17 @@ for multi-command sequences such as setup, confirmed Input ON, Short ON/OFF,
 and explicit Input OFF. See the [CLI README](docs/cli/README.md) for detailed
 commands, limits, mode sequences and safe usage.
 
+## Build
+
+The project is a single Python distribution. Build the wheel and source
+archive from the repository root using the installed development dependency:
+
+```powershell
+.\.venv\Scripts\python.exe -m build
+```
+
+No Desktop or standalone executable bundle is implemented.
+
 ## Test
 
 Follow [Testing Guidelines](docs/testing-guidelines.md) and [AGENTS.md](AGENTS.md).
@@ -165,6 +154,13 @@ is implied by a documentation change.
 - [Common CLI JSON / JSONL Contract](docs/contracts/common-cli-jsonl-contract.md)
 - [Testing Guidelines](docs/testing-guidelines.md)
 - [AGENTS.md](AGENTS.md) — contribution and safety boundaries
+
+## Contributing
+
+Read [AGENTS.md](AGENTS.md) and [Testing Guidelines](docs/testing-guidelines.md)
+before changing code or documentation. Keep Core as the owner of instrument
+behavior and exact LIVE support. Use focused offline checks; physical validation
+requires separate approval and must not expose private instrument information.
 
 ## License and Disclaimer
 

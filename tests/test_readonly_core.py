@@ -30,17 +30,21 @@ NATIVE_CASES = [
     ("scpi-version", "SYST:VERS?", " 2020.01\n", {"scpi_version": "2020.01"}),
     ("display-mode", "DISP:MODE?", " norm\n", {"display_mode": "NORMAL"}),
     ("display-mode", "DISP:MODE?", "TEXT\n", {"display_mode": "TEXT"}),
-    ("scpi-error-next", "SYST:ERR?", ' +120 , "Parameter, overflowed"\n',
+    ("error", "SYST:ERR?", ' +120 , "Parameter, overflowed"\n',
      {"error_code": 120, "message": "Parameter, overflowed"}),
-    ("scpi-error-next", "SYST:ERR?", "0, No Error", {"error_code": 0, "message": "No Error"}),
+    ("error", "SYST:ERR?", "0, No Error", {"error_code": 0, "message": "No Error"}),
 ])
-def test_system_query_contributor_uses_exact_queries(fake_visa, command, query, reply, expected):
+@pytest.mark.parametrize("standalone", [True, False])
+def test_system_query_uses_exact_queries(fake_visa, command, query, reply, expected, standalone):
     fake_visa.responses[query] = reply
-    plan = execute(command, mode="dry-run", **SYSTEM_SCOPE)
-    assert plan["queries"] == ["*IDN?", query] and plan["live_access"] == "blocked"
+    scope = {"resource": RESOURCE, "standalone_cli": True} if standalone else SYSTEM_SCOPE
+    plan = execute(command, mode="dry-run", **scope)
+    assert plan["queries"] == ["*IDN?", query]
+    assert plan["live_access"] == ("product" if standalone else "blocked")
     assert fake_visa.calls == []
-    result = execute(command, **SYSTEM_SCOPE)
-    assert result == {**expected, "validation_only": True, "validation_scope": "system-query",
+    result = execute(command, **scope)
+    validation = {} if standalone else {"validation_only": True, "validation_scope": "system-query"}
+    assert result == {**expected, **validation,
                       "visa": {"library": "FAKE-VISA.dll", "manufacturer": "FAKE VISA"}}
     assert fake_visa.calls[-4:] == ["*IDN?", query, "session_close", "manager_close"]
 
@@ -60,7 +64,7 @@ def test_system_query_queue_read_bound_in_one_visa_session(fake_visa, monkeypatc
         return query(session, command)
 
     monkeypatch.setattr(type(fake_visa.session), "query", next_entry)
-    result = execute("scpi-error-next", all_errors=True, **SYSTEM_SCOPE)
+    result = execute("error", all_errors=True, resource=RESOURCE, standalone_cli=True)
     assert result["errors"] == [{"error_code": code, "message": message}
                                 for code, message in entries[:nonzero_count]]
     assert result["read_count"] == nonzero_count + int(confirmed)
@@ -73,16 +77,16 @@ def test_system_query_queue_read_bound_in_one_visa_session(fake_visa, monkeypatc
 
 
 @pytest.mark.parametrize("command,query,reply", [
-    ("scpi-error-next", "SYST:ERR?", TimeoutError()),
-    ("scpi-error-next", "SYST:ERR?", '0,"No error'),
-    ("scpi-error-next", "SYST:ERR?", "0"),
+    ("error", "SYST:ERR?", TimeoutError()),
+    ("error", "SYST:ERR?", '0,"No error'),
+    ("error", "SYST:ERR?", "0"),
     ("scpi-version", "SYST:VERS?", "v1.3.1"),
     ("display-mode", "DISP:MODE?", "GRAPH"),
 ])
 def test_system_query_invalid_response_or_query_failure_stops_and_closes(fake_visa, command, query, reply):
     fake_visa.responses[query] = reply
     with pytest.raises(LoadError) as failure:
-        execute(command, all_errors=command == "scpi-error-next", **SYSTEM_SCOPE)
+        execute(command, all_errors=command == "error", **SYSTEM_SCOPE)
     assert failure.value.code == ("query_failed" if isinstance(reply, Exception) else "invalid_response")
     assert failure.value.exit_code == 3 and failure.value.details["query"] == query
     assert fake_visa.calls[-4:] == ["*IDN?", query, "session_close", "manager_close"]
@@ -99,7 +103,7 @@ def test_system_query_queue_failure_keeps_parsed_entries(fake_visa, monkeypatch)
 
     monkeypatch.setattr(type(fake_visa.session), "query", next_entry)
     with pytest.raises(LoadError) as failure:
-        execute("scpi-error-next", all_errors=True, **SYSTEM_SCOPE)
+        execute("error", all_errors=True, **SYSTEM_SCOPE)
     assert failure.value.code == "query_failed" and failure.value.exit_code == 3
     assert failure.value.details["read_count"] == 1
     assert failure.value.details["errors"] == [{"error_code": -222, "message": "Data, out of range"}]
@@ -121,12 +125,14 @@ def test_system_query_rejects_wrong_scope_before_visa(fake_visa, overrides, code
 
 
 @pytest.mark.parametrize("trusted", [True, False])
-def test_system_query_rejects_mismatched_identity_or_untrusted_session(fake_visa, trusted):
+@pytest.mark.parametrize("standalone", [True, False])
+def test_system_query_rejects_mismatched_identity_or_untrusted_session(fake_visa, trusted, standalone):
     if not trusted:
         mark_session_untrusted(fake_visa.session)
     fake_visa.responses["*IDN?"] = "ITECH Ltd,IT8812,TEST,1.2"
     with pytest.raises(LoadError) as failure:
-        execute("scpi-error-next", **SYSTEM_SCOPE)
+        scope = {"resource": RESOURCE, "standalone_cli": True} if standalone else SYSTEM_SCOPE
+        execute("error", **scope)
     assert failure.value.code == ("identity_mismatch" if trusted else "trace_session_untrusted")
     assert ("*IDN?" in fake_visa.calls) is trusted
     assert "SYST:ERR?" not in fake_visa.calls

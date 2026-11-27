@@ -2711,7 +2711,7 @@ def test_asrl_mixed_mode_plan_and_noninteractive_refusal(run_script, plan_only, 
     )
     assert report['prechecks']['plan'] == 'PASS' and not report['hardware_touched']
     cases = {case['name']: case for case in report['cases']}
-    assert {'set-cc-high', 'fixed-status-cv', 'sequence-cv', 'scpi-error-next'} <= cases.keys()
+    assert {'set-cc-high', 'fixed-status-cv', 'sequence-cv', 'error'} <= cases.keys()
     assert all(case['status'] == 'NOT RUN' for case in cases.values())
     assert report['summary_counts']['total'] == report['summary_counts']['not_run'] == len(cases)
     assert report['resource'] == '<redacted>'
@@ -2735,7 +2735,7 @@ def test_system_query_focused_plan(run_script):
     report = json.loads(path.read_text(encoding='utf-8-sig'))
     assert_validation_average_plan({case['name']: case for case in report['cases']}, False)
     cases = report['cases'][2:]
-    assert [case['command'] for case in cases] == ['scpi-version', 'display-mode', 'scpi-error-next']
+    assert [case['command'] for case in cases] == ['scpi-version', 'display-mode', 'error']
     assert all(case['arguments'] == ['--hardware-validation', 'system-query'] for case in cases)
 
 
