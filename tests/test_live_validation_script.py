@@ -1515,6 +1515,8 @@ ConvertTo-Json -InputObject $results -Depth 8 -Compress
         assert answers[0]['name'] == 'identify'
         notices = '\n'.join(answers[0]['notices'])
         assert ('Confirm the external source is manually set' in notices) is connected
+        if 'list-cc' in modes:
+            assert 'empty working LIST' in notices
         assert ('Input Timer:' in notices) == ('input-timer' in modes)
         assert ('Workflow:' in notices) == ('workflow' in modes)
         assert ('10 s hardware cutoff' in notices) == bool(modes & {'input-timer', 'workflow'})

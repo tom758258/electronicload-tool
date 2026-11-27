@@ -719,7 +719,8 @@ def execute_trigger_observation(*, mode, resource, backend, model_id, expected, 
     # queries before the event and at completion (not a latency guarantee).
     software = source in {"HOLD", "BUS"}
     guard_queries = 18 if is_list else 17
-    fixed_queries = 4 + guard_queries * (2 if software else 1) + int(software) + (2 if is_list else 0)
+    fixed_queries = (4 + guard_queries * (2 if software else 1) + int(software)
+                     + (2 if is_list else 0) + 4 * int(source == "HOLD"))
     event_seconds = needed - trigger["interval_s"] if source == "TIMER" else needed
     minimum_seconds = float(event_seconds) + fixed_queries * QUERY_DELAY_S + 0.3
     if minimum_seconds >= min(seconds, 30) - 0.5:
@@ -736,7 +737,8 @@ def execute_trigger_observation(*, mode, resource, backend, model_id, expected, 
                             TRIGGER_INTERVAL_QUERY, "MEAS:CURR?",
                             *(["LIST:RANG?", "LIST:COUN?", "LIST:STEP?", "LIST:LEV? {step}",
                                "LIST:SLEW? {step}", "LIST:WID? {step}", "CURR?", "STAT:QUES:COND?"] if is_list else
-                              ["CURR:RANG?", "CURR:TRAN:MODE?", "CURR:TRAN:ALEV?", "CURR:TRAN:BLEV?",
+                              ["CURR?", "MEAS:VOLT?", "VOLT:ON?", "STAT:QUES:COND?", "CURR:RANG?",
+                               "CURR:TRAN:MODE?", "CURR:TRAN:ALEV?", "CURR:TRAN:BLEV?",
                                "CURR:SLEW:POS?", "CURR:SLEW:NEG?", "CURR:TRAN:AWID?"])],
                 "observation_seconds": seconds}
     now = monotonic_ns()
@@ -810,11 +812,22 @@ def execute_trigger_observation(*, mode, resource, backend, model_id, expected, 
                 if initial_list["list_running"]:
                     raise LoadError("trigger_observation_unconfirmed", "LIST was already running before the trial.", 3)
             phase = "baseline"
+            fixed_baseline = None
+            if source == "HOLD":
+                fixed_baseline = c._decimal_readback(session, "CURR?")
+                if not Decimal(0) <= fixed_baseline <= Decimal(2):
+                    raise LoadError("unsafe_mode", "HOLD fixed CC baseline exceeds the observation ceiling.")
+                loaded_voltage = _number(session, "MEAS:VOLT?")
+                von_threshold = _number(session, "VOLT:ON?")
+                condition = _condition(session)
+                if loaded_voltage <= von_threshold or condition["raw"] & FAULT_MASK:
+                    raise LoadError("trigger_observation_unconfirmed",
+                                    "HOLD input voltage or protection condition blocks observation.", 3)
             baseline = sample()
             if is_list:
                 samples[-1].update(initial_list)
             if source != "TIMER":
-                wanted = Decimal(0) if is_list else levels["level_b"]
+                wanted = Decimal(0) if is_list else fixed_baseline
                 tolerance = min(Decimal("0.01"), abs(levels["level_a"] - levels["level_b"]) / 4)
                 if is_list:
                     tolerance = min(tolerance, levels["level_a"] / 4, levels["level_b"] / 4)
@@ -847,7 +860,8 @@ def execute_trigger_observation(*, mode, resource, backend, model_id, expected, 
                     samples[-1].update(state)
                     list_ended = saw_list_running and not state["list_running"]
                     saw_list_running |= state["list_running"]
-                evidence = sampled_waveform_evidence(samples, source=source, **levels)
+                evidence = sampled_waveform_evidence(samples, source=source,
+                                                     baseline_current=fixed_baseline, **levels)
                 if evidence is not None:
                     _require_trigger_input_on(session, None, "Trigger observation")
                     if monotonic_ns() >= deadline_ns:

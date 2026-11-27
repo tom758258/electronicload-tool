@@ -1513,8 +1513,14 @@ function Confirm-OperatorStart([string[]]$Modes, $Isolated, [bool]$ConnectedTria
         if (@($Isolated | Where-Object { $_.name -ceq 'fixed-status-cc' }).Count) {
             Write-Host '- Automatic Readback temporarily applies known settings, including Short with isolated terminals, and verifies restoration. Readback itself does not overwrite a LIST slot.'
         }
+        if (@($Isolated | Where-Object { $_.name -ceq 'list-status' }).Count) {
+            Write-Host '- Automatic LIST Readback: an empty working LIST (Step=0, Count=0) is initialized to a verified two-step baseline, retained after validation; valid existing LISTs are restored.'
+        }
+        if (@($Isolated | Where-Object { $_.name -ceq 'fixed-slew-status' -or $_.name -ceq 'transient-status' -or $_.name -ceq 'auxiliary-controls-slew' }).Count) {
+            Write-Host '- Slew validation: when an original instrument SCPI slew exceeds the conservative write limit, the test installs and retains a safe writable baseline instead of writing the original value back.'
+        }
         if (@($Isolated | Where-Object { $_.name -ceq 'list-cc-settings' }).Count) {
-            Write-Host "- LIST CC: pressing Enter authorizes overwriting Scratch Slot $ListScratchSlot in this run. The slot will retain test configuration A after success; the original working buffer is restored. Cancel if this slot must be preserved."
+            Write-Host "- LIST CC: the initial Enter authorizes overwriting Scratch Slot $ListScratchSlot; the slot retains test configuration A. Existing valid working LIST settings are restored. An empty working LIST (Step=0, Count=0) is initialized to a verified two-step test baseline and retains that baseline after the run. Cancel if this slot or the empty buffer must be preserved."
         }
         if (@($Isolated | Where-Object { $_.name -ceq 'list-cc-settings' -or
                 ($_.name -like 'auxiliary-controls-*' -and -not $_.ContainsKey('reuse_from')) }).Count) {
@@ -2319,7 +2325,7 @@ try {
                 expected=@{input_state='OFF';restored=$true};
                 condition='Automatic known-setting readback and verified restoration with physically isolated terminals and Input OFF.'}
             if ($name -ceq 'list-status') {
-                $step.condition += ' Refuse before setting writes if LIST verification and restoration cannot fit 30 s.'
+                $step.condition += ' Initialize a verified two-step baseline if the LIST is empty; refuse before writing if the 30 s verification and restoration budget is insufficient.'
             }
             $isolated += $step
         }
@@ -2367,7 +2373,7 @@ try {
             args=@('--trial','list-cc','--slot',[string]$ListScratchSlot,'--confirm-isolated');
             execution='live';isolated=$true;deadline_ms=300000;
             expected=@{input_state='OFF';restored=$true;recall_confirmed=$true;exited_list=$true};
-            condition="Source and DUT isolated, Fixed CC with Input, Short, Transient and Timer OFF. Authorize overwriting slot $ListScratchSlot at the initial Enter. Establish and verify B as the slot baseline, then Save A, verify Recall A and restore the original working buffer. Refuse before setting writes if verification and restoration cannot fit the remaining 300 s budget."}
+            condition="Source and DUT isolated, Fixed CC with Input, Short, Transient and Timer OFF. Authorize overwriting slot $ListScratchSlot at the initial Enter. Initialize and retain a two-step working baseline only if the LIST is initially empty. Establish and verify B as the slot baseline, Save A, verify Recall A and restore the verified working baseline. Refuse before writing if the remaining 300 s cannot cover verification and restoration."}
     }
     # Isolated cases are appended after source-connected and Trigger trials.
     # Reuse successful readback trials for identical Auxiliary cases.

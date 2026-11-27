@@ -458,4 +458,26 @@ def test_configuration_readback_fixed_slew_uses_instrument_values(fake_visa):
         execute("fixed-slew-status", resource=RESOURCE, hardware_validation="readback")
     assert failure.value.code == "invalid_response" and failure.value.exit_code == 3
     assert failure.value.details == {"query": "CURR:SLEW:NEG?", "range": "low", "observed": "2",
-                                     "minimum": "0.0001", "maximum": "0.25"}
+                                     "minimum": "0.0001", "maximum": "0.5"}
+
+
+@pytest.mark.parametrize("selector,rate,accepted", [
+    ("6", "0.5", True), ("60", "5", True),
+    ("6", "0.50001", False), ("60", "5.00001", False),
+])
+def test_it8812c_slew_readback_uses_scpi_max_without_widening_writes(fake_visa, selector, rate, accepted):
+    fake_visa.responses.update({
+        "FUNC:MODE?": "FIX", "FUNC?": "CURR", "TRAN?": "0",
+        "CURR:RANG?": selector, "CURR:SLEW:POS?": rate, "CURR:SLEW:NEG?": rate,
+    })
+    if accepted:
+        result = execute("fixed-slew-status", resource=RESOURCE, hardware_validation="readback")
+        assert result["rise_slew_a_per_us"] == rate
+        assert result["fall_slew_a_per_us"] == rate
+    else:
+        with pytest.raises(LoadError, match="slew is outside"):
+            execute("fixed-slew-status", resource=RESOURCE, hardware_validation="readback")
+    from electronicload_tool_core.control import validate_fixed_cc_slew
+    with pytest.raises(LoadError) as failure:
+        validate_fixed_cc_slew("low" if selector == "6" else "high", rate, rate)
+    assert failure.value.code == "slew_out_of_range"

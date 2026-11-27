@@ -21,7 +21,7 @@ class Instrument:
             "*IDN?": "ITECH Ltd,IT8812C,FAKE,1.0", "INP:STAT?": "0",
             "CURR:PROT:LEV?": "60", "CURR:PROT:DEL?": "3", "CURR:PROT:STAT?": "0.0E+0",
             "POW:PROT?": "260", "POW:PROT:DEL?": "3", "POW:CONF?": "225",
-            "POW:PROT? MAX": "260", "POW:CONF? MAX": "250",
+            "POW:PROT? MAX": "260", "POW:CONF? MAX": "260",
             "STAT:QUES:COND?": "8194", "STAT:QUES:EVEN?": "+8194",
             "FUNC:MODE?": "FIX", "FUNC?": "CURR", "CURR:RANG?": "6", "CURR?": "0.2",
             "TRAN?": "0", "INP:SHOR:STAT?": "0", "INP:TIM?": "0",
@@ -82,8 +82,10 @@ def physical(command, **arguments):
     ("POW:CONF? MAX", "+2.50E+2", "returned 250"),
     ("POW:CONF? MAX", "251", "returned 251"),
     ("POW:CONF? MAX", "260", "returned 260"),
+    ("POW:CONF? MAX", "261", "returned 261"),
     ("POW:CONF? MAX", "NaN", "failed: invalid_response"),
-    ("POW:CONF?", "251", "returned 251"),
+    ("POW:CONF?", "260", None),
+    ("POW:CONF?", "261", "returned 261"),
     ("POW:CONF?", "NaN", None),
 ])
 def test_hardware_power_readback_keeps_limits_and_private_diagnostics(
@@ -91,12 +93,15 @@ def test_hardware_power_readback_keeps_limits_and_private_diagnostics(
 ):
     instrument.replies[query] = reply
     with caplog.at_level("DEBUG", logger=protection.__name__):
-        if reply == "+2.50E+2":
+        if query.endswith(" MAX") and reply in ("+2.50E+2", "251", "260"):
             result = physical("protection-set", arguments={
                 "restore_defaults": "hardware-power", "confirm": True,
             })
-            assert result["applied"] == {"hardware_power_limit": "250"}
+            assert result["applied"] == {"hardware_power_limit": str(int(float(reply)))}
             assert instrument.writes == ["SYST:REM", "POW:CONF MAX"]
+        elif query == "POW:CONF?" and reply == "260":
+            assert physical("protection-status")["settings"]["hardware_power_limit"] == "260"
+            assert instrument.writes == []
         else:
             with pytest.raises(LoadError) as failure:
                 if query.endswith(" MAX"):
@@ -110,7 +115,7 @@ def test_hardware_power_readback_keeps_limits_and_private_diagnostics(
             assert reply not in str(failure.value.details)
             assert instrument.writes == []
             details = failure.value.details
-            if query.endswith(" MAX") and reply in ("251", "260"):
+            if query.endswith(" MAX") and reply == "261":
                 assert details["default_rejected_before_write"] is True
                 assert details["input_state"] == "OFF"
                 assert details["not_attempted"] == ["hardware_power_limit"]
@@ -184,7 +189,7 @@ def test_protection_set_off_guards_and_reports_partial_writes(instrument, failur
 @pytest.mark.parametrize(("group", "writes", "applied"), [
     ("software-power", ["POW:PROT MAX", "POW:PROT:DEL 0"],
      {"software_power_limit": "260", "software_power_delay": "0"}),
-    ("hardware-power", ["POW:CONF MAX"], {"hardware_power_limit": "250"}),
+    ("hardware-power", ["POW:CONF MAX"], {"hardware_power_limit": "260"}),
 ])
 def test_protection_defaults_are_independent_and_read_back(instrument, group, writes, applied):
     original = physical("protection-status", snapshot=True)["settings"]

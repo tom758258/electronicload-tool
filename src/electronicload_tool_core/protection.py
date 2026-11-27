@@ -38,6 +38,9 @@ LIMITS = {
     "software_power_delay": Decimal("60"),
     "hardware_power_limit": Decimal("250"),
 }
+# IT8812C accepts a 260 W hard-power protection MAX readback; rated power
+# and operator-supplied numeric programming remain conservatively capped at 250 W.
+HARDWARE_POWER_READBACK_MAX = Decimal("260")
 DEFAULTS = {
     "software-power": {"software_power_limit": "MAX", "software_power_delay": Decimal("0")},
     "hardware-power": {"hardware_power_limit": "MAX"},
@@ -134,10 +137,12 @@ def _read_setting(session, field: str, suffix: str = ""):
         if suffix:
             LOGGER.debug("Protection %s failed: %s", query, exc.code)
         raise
-    if suffix or not 0 <= number <= LIMITS[field]:
+    maximum = (HARDWARE_POWER_READBACK_MAX if field == "hardware_power_limit"
+               else LIMITS[field])
+    if suffix or not 0 <= number <= maximum:
         LOGGER.debug("Protection %s returned %s (accepted range 0 to %s)",
-                     query, number, LIMITS[field])
-    if not 0 <= number <= LIMITS[field]:
+                     query, number, maximum)
+    if not 0 <= number <= maximum:
         details = {"query": query}
         if suffix == " MAX":
             details.update(default_rejected_before_write=True, input_state="OFF")
@@ -249,7 +254,9 @@ def _simulate(command: str, settings: dict, events: bool, session, stop) -> dict
     if command == "protection-clear":
         session.protection_condition &= ~FAULT_MASK
         return {"input_state": "OFF", "condition": _condition(session)}
-    changes = {field: LIMITS[field] if value == "MAX" else value for field, value in settings.items()}
+    changes = {field: (HARDWARE_POWER_READBACK_MAX if field == "hardware_power_limit"
+                       else LIMITS[field]) if value == "MAX" else value
+               for field, value in settings.items()}
     session.protection_settings.update(changes)
     return {"input_state": "OFF", "applied": _serialize(changes)}
 
