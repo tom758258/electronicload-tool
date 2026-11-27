@@ -38,7 +38,7 @@ NATIVE_MEASUREMENTS = {
 }
 QUERIES.update({command: ("*IDN?", *(query for _, query in metrics.values()))
                 for command, metrics in NATIVE_MEASUREMENTS.items()})
-ERROR_QUEUE_COMMAND = "scpi-error-next"
+ERROR_QUEUE_COMMAND = "error"
 SYSTEM_QUERIES = {
     ERROR_QUEUE_COMMAND: "SYST:ERR?",
     "scpi-version": "SYST:VERS?",
@@ -49,6 +49,8 @@ QUERIES.update({command: ("*IDN?", query) for command, query in SYSTEM_QUERIES.i
 COMMANDS = (*QUERIES, *READBACK_COMMANDS)
 # Exact Product LIVE command allowlist; model, USB and backend checks remain mandatory.
 PRODUCT_LIVE_COMMANDS = frozenset({"identify", "input-state", "measure"})
+# Standalone USB diagnostics are explicitly admitted; Worker permissions are unchanged.
+CLI_DIAGNOSTIC_LIVE_COMMANDS = frozenset({"scpi-version", "display-mode", ERROR_QUEUE_COMMAND})
 ASRL_READONLY_SCOPE = "asrl-readonly"
 ASRL_READONLY_COMMANDS = frozenset({"identify", "input-state", "measure"})
 
@@ -184,15 +186,15 @@ def execute(
     resource: str | None = None, backend: str = "system", validation: bool = False,
     metric: str | None = None, simulator=None, all_errors: bool = False,
     hardware_validation: str | None = None, serial_options: SerialOptions | None = None,
-    asrl=None,
+    asrl=None, standalone_cli: bool = False,
 ) -> dict:
-    """Run one request; the legacy validation flag never opens offline-only commands."""
+    """Run one request; only the standalone CLI may opt into basic USB diagnostics."""
     if command not in COMMANDS or mode not in ("live", "dry-run", "simulate"):
         raise LoadError("argument_error", "Unknown command or execution mode.")
     validate_metric(command, metric)
     validate_error_queue_all(all_errors)
     if all_errors and command != ERROR_QUEUE_COMMAND:
-        raise LoadError("argument_error", "Only scpi-error-next accepts all.")
+        raise LoadError("argument_error", "Only error accepts all.")
     if asrl is not None and hardware_validation is None and command in ASRL_READONLY_COMMANDS:
         return _execute_asrl_readonly(command, mode, model_id, resource, backend, asrl)
     if hardware_validation == ASRL_READONLY_SCOPE:
@@ -218,6 +220,10 @@ def execute(
         raise LoadError("unsupported_model", "The requested model profile is not registered.")
     validate_request_connection(resource, backend, mode=mode, asrl=asrl,
                                 allowed=hardware_validation is not None)
+    product_live = command in PRODUCT_LIVE_COMMANDS or (
+        standalone_cli and asrl is None and hardware_validation is None
+        and command in CLI_DIAGNOSTIC_LIVE_COMMANDS
+    )
     if mode == "dry-run":
         return {
             "queries": (["*IDN?", NATIVE_MEASUREMENTS[command][metric][1]]
@@ -225,12 +231,12 @@ def execute(
             "backend": "system", "transport": "asrl" if asrl is not None else "usb", "timeout_ms": TIMEOUT_MS,
             "read_termination": asrl.read_termination if asrl is not None else TERMINATION,
             "write_termination": asrl.write_termination if asrl is not None else TERMINATION,
-            "live_access": "product" if command in PRODUCT_LIVE_COMMANDS else "blocked",
+            "live_access": "product" if product_live else "blocked",
             "resource_required_for_live": True,
             **({"max_reads": MAX_ERROR_READS} if all_errors else {}),
             **validation_result,
         }
-    if mode == "live" and command not in PRODUCT_LIVE_COMMANDS and hardware_validation is None:
+    if mode == "live" and not product_live and hardware_validation is None:
         raise LoadError("unsupported_live_scope", "Product LIVE is not open for this command.")
     try:
         if mode == "simulate":

@@ -556,7 +556,13 @@ root as applicable to the change. Compare USB and ASRL FULL plans, and
 exercise mixed mode selection, report redaction and unattended refusal in
 `tests/test_live_validation_script.py`. Use fictional resources and block
 both PyVISA library and resource-manager access in offline plans.
-Use `preflight-cli.ps1 -SystemQueryOnly` for scoped System Query and ASRL checks.
+Use `preflight-cli.ps1 -SystemQueryOnly` for ordinary USB diagnostic previews,
+explicit ASRL System Query scope and ASRL refusal without that scope. For the
+standalone diagnostic allowlist, select the existing System Query tests in
+`test_readonly_core.py`, `test_readonly_cli.py`, `test_worker.py`, `test_asrl.py`
+and `test_live_validation_script.py`: verify exact identity/query traffic,
+bounded consuming queue reads, reply/cleanup errors, Worker LIVE refusal and
+unchanged Contributor plans. Admission does not constitute physical evidence.
 Run Ruff on changed Python files.
 
 Verify the independent ASRL lifetime, omitted and explicit settings, timeout

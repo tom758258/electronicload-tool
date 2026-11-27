@@ -59,7 +59,7 @@ Common contracts remain authoritative for the HTTP and JSONL envelopes.
 | `measure-discharge` | `{}` or `{"metric":"capacity"\|"time"}` | `capacity_ah`, `discharge_time_s`, or only the selected field; offline only |
 | `scpi-version` | `{}` | `scpi_version`, a `YYYY.V` string; offline only |
 | `display-mode` | `{}` | `display_mode`, `NORMAL` or `TEXT`; offline only |
-| `scpi-error-next` | `{}` or `{"all":<boolean>}` | One Error Queue entry or a bounded read summary; offline only |
+| `error` | `{}` or `{"all":<boolean>}` | One Error Queue entry or a bounded read summary; offline only |
 | `set-average` | `{"count":<integer 2–16>}` | Integer `average_count`; confirmed Input OFF required; offline only |
 | `average-status` | `{}` | Integer `average_count`, including with Input ON; offline only |
 | `trace-configure` | `{"source":"VOLT"\|"CURR"\|"TWO","points":<integer>,"interval_s":<number>}` | Validated TRACE settings and sample count; offline only |
@@ -275,7 +275,7 @@ The standalone CLI contributor scopes are described in the
 
 The three commands are async jobs. Simulation retains the Error Queue across
 jobs in the same Worker and each Error Queue read consumes one FIFO entry.
-`scpi-error-next` with omitted or false `all` returns one integer `error_code`
+`error` with omitted or false `all` returns one integer `error_code`
 and string `message`. A zero code represents an empty queue. With `all: true`,
 it returns `errors` (nonzero entries in order), `read_count` (including any zero
 reply), `max_reads: 20`, `empty_confirmed` and `limit_reached`. A zero on any
@@ -285,7 +285,9 @@ query data. Dry-run returns the query plan with no queue consumption.
 
 Malformed arguments receive HTTP 400. Valid LIVE requests on a live Worker
 receive HTTP 202 and finish with `unsupported_live_scope` before opening VISA.
-The contributor System Query scope is only available through the standalone CLI.
+The standalone CLI separately permits these three basic diagnostics for normal
+IT8812C USB/System VISA requests. Its contributor System Query scope remains
+CLI-only, including ASRL. Neither CLI path grants Worker LIVE permission.
 [CLI queries and contributor procedure](../cli/README.md#system-queries)
 
 ## Offline Protection
@@ -335,7 +337,7 @@ The Worker cannot confirm the instrument's Slow Rise state on LIVE Input ON.
 Before returning an instrument from Slow Rise contributor validation to normal
 Worker operation, explicitly disable Slow Rise with Input OFF and confirm the
 disabled state through the contributor CLI.
-[CLI operation and validation](../cli/README.md#offline-cr-led-and-current-slow-rise)
+[CLI operation and validation](../cli/README.md#cr-led-and-current-slow-rise)
 
 ## Offline Measurement Extensions
 
@@ -353,7 +355,7 @@ the legacy CLI override and CLI hardware-validation scopes do not open them.
 issues `MEAS:CAP?`, then `MEAS:TIME?`, returning `capacity_ah` and
 `discharge_time_s`. Both first perform the existing `*IDN?` identity check.
 `metric` selects just one measurement query and result field, using the
-[CLI metric mapping](../cli/README.md#offline-measurement-extensions).
+[CLI metric mapping](../cli/README.md#measurement-extensions).
 Omission selects all; null, non-string, unknown, empty and extra arguments
 are HTTP 400 before job creation. Measurement fields are finite JSON numbers.
 A failed query fails the job with no fabricated partial success, automatic
@@ -404,7 +406,7 @@ its own 30-second VISA timeout. The success result contains `source`, `points`,
 exact decimal string `interval_s`, `sample_count`,
 `read_timestamp_utc_plus_8`, and all `samples`. Sample indexes start at
 one. Configure returns the four setting and count fields. Bounds, timing and
-CSV columns are defined in the [CLI reference](../cli/README.md#offline-trace).
+CSV columns are defined in the [CLI reference](../cli/README.md#trace).
 
 For a requested CSV, the Worker creates any missing parents and exclusively
 creates and flushes the CSV header after prechecks and before arming. An
@@ -502,7 +504,7 @@ Dry-run validates arguments and returns `hardware_access: false` without
 checking or changing simulated state. The five new commands appear as
 `kind: "async_job"` in Manifest schema 2. All five and Fixed CC with Slew are
 blocked before VISA, including on contributor validation paths. See the
-[offline CLI usage](../cli/README.md#offline-fixed-cc-slew-von-and-short).
+[offline CLI usage](../cli/README.md#fixed-cc-slew-von-and-short).
 
 ## Offline Input Timer
 
@@ -531,7 +533,7 @@ VISA access. Valid LIVE jobs are admitted and then fail with
 `unsupported_live_scope`. Neither legacy override nor Input ON authorization
 opens Timer LIVE. The separate CLI-only `input-timer` hardware-validation scope
 and expected settings cannot be selected through Worker arguments/context.
-See [Timer CLI and validation procedure](../cli/README.md#offline-input-timer).
+See [Timer CLI and validation procedure](../cli/README.md#input-timer).
 
 ## Offline Transient CC / CV / CR / CW
 
@@ -815,7 +817,8 @@ Product LIVE is open only for the exact IT8812C identity over USB INSTR /
 System VISA: `identify`, `input-state`, `measure`, `set-cc`, `input-on`
 and `input-off` (input-on is physical fixed CC only). The control commands retain Core safety checks, explicit
 Resource requirements, model limits and Input ON confirmation gates.
-The Worker uses this same Core support policy and its own startup/per-request
+The Worker uses the Core Worker scope (not the standalone CLI diagnostic
+exception) and its own startup/per-request
 Input ON authorization; its end-to-end physical LIVE behavior is not implied
 to be hardware-validated by CLI acceptance. The hidden contributor-validation
 CLI option remains for compatibility, is not used by the Worker, and cannot

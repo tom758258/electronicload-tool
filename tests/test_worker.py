@@ -304,7 +304,7 @@ SEQUENCE_READ = ("input-state", {})
         ('protection-set', {'confirm': True, 'hardware_power_limit': 0.5}),
         ('protection-clear', {'confirm': True}),
     ),
-    (('scpi-error-next', {'all': True}), ('scpi-version', {}), ('display-mode', {})),
+    (('error', {'all': True}), ('scpi-version', {}), ('display-mode', {})),
     (('sequence', sequence_request(
         SEQUENCE_SET, SEQUENCE_ON, SEQUENCE_OFF, confirm_input_on=True,
     )['arguments']),),
@@ -352,10 +352,11 @@ def test_system_query_worker_keeps_fifo_across_http_jobs(capsys):
     from http.server import ThreadingHTTPServer
     from electronicload_tool_cli import worker as worker_module
 
-    commands = ('scpi-error-next', 'scpi-version', 'display-mode')
+    commands = ('error', 'scpi-version', 'display-mode')
     manifest = worker_module.manifest('0.1.0')
     assert manifest['schema_version'] == 2 and manifest['worker_protocol']['schema_versions'] == [3]
     assert all(manifest['commands'][name] == {'kind': 'async_job'} for name in commands)
+    assert 'scpi-error-next' not in manifest['commands']
 
     runtime = worker_module.Runtime(mode='simulate')
     runtime.system_query_simulator.error_queue.extend([(-222, 'Data out of range'), (120, 'Overflow')])
@@ -378,23 +379,24 @@ def test_system_query_worker_keeps_fifo_across_http_jobs(capsys):
 
         try:
             for command, arguments in [
-                ('scpi-error-next', {'all': 1}), ('scpi-error-next', {'all': None}),
-                ('scpi-error-next', {'all': 'true'}), ('scpi-error-next', {'max_reads': 21}),
+                ('scpi-error-next', {}),
+                ('error', {'all': 1}), ('error', {'all': None}),
+                ('error', {'all': 'true'}), ('error', {'max_reads': 21}),
                 ('scpi-version', {'all': False}), ('display-mode', {'hardware_validation': 'system-query'}),
             ]:
                 code, refused = http(url, request(command, arguments))
                 assert code == 400 and refused['worker_job_id'] is None
-            plan = job('scpi-error-next', {'all': True}, mode='dry_run')
+            plan = job('error', {'all': True}, mode='dry_run')
             assert plan['queries'] == ['*IDN?', 'SYST:ERR?'] and plan['max_reads'] == 20
             assert job('scpi-version') == {'scpi_version': '1999.0'}
             assert job('display-mode') == {'display_mode': 'NORMAL'}
             job('trace-configure', {'source': 'TWO', 'points': 4, 'interval_s': 0.001})
-            assert job('scpi-error-next') == {'error_code': -222, 'message': 'Data out of range'}
-            assert job('scpi-error-next', {'all': True}) == {
+            assert job('error') == {'error_code': -222, 'message': 'Data out of range'}
+            assert job('error', {'all': True}) == {
                 'errors': [{'error_code': 120, 'message': 'Overflow'}], 'read_count': 2,
                 'max_reads': 20, 'empty_confirmed': True, 'limit_reached': False,
             }
-            assert job('scpi-error-next', {'all': False}) == {'error_code': 0, 'message': 'No error'}
+            assert job('error', {'all': False}) == {'error_code': 0, 'message': 'No error'}
         finally:
             server.shutdown()
             thread.join(timeout=3)

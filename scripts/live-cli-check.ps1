@@ -320,7 +320,7 @@ function Save-Report {
                     if ($null -ne $entry.response.result.$field) { $case[$field] = $entry.response.result.$field }
                 }
             }
-            if ($entry.command -eq 'scpi-error-next') {
+            if ($entry.command -eq 'error') {
                 $case.scpi_error_code = $entry.response.result.error_code
             }
             if ($entry.command -eq 'measure') {
@@ -2340,7 +2340,7 @@ try {
         @{name='measure-off';command='measure';args=@()}
     )
     if ($systemQuerySelected) {
-        foreach ($command in @('scpi-version','display-mode','scpi-error-next')) {
+        foreach ($command in @('scpi-version','display-mode','error')) {
             $planned += @{name=$command;command=$command;args=@('--hardware-validation','system-query')}
         }
     }

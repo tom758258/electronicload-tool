@@ -31,13 +31,17 @@ try {
     }
     if ($SystemQueryOnly) {
         $asrl = @('--resource','ASRL999::INSTR','--validation-connection','asrl')
-        foreach ($command in @('scpi-version','display-mode','scpi-error-next')) {
-            $options = @($command,'--hardware-validation','system-query','--dry-run')
+        foreach ($command in @('scpi-version','display-mode','error')) {
+            $options = @($command,'--dry-run')
             $usb = Invoke-PreflightCli $options
-            $serial = Invoke-PreflightCli ($options + $asrl)
+            $serial = Invoke-PreflightCli ($options + @('--hardware-validation','system-query') + $asrl)
+            $serialRefused = Invoke-PreflightCli ($options + $asrl) 2
             $simulated = Invoke-PreflightCli @($command,'--simulate')
-            $queries = @{'scpi-version'='SYST:VERS?';'display-mode'='DISP:MODE?';'scpi-error-next'='SYST:ERR?'}
-            if ($serial.result.transport -cne 'asrl' -or $serial.result.validation_only -ne $true -or
+            $queries = @{'scpi-version'='SYST:VERS?';'display-mode'='DISP:MODE?';'error'='SYST:ERR?'}
+            if ($usb.result.live_access -cne 'product' -or $null -ne $usb.result.validation_only -or
+                $serial.result.transport -cne 'asrl' -or $serial.result.validation_only -ne $true -or
+                $serial.result.live_access -cne 'blocked' -or
+                $serialRefused.error.code -cne 'unsupported_live_scope' -or
                 ($usb.result.queries -join ',') -cne "*IDN?,$($queries[$command])" -or
                 ($serial.result.queries -join ',') -cne ($usb.result.queries -join ',') -or
                 $null -ne $serial.result.max_reads -or $simulated.ok -ne $true) {

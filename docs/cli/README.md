@@ -1,14 +1,51 @@
 # Electronic Load Tool CLI
 
-The CLI and bundled Common v3 Worker use the shared Core for the registered ITECH
-IT8812C. This document owns detailed CLI commands, offline mode behavior,
-operator-facing safety guidance, and the controlled validation procedure.
-Commands below run from the repository root unless stated otherwise.
-For exact Worker JSON/HTTP/JSONL behavior, use the
-[Electronic Load Worker Contract](../contracts/electronicload-worker-contract.md).
-This documentation does not authorize physical tests or extend Product LIVE support.
+## Documentation Set
 
-## CLI usage
+- [Project README](../../README.md) — project overview, installation and build.
+- [Supported Models](../core/supported-models.md) — exact LIVE support and Core architecture.
+- [Electronic Load Worker Contract](../contracts/electronicload-worker-contract.md) — command arguments, results and Worker behavior.
+- [Common Worker Protocol](../contracts/common-worker-protocol.md) and [Common CLI JSON / JSONL Contract](../contracts/common-cli-jsonl-contract.md) — automation interfaces.
+- [Testing Guidelines](../testing-guidelines.md) and [AGENTS.md](../../AGENTS.md) — development and validation boundaries.
+
+## Purpose and Current Scope
+
+The CLI and bundled Common v3 Worker use the shared Core for ITECH IT8812C.
+This reference covers command syntax, simulation, dry-run, normal LIVE operation
+and separately authorized Contributor validation. See Supported Models for the
+exact scope; the presence of a command does not imply LIVE support.
+Commands below run from the repository root unless stated otherwise.
+This documentation does not authorize physical tests.
+
+## Package Contents
+
+- `src/electronicload_tool_cli/cli.py`: arguments, CLI output and Core dispatch.
+- `src/electronicload_tool_cli/worker.py` and `worker_client.py`: Common v3 Worker and client.
+- `src/electronicload_tool_core/`: identity, capabilities, SCPI, validation, VISA lifetime and simulation.
+- `scripts/preflight-cli.ps1` and `scripts/live-cli-check.ps1`: offline checks and controlled validation.
+
+## Requirements
+
+Python 3.10 or newer, uv for repository development, and PyVISA. Normal LIVE
+requires the supported instrument, explicit resource and System VISA runtime.
+Simulation and dry-run do not require an instrument or a VISA runtime.
+
+## Install and Development
+
+Follow [Install](../../README.md#install) in the project README. From the
+repository root, synchronize the locked environment:
+
+```powershell
+uv sync --all-extras --locked --link-mode=copy
+```
+
+The PowerShell examples below use `.\.venv\Scripts\electronicload-tool.exe` from the
+repository root; virtual environment activation is not required. Alternatively,
+use `uv run --no-sync electronicload-tool` with the same arguments.
+The editable installation reflects Python source changes without reinstalling.
+Use the [Testing Guidelines](../testing-guidelines.md) for focused checks.
+
+## Quick Start
 
 ```powershell
 .\.venv\Scripts\electronicload-tool.exe --help
@@ -28,7 +65,7 @@ and version separately from `--json`.
 | --- | --- |
 | `--simulate` | Fixed simulated identity, input ON, 12 V, 0.5 A, and 6 W; no VISA access. |
 | `--dry-run` | Validate the profile and connection options; list queries and settings without measurements or VISA access. |
-| Neither option | LIVE request; an explicit `--resource` is required. |
+| Neither option | Instrument-operation commands are LIVE and require an explicit `--resource`; local utilities and discovery have their own arguments. |
 | `--model` | Profile or expected live model; defaults to `itech-it8812c`. |
 | `--backend` | Only `system` is accepted, mapped to PyVISA `@ivi`. |
 | `--json` | Exactly one JSON object on stdout for either success or failure. |
@@ -43,8 +80,8 @@ once in PowerShell and pass it explicitly to every LIVE command:
 $env:ELECTRONICLOAD_TOOL_RESOURCE = "USB0::...::INSTR"
 ```
 
-PowerShell expands this documentation-only variable in the explicit `-Resource`
-argument; the validation Script does not read it automatically. Operation
+PowerShell expands this documentation-only variable when passed explicitly as
+`--resource` (CLI) or `-Resource` (validation script); neither reads it automatically. Operation
 commands never discover, guess, or select resources automatically.
 Only the explicit `list-resources` diagnostic enumerates them.
 
@@ -61,6 +98,32 @@ case sensitivity; other spellings and models are rejected. Detected text,
 canonical model token, and stable model ID remain distinct. CLI results omit
 raw IDN and serial numbers. The same identity check precedes all LIVE
 input-state and measurement queries.
+
+## Command Family Index
+
+Use `.\.venv\Scripts\electronicload-tool.exe <command> --help` for exact argument
+syntax. This index
+lists the implemented CLI surface, not a LIVE allowlist. See
+[Supported Models](../core/supported-models.md#product-live-support) for permissions.
+
+| Family | Commands | Reference |
+| --- | --- | --- |
+| Setup and diagnostics | `--help`, `--version`, `manifest`, `list-resources`, `identify`, `scpi-version`, `display-mode`, `error` | [Connection](#resource-discovery-and-live-connection), [System Queries](#system-queries) |
+| Measurement and Average | `measure`, `measure-min-max`, `measure-discharge`, `set-average`, `average-status` | [Instrument behavior](#instrument-behavior), [Measurement Extensions](#measurement-extensions) |
+| Input and Fixed | `input-state`, `input-on`, `input-off`, `set-cc`, `set-cv`, `set-cr`, `set-cw` | [Fixed Modes and Input Control](#fixed-modes-and-input-control), [Auto Range](#fixed-software-auto-range) |
+| Readback | `readback`, `fixed-status`, `fixed-slew-status` | [Configuration readback](#configuration-readback) |
+| Auxiliary controls | `set-von`, `von-status`, `short-on`, `short-off`, `short-status`, `set-cr-led`, `cr-led-status`, `current-slow-rise-enable`, `current-slow-rise-disable`, `current-slow-rise-status` | [Slew, VON and Short](#fixed-cc-slew-von-and-short), [CR-LED and Slow Rise](#cr-led-and-current-slow-rise) |
+| Input Timer | `set-input-timer`, `input-timer-enable`, `input-timer-disable`, `input-timer-status` | [Input Timer](#input-timer) |
+| TRACE | `trace-configure`, `trace-status`, `trace-start` | [TRACE](#trace) |
+| Transient | `set-transient-cc`, `set-transient-cv`, `set-transient-cr`, `set-transient-cw`, `transient-enable`, `transient-disable`, `transient-trigger`, `transient-status` | [Transient Modes](#transient-modes) |
+| Native LIST | `set-list-cc`, `list-save`, `list-recall`, `list-trigger`, `list-status`, `list-exit` | [Native LIST CC](#native-list-cc) |
+| Trigger | `trigger-configure`, `trigger-status` | [Trigger Setup](#trigger-setup) |
+| Protection | `protection-status`, `protection-set`, `protection-clear` | [Protection](#protection) |
+| Sequence and workflows | `sequence`, `measure-log`, `measure-until`, `cc-timed-load`, `cc-discharge` | [Software Sequence](#software-sequence), [Basic Workflows](#basic-workflows) |
+| Worker and clients | `worker`, `send-command`, `status`, `stop`, `wait-ready` | [Worker and Automation](#worker-and-automation) |
+| Contributor only | `contributor-settings`, `trigger-observe` | [Controlled instrument validation](#controlled-instrument-validation) |
+
+## Resource Discovery and Live Connection
 
 ### VISA resource discovery
 
@@ -80,7 +143,42 @@ use them only as local diagnostics; do not publish unredacted output.
 To verify one operator-selected ASRL INSTR resource, use `identify` with the
 [ASRL contributor validation scope](#asrl-contributor-validation).
 
-### Results and exits
+### VISA connection behavior
+
+Core validates VISA resource strings and owns session lifetime, identity checks,
+SCPI communication, and reply parsing. IT8812C uses separate USB INSTR and
+ASRL INSTR paths through System VISA (`@ivi`), with the same model identity
+rules and read-only command implementations.
+
+| Transport | VISA open timeout | Identity query timeout | Other I/O timeout | Framing |
+| --- | --- | --- | --- | --- |
+| USB INSTR | 5000 ms | 5000 ms | 5000 ms | LF read/write, 150 ms query delay |
+| ASRL INSTR | 1000 ms | 1000 ms | 5000 ms | VISA/PyVISA settings with selective overrides |
+
+The USB open timeout is passed to the VISA driver, which controls its
+enforcement. ASRL open and `*IDN?` have separate 1000 ms deadlines; the
+identity write and all response reads share the identity deadline. Core rejects
+late results before using the session or issuing more queries. Native VISA
+calls are synchronous, so Core cannot report an overrun or clean up until
+the driver returns. After successful ASRL identification, other queries use
+the normal I/O timeout. ASRL owns a separate native manager handle and closes
+the device handle before the manager. Open, configuration, query, and cleanup
+errors terminate the request; cleanup failures are reported alongside the
+original error. Neither connection path relies on PyVISA automatic clear or retry.
+
+Core gates LIVE access by canonical model ID, command, transport, VISA backend,
+execution scope, and required feature. IT8812C Product and Worker LIVE require
+USB INSTR and System VISA. The three basic System Queries are standalone-only,
+subject to the exact command permissions in
+[Supported Models](../core/supported-models.md#product-live-support).
+ASRL INSTR is available only for separately authorized Standalone CLI
+Contributor validation via `--validation-connection asrl`, with the relevant
+command-specific scope and confirmation. Optional serial overrides affect ASRL
+only. Passive discovery may list ASRL resources, but automatic identification
+queries USB resources only. See [ASRL contributor validation](#asrl-contributor-validation)
+for serial options and the controlled physical procedure.
+
+## Results and exits
 
 Successful simulation of `measure --simulate --json` returns:
 
@@ -154,9 +252,9 @@ input OFF. A failed query never proves OFF or produces a substitute zero value.
 | --- | --- | --- |
 | `scpi-version` | `SYST:VERS?` | `scpi_version`, a `YYYY.V` string for the SCPI specification |
 | `display-mode` | `DISP:MODE?` | `display_mode`, normalized to `NORMAL` or `TEXT` |
-| `scpi-error-next` | `SYST:ERR?` | One integer `error_code` and string `message` |
+| `error` | `SYST:ERR?` | One integer `error_code` and string `message` |
 
-Each Error Queue read removes the returned entry. `scpi-error-next --all`
+Each Error Queue read removes the returned entry. `error --all`
 reads in the same session until it receives code `0` or reaches 20 reads.
 `errors` contains only nonzero entries. `read_count` includes the zero reply
 when present and `max_reads` is 20. A zero reply, including on the 20th read,
@@ -169,24 +267,28 @@ contain the entries parsed before the failure and their count. Whether the
 failed read consumed another entry is unknown. The System Query commands send
 no configuration writes or queue-clear commands.
 
-All three support `--simulate` and `--dry-run`. Dry-run lists `*IDN?` and the
-selected query, with `max_reads` for `--all`. Product LIVE and Worker LIVE
-are blocked.
-
-For separately approved hardware validation, run each query manually using
-the contributor CLI scope, an operator-supplied USB or ASRL INSTR resource, and
-System VISA. Confirm physical Input OFF before querying. The CLI verifies
-the exact IT8812C identity before sending the query. Use `scpi-error-next`
-only when removing the returned queue entry is intended, and choose `--all`
-explicitly for a bounded read of the queue.
+All three support `--simulate`, `--dry-run` and ordinary standalone CLI LIVE
+for the exact IT8812C over USB INSTR / System VISA. A normal USB dry-run lists
+`*IDN?` and the selected query, with `max_reads` for `--all` and
+`live_access: "product"`. Neither a Contributor flag nor Input OFF is required
+for normal diagnostics; the exact identity is verified before querying.
+Worker LIVE remains blocked. ASRL requires explicit Contributor authorization.
+Use `error` only when removing a queue entry is intended; `--all` explicitly
+consumes a bounded number of entries. Do not consume another controller’s queue.
 
 ```powershell
-electronicload-tool scpi-version --resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" --backend system --hardware-validation system-query --json
+.\.venv\Scripts\electronicload-tool.exe scpi-version --resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" --json
+.\.venv\Scripts\electronicload-tool.exe display-mode --resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" --json
+.\.venv\Scripts\electronicload-tool.exe error --resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" --json
+.\.venv\Scripts\electronicload-tool.exe error --resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" --all --json
 ```
+
+The separately approved [System Query validation procedure](#system-query-validation)
+retains its own Contributor scope and physical Input OFF precheck.
 
 [ITECH IT8800 Programming Guide V2.1, printed pp. 31–33](https://assets.testequity.com/te1/Documents/pdf/itech/ITECH_IT8800-Programming-Guide-EN.pdf#page=41)
 
-## Offline Measurement Extensions
+## Measurement Extensions
 
 `measure-min-max`, `measure-discharge`, `set-average` and `average-status`
 support `--simulate` and `--dry-run`. All four refuse Product and Worker LIVE
@@ -246,7 +348,7 @@ with `live_access: "blocked"`; Average previews contain `hardware_access: false`
 and Set's validated `average_count`. The existing `measure` interface, fields,
 LIVE permissions and `MEAS:VOLT?`, `MEAS:CURR?`, `FETC:POW?` order are unchanged.
 
-## Offline TRACE
+## TRACE
 
 `trace-configure` prepares the TRACE buffer while Input is OFF. Use
 `--source VOLT|CURR|TWO`, `--points`, and `--interval-s`. Each source accepts
@@ -295,55 +397,7 @@ Estimated delta is blank for the first row and equals `interval_s` for later
 rows. The batch timestamp records the host's reading time. The estimated
 columns derive from the configured sample interval.
 
-### Contributor-only TRACE hardware validation
-
-Normal TRACE Product LIVE and Worker LIVE remain **disabled**. For a separately
-approved, interactive instrument trial, the existing CLI has a narrow
-`--hardware-validation trace` scope on `trace-configure` and `trace-start`.
-This explicit scope uses the exact operator-supplied USB or ASRL INSTR Resource with
-System VISA, validates the exact IT8812C identity, and follows the same
-Configure/Start prechecks, single trigger, timeout and CSV rules as Offline TRACE.
-The result includes `validation_only: true`, `validation_scope: "trace"` and
-VISA runtime evidence. The legacy LIVE override does not enable TRACE.
-`--hardware-validation trace --dry-run` previews arguments without opening VISA
-or creating CSV, and never counts as physical success. Do not use these CLI
-commands as unattended or ordinary load-operation APIs.
-
-The single controlled script `scripts/live-cli-check.ps1 -Modes trace` saves the
-original Trigger Source and Timer Interval with Input OFF, sets and verifies
-HOLD without changing the stored interval, and performs five short trials: VOLT 10 points / 1 s OFF, CURR 10 / 1 s OFF, TWO 40 / 1 s
-OFF, VOLT 10 / 1 ms OFF, and TWO 10 / 1 s with explicitly confirmed bounded
-Fixed CC Input ON. The last trial writes a new Full CSV with estimated elapsed
-and delta columns, then explicitly commands and confirms Input OFF. This is
-not waveform calibration, an exhaustive interval test, or Worker LIVE validation.
-TRACE Start alone has a 120-second script process deadline; other commands
-keep their existing 30-second budget and the total run stays bounded.
-The script restores and verifies the original Trigger Source and Timer Interval
-with trusted communication and confirmed Input OFF, including after a safely
-recoverable trial failure. A failed run stays FAIL. An untrusted VISA Session,
-unconfirmed Feed stop or uncertain Input state blocks Trigger restoration and
-requires independent operator recovery. The script never reconnects to an
-untrusted VISA Session to attempt blind Input OFF.
-
-Use an explicit operator-selected real Resource only after separately approving
-the bounded source/DUT, manual OFF contingency and interactive confirmation:
-
-```powershell
-.\scripts\live-cli-check.ps1 -Target itech-it8812c -Resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" -Modes trace -PlanOnly
-# For a separately authorized interactive physical run, remove -PlanOnly.
-```
-
-`-Modes trace` selects only TRACE. Omitting `-Modes` selects the default validation modes, including TRACE.
-TRACE-only runs use `preflight-cli.ps1 -TraceOnly` for focused, no-hardware
-preflight. `-PlanOnly` produces cases marked NOT RUN, not physical PASS.
-The existing redacted `shareable/report.json` records TRACE case settings,
-sample counts, CSV completeness and unconfirmed safety flags. `summary.md`
-provides concise per-case statuses and totals;
-raw samples and the CSV are held only in the run's ignored `.tmp_tests/`
-folder outside `shareable/`. The script requires the original interactive
-operator gate and explicit Input OFF readback. If communications become
-untrusted or a process deadline expires, the report marks safe shutdown
-unconfirmed and requires an independent manual safety procedure.
+See [TRACE contributor validation](#contributor-only-trace-hardware-validation) for the separately authorized physical procedure.
 
 ## Fixed Modes and Input Control
 
@@ -419,14 +473,14 @@ range/setpoint readback and leaves Input OFF.
 Simulated Input ON requires explicit confirmation; Input OFF remains explicit.
 The simulator provides setting/state behavior, not a circuit or DUT model.
 
-### Offline CR-LED and Current Slow Rise
+### CR-LED and Current Slow Rise
 
 ```powershell
-electronicload-tool set-cr-led --resistance 50 --range auto --vdrop 1 --simulate --json
-electronicload-tool cr-led-status --simulate --json
-electronicload-tool current-slow-rise-enable --simulate --json
-electronicload-tool current-slow-rise-disable --simulate --json
-electronicload-tool current-slow-rise-status --simulate --json
+.\.venv\Scripts\electronicload-tool.exe set-cr-led --resistance 50 --range auto --vdrop 1 --simulate --json
+.\.venv\Scripts\electronicload-tool.exe cr-led-status --simulate --json
+.\.venv\Scripts\electronicload-tool.exe current-slow-rise-enable --simulate --json
+.\.venv\Scripts\electronicload-tool.exe current-slow-rise-disable --simulate --json
+.\.venv\Scripts\electronicload-tool.exe current-slow-rise-status --simulate --json
 ```
 
 `set-cr-led` requires Input OFF and uses the same resistance and Range
@@ -610,9 +664,9 @@ strings. Decimal tokens are preserved during CLI forwarding and Worker
 validation so excess precision cannot be rounded into an accepted request.
 
 ```powershell
-electronicload-tool set-cc --simulate --current 2.5 --range auto --json
-electronicload-tool set-cv --dry-run --voltage 24 --range auto --json
-electronicload-tool set-cr --simulate --resistance 10 --range auto --json
+.\.venv\Scripts\electronicload-tool.exe set-cc --simulate --current 2.5 --range auto --json
+.\.venv\Scripts\electronicload-tool.exe set-cv --dry-run --voltage 24 --range auto --json
+.\.venv\Scripts\electronicload-tool.exe set-cr --simulate --resistance 10 --range auto --json
 ```
 
 `--range` remains required, with no default. For a Worker's `set-cc`, arguments
@@ -655,15 +709,15 @@ ON/OFF counts stay unchanged. The CC ceiling stays 2 A; Auto High above 6 A
 is checked offline. `-PlanOnly` never accesses hardware or marks planned cases
 as physically passed.
 
-## Offline Fixed CC Slew, VON and Short
+## Fixed CC Slew, VON and Short
 
 These capabilities support simulation and dry-run. Use one simulated Worker to
 retain settings and Input state across commands.
 
 ```powershell
-electronicload-tool set-cc --simulate --current 1 --range auto --rise-slew 0.1 --fall-slew 0.2 --json
-electronicload-tool set-von --simulate --voltage 10 --latch on --json
-electronicload-tool von-status --simulate --json
+.\.venv\Scripts\electronicload-tool.exe set-cc --simulate --current 1 --range auto --rise-slew 0.1 --fall-slew 0.2 --json
+.\.venv\Scripts\electronicload-tool.exe set-von --simulate --voltage 10 --latch on --json
+.\.venv\Scripts\electronicload-tool.exe von-status --simulate --json
 ```
 
 Supply both Slew rates in A/μs or omit both for the original Fixed CC operation.
@@ -687,7 +741,7 @@ The offline VON bound uses the documented 0–MAX range and the rated 120 V
 input limit. Physical VON limits and write/readback behavior require separate
 validation. [ITECH Programming Guide](https://cdn.itechate.com/uploadfiles/%E7%94%A8%E6%88%B7%E6%89%8B%E5%86%8C/user%20manual/it8800/IT8800%20Programming%20Guide-EN.pdf) · [IT8812C specifications](https://www.itechate.com/uploadfiles/2019/06/201906211045484548.pdf) · [ITECH User Manual](https://media.digikey.com/pdf/Data%20Sheets/ITech%20Elect%20PDFs/IT8800%20User%20Manual.pdf)
 
-## Offline Input Timer
+## Input Timer
 
 Input Timer supports Fixed CC/CV/CR/CW in Core, CLI, Simulator and Worker.
 It accepts integer seconds **1–60000 inclusive**, without rounding or clamping.
@@ -722,73 +776,7 @@ All four commands, including Status, are blocked before physical VISA access
 on normal Product LIVE and Worker LIVE paths, including the legacy contributor
 override. Input Timer does not expand Product LIVE support.
 
-### Controlled Timer validation
-
-Use the existing script's `-InputTimerOnly` shortcut (without `-Modes`), or
-select `-Modes input-timer`. Input Timer is included in the default all-mode
-run. Preview with a fictional USB resource for offline checks; supply an
-approved resource only for a separately authorized physical run:
-
-```powershell
-.\scripts\preflight-cli.ps1 -InputTimerOnly
-.\scripts\live-cli-check.ps1 -Target itech-it8812c -Resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" -InputTimerOnly -Current 0.1 -TimerSeconds 5 -PlanOnly
-```
-
-PlanOnly accepts 3–10 seconds. The physical trial uses 5 seconds and positive
-CC up to 2 A (default 0.1 A), valid for both CC ranges. The script defaults to an
-operator-managed 5 V / 0.8 A source (overrides: >0 to 18 V / >0 to 2 A).
-The operator must configure and verify the source before physical testing.
-It retains the common approved setup/manual OFF contingency, interactive
-confirmation, runtime checks, process deadlines, redaction and explicit OFF
-cleanup requirements described below. Use an independently armed hardware
-cutoff that limits actual loading to at most 10 seconds. Its clock must start
-no later than the SCPI Input ON write, not the initial Enter. Prepare the
-cutoff and confirm the approved current-limited source at the initial
-confirmation; no additional Timer readiness prompt is needed. Cancel if
-the cutoff cannot be ready at the actual write. The 10-second cutoff
-applies to this 5-second trial under its approved conditions.
-
-The planned physical trial confirms Input OFF, explicitly disables Timer,
-sets low-range Fixed CC, configures/enables Timer, reads status while OFF,
-then confirms Input ON through `--hardware-validation input-timer` with complete
-expected `current`, `range` and integer `seconds`. Before and after remote
-transition Core rechecks physical OFF, CC settings, Short/Transient OFF and Timer
-readback. Core signals the SCPI ON write start before waiting for the instrument,
-so the same six-second deadline covers the ON subprocess and observation.
-Immediately after ON confirmation, a single read-only CLI process opens and
-identifies one VISA session and collects Timer/Input snapshots until the first OFF
-or the observation deadline. It does not reopen VISA or restart Python for each sample. The script requires a timed ON observation followed
-by the first OFF within six seconds of the write start. The conservative
-bracket from the ON query start to the OFF query completion must be at most
-one second and must not end before the five-second boundary. A definite
-early OFF, absent ON evidence or a wider bracket fails; later OFF queries
-cannot replace the first OFF. This is bounded functional acceptance, not
-exact timing calibration. Each poll respects the remaining
-observation window. When the window closes without a valid observation, the
-script fails and begins OFF cleanup. If the CLI process is still running at
-the deadline, the script prompts you to use the independent hardware cutoff
-immediately, before it waits for the process to exit. VISA cleanup requires that
-the process has exited and the existing communication rules permit it. A
-communication failure in a run that includes Trigger requires independent
-operator action. The CLI records the write, ON confirmation and Input query
-times. `-DebugArtifacts`
-saves these observations privately. The script sends and verifies explicit
-OFF, disables Timer separately and reads the final state. Acceptance is automatic
-from the timed ON/OFF evidence and verified cleanup. The operator must ensure
-the independent cutoff cannot intervene in the observation window and must not
-intervene except for safety; sampled evidence does not independently prove causation.
-A possible ON attempt gets one bounded OFF cleanup
-attempt under the existing communication rules. Timer-disable cleanup follows
-confirmed OFF.
-
-The validation-only Core/CLI scope uses `INP:TIM:DEL <seconds>`, `INP:TIM 0|1`,
-`INP:TIM:DEL?` and `INP:TIM?` from the
-[IT8800 Programming Guide V2.1, printed pp.45–46](https://assets.testequity.com/te1/Documents/pdf/itech/ITECH_IT8800-Programming-Guide-EN.pdf),
-which lists IT8812C. The DELay syntax line omits `:DELay`; its example and query
-include it. Readback must match. The trial reports the observed Enabled value
-after expiry without assuming retention, and does not establish timing accuracy,
-VON interaction, CV/CR/CW physical compatibility or Worker LIVE behavior.
-PlanOnly leaves every physical case NOT RUN and cannot promote Product LIVE.
+See [Input Timer contributor validation](#controlled-timer-validation) for the separately authorized physical procedure.
 
 ## Transient Modes
 
@@ -882,39 +870,7 @@ prove waveform shape, timing or completion. Explicitly command and confirm
 Input OFF before requesting Worker Stop; neither Stop, exit nor VISA close
 proves OFF.
 
-### Contributor validation
-
-The CLI-only `--hardware-validation transient-cc|transient-cv|transient-cr|transient-cw`
-route follows the [controlled validation procedure](#controlled-instrument-validation).
-It requires separate physical authorization, exact identity/USB/System VISA,
-Input OFF checks, complete expected settings/readback and deliberate ON
-confirmation. It grants no normal Product or Worker LIVE permission.
-
-The existing `preflight-cli.ps1 -TransientOnly` covers all four functions offline.
-`live-cli-check.ps1` defaults to FULL;
-`-Modes` retains subset selection. `-PlanOnly` validates each request without
-VISA and reports physical cases as NOT RUN. New Transient trial defaults are
-`-VoltageLevelA 3`, `-VoltageLevelB 4` (V), `-ResistanceLevelA 10`,
-`-ResistanceLevelB 1000` (Ω), `-PowerLevelA 1`, `-PowerLevelB 2` (W).
-The existing width parameters are shared; CC keeps its separate levels/slew.
-CV uses Continuous Auto / Pulse Low / Toggle High; CR uses Continuous Auto /
-Pulse High / Toggle High; CW has all three without Range or slew.
-Auto expected ranges come from Core. Real execution retains explicit Resource,
-interactive confirmation, default 0.8 A / 5 V declared source limits,
-manual OFF contingency and private/redacted reporting. Cleanup uses the
-active Transient scope and verifies OFF before Disable. The unchanged 30-second
-command and 900-second total budgets apply; the default 192 invocations allow
-about 4.7 seconds each on average. Slow hardware may require selected subsets;
-no larger deadline is assumed.
-
-The [IT8800 Programming Guide V2.1](https://assets.testequity.com/te1/Documents/pdf/itech/ITECH_IT8800-Programming-Guide-EN.pdf)
-includes IT8812C. Printed pages 19–20, 48 and 50–58 define Transient controls:
-`FUNC:MODE FIX`, the selected `FUNC CURR|VOLT|RES|POW`, function-specific
-`:TRAN:MODE`, `:TRAN:ALEV`, `:TRAN:BLEV`, `:TRAN:AWID/BWID`, separate `TRAN ON/OFF`,
-`TRIG:SOUR HOLD` and `TRIG:IMM`. Pulse uses AWID; Toggle writes neither width.
-CV disables hardware automatic range and selects 18/120 V; CR selects
-10/7500 Ω. Unrecognized readback fails closed. CW writes no range or slew.
-Manual syntax and offline/fake tests do not certify physical acceptance.
+See [Transient contributor validation](#contributor-transient-validation) for the separately authorized physical procedure.
 
 ## Native LIST CC
 
@@ -1075,7 +1031,7 @@ Worker Stop preserves the stored Trigger Setup.
 Source syntax, native trigger routing and the Timer range come from printed
 pp.40–41 of the [IT8800 Programming Guide V2.1](https://assets.testequity.com/te1/Documents/pdf/itech/ITECH_IT8800-Programming-Guide-EN.pdf).
 
-## Offline Protection
+## Protection
 
 Use `protection-status` to read Input, settings and the live Questionable
 Condition register. Add `--events` to read and consume the Questionable Event
@@ -1112,10 +1068,10 @@ If the readback shows ON, the operation fails and attempts one bounded OFF
 while communication is trusted. Check the returned Input state.
 
 ```powershell
-electronicload-tool protection-status --simulate --events --json
-electronicload-tool protection-set --dry-run --software-power-limit 200 --confirm --json
-electronicload-tool protection-set --dry-run --restore-defaults hardware-power --confirm --json
-electronicload-tool protection-clear --simulate --confirm --json
+.\.venv\Scripts\electronicload-tool.exe protection-status --simulate --events --json
+.\.venv\Scripts\electronicload-tool.exe protection-set --dry-run --software-power-limit 200 --confirm --json
+.\.venv\Scripts\electronicload-tool.exe protection-set --dry-run --restore-defaults hardware-power --confirm --json
+.\.venv\Scripts\electronicload-tool.exe protection-clear --simulate --confirm --json
 ```
 
 Use a single simulated Worker to retain settings between commands. Simulation
@@ -1165,8 +1121,8 @@ before Input ON in CV, CR or CW. Fixed CR setup requires CR-LED OFF. Simulation
 also checks that any requested CC slew pair still matches the setup before Input ON.
 
 ```powershell
-electronicload-tool sequence --file sequence.json --dry-run
-electronicload-tool sequence --file sequence.json --simulate --confirm
+.\.venv\Scripts\electronicload-tool.exe sequence --file sequence.json --dry-run
+.\.venv\Scripts\electronicload-tool.exe sequence --file sequence.json --simulate --confirm
 ```
 
 The preview requires no confirmation. Runs with any `input-on` require a
@@ -1175,31 +1131,7 @@ new confirmation each time. Results are JSON, with one V/I/P record per
 `arguments.document` and `arguments.confirm_input_on` as described in the
 [Worker contract](../contracts/electronicload-worker-contract.md#software-sequence).
 
-### Contributor Software Sequence validation
-
-For separately authorized physical runs, select `-Modes sequence` or include
-Sequence in a combined run with a dedicated 5 V / 0.8 A source. The script uses
-`sequence --file <file> --hardware-validation sequence --resource <USB-INSTR> --backend system --confirm --json`
-with the registered IT8812C over System VISA. For ASRL, use the explicit
-[contributor transport option](#asrl-contributor-validation). Each trial uses one session.
-Fixed setup and Input switching verify the applicable interlocks and settings.
-Use an exclusive instrument and an independent manual OFF method. Ordinary CLI
-and Worker LIVE are closed for Sequence.
-
-The contributor scope accepts only the four fixed documents, for 0.1 A CC,
-3 V CV, 1000 Ω CR and 0.10 W CW. Each has one ON, a 0.25 s Wait, measurement,
-and verified OFF. The initial Enter authorizes the four-trial Sequence batch
-without another operator prompt, retaining per-request CLI confirmation, a 30 s command deadline
-and a 900 s total deadline. The Core handles
-trusted cleanup on the existing session. The CLI directs the operator to
-switch off the load independently if a Remote transition during setup or Input ON
-ends without a fresh OFF readback, or if a run fails with Input observed ON
-after the initial OFF check succeeded. Once the instrument is identified,
-loss of trusted communication stops further commands. The CLI reports Input
-`UNKNOWN`, records `session_untrusted` as the cleanup reason, preserves the
-original error, and gives the same independent OFF instructions. The script
-also gives independent OFF instructions if the process times out or Input OFF
-is unconfirmed. Cleanup stays within the original session.
+See [Software Sequence contributor validation](#contributor-software-sequence-validation) for the separately authorized physical procedure.
 
 ## Basic Workflows
 
@@ -1223,11 +1155,11 @@ The simulator uses a fixed 12 V source, so a discharge simulation with a
 | `cc-discharge` | `--current`, `--cutoff-voltage`, `--timeout-s`, `--confirm` when simulating | `--interval-s` (defaults to 1 s), `--cutoff-capacity-ah`, `--range`, `--csv` |
 
 ```powershell
-electronicload-tool measure-log --simulate --interval-s 1 --count 60
-electronicload-tool measure-log --simulate --interval-s 1 --duration-s 60
-electronicload-tool measure-until --simulate --interval-s 1 --metric voltage --operator le --threshold 4.5 --timeout-s 6
-electronicload-tool cc-timed-load --simulate --current 0.5 --duration-s 30 --confirm
-electronicload-tool cc-discharge --dry-run --current 0.5 --cutoff-voltage 3 --cutoff-capacity-ah 1 --timeout-s 7300
+.\.venv\Scripts\electronicload-tool.exe measure-log --simulate --interval-s 1 --count 60
+.\.venv\Scripts\electronicload-tool.exe measure-log --simulate --interval-s 1 --duration-s 60
+.\.venv\Scripts\electronicload-tool.exe measure-until --simulate --interval-s 1 --metric voltage --operator le --threshold 4.5 --timeout-s 6
+.\.venv\Scripts\electronicload-tool.exe cc-timed-load --simulate --current 0.5 --duration-s 30 --confirm
+.\.venv\Scripts\electronicload-tool.exe cc-discharge --dry-run --current 0.5 --cutoff-voltage 3 --cutoff-capacity-ah 1 --timeout-s 7300
 ```
 
 - The measurement commands preserve Input state. `measure-log` reads voltage,
@@ -1290,9 +1222,32 @@ and `last_job`. Only `trace-start` supports job cancellation. Use
 Input OFF cleanup. For domain argument shapes and
 permissions, see [Electronic Load Worker Contract](../contracts/electronicload-worker-contract.md).
 
-Worker requests use the existing local Common v3 endpoints and one async job at
-a time; see the [Worker Contract](../contracts/electronicload-worker-contract.md)
-for exact argument types, admission timing, result fields, and JSONL events.
+
+## Examples
+
+For a hardware-free starting point, use simulation for results and dry-run for
+query or configuration previews. Standalone simulated invocations do not share
+state; use one simulated Worker for multi-command control sequences.
+
+```powershell
+.\.venv\Scripts\electronicload-tool.exe identify --simulate --json
+.\.venv\Scripts\electronicload-tool.exe error --all --simulate --json
+.\.venv\Scripts\electronicload-tool.exe set-cc --current 0.1 --range low --dry-run --json
+```
+
+For normal USB diagnostics, select the resource explicitly using the
+[discovery workflow](#visa-resource-discovery), then use the [System Queries](#system-queries)
+examples. For ASRL, see the [Contributor connection and preview](#asrl-contributor-validation).
+Function-specific command examples stay with their reference sections so
+parameters, interlocks and results can be read together.
+
+## Test
+
+Follow [Testing Guidelines](../testing-guidelines.md). Run the narrowest
+relevant hardware-free tests from the repository root; the test harness blocks
+real VISA. Do not use physical tests to replace failed offline checks. The
+scripts below distinguish offline preflight, plan-only and separately approved
+physical validation.
 
 ## CLI Validation Scripts
 
@@ -1520,7 +1475,7 @@ actual load behavior depends on source limit, load mode, wiring and DUT.
 Core still validates exact model range/resolution and resolves Auto range.
 This procedure does not establish measurement or waveform accuracy.
 
-### Quick start
+### Validation quick start
 
 Set a **fictional** USB resource for offline previews. For an approved
 physical trial, replace it with the exact operator-selected USB INSTR
@@ -1654,6 +1609,199 @@ FULL uses a 900-second total deadline. Slow hardware or operator observations ma
 of power freshness, synchronization, waveform timing or accuracy. This
 contributor-only CLI validation **does not** enable Worker LIVE or expand
 Product LIVE support.
+
+### System Query validation
+
+For a separately approved physical validation, select `-Modes system-query`
+or run each query manually with `--hardware-validation system-query`, an
+operator-supplied USB or ASRL INSTR resource and System VISA. Confirm physical
+Input OFF before querying. Use the explicit ASRL connection option for RS-232.
+The CLI verifies IT8812C identity before sending any System Query. The script
+reads one Error Queue entry; choose `--all` only if bounded consumption is intended.
+
+```powershell
+.\.venv\Scripts\electronicload-tool.exe scpi-version --resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" --backend system --hardware-validation system-query --json
+```
+
+The validation mode is retained independently of ordinary USB CLI permission.
+
+### Contributor-only TRACE hardware validation
+
+Normal TRACE Product LIVE and Worker LIVE remain **disabled**. For a separately
+approved, interactive instrument trial, the existing CLI has a narrow
+`--hardware-validation trace` scope on `trace-configure` and `trace-start`.
+This explicit scope uses the exact operator-supplied USB or ASRL INSTR Resource with
+System VISA, validates the exact IT8812C identity, and follows the same
+Configure/Start prechecks, single trigger, timeout and CSV rules as Offline TRACE.
+The result includes `validation_only: true`, `validation_scope: "trace"` and
+VISA runtime evidence. The legacy LIVE override does not enable TRACE.
+`--hardware-validation trace --dry-run` previews arguments without opening VISA
+or creating CSV, and never counts as physical success. Do not use these CLI
+commands as unattended or ordinary load-operation APIs.
+
+The single controlled script `scripts/live-cli-check.ps1 -Modes trace` saves the
+original Trigger Source and Timer Interval with Input OFF, sets and verifies
+HOLD without changing the stored interval, and performs five short trials: VOLT 10 points / 1 s OFF, CURR 10 / 1 s OFF, TWO 40 / 1 s
+OFF, VOLT 10 / 1 ms OFF, and TWO 10 / 1 s with explicitly confirmed bounded
+Fixed CC Input ON. The last trial writes a new Full CSV with estimated elapsed
+and delta columns, then explicitly commands and confirms Input OFF. This is
+not waveform calibration, an exhaustive interval test, or Worker LIVE validation.
+TRACE Start alone has a 120-second script process deadline; other commands
+keep their existing 30-second budget and the total run stays bounded.
+The script restores and verifies the original Trigger Source and Timer Interval
+with trusted communication and confirmed Input OFF, including after a safely
+recoverable trial failure. A failed run stays FAIL. An untrusted VISA Session,
+unconfirmed Feed stop or uncertain Input state blocks Trigger restoration and
+requires independent operator recovery. The script never reconnects to an
+untrusted VISA Session to attempt blind Input OFF.
+
+Use an explicit operator-selected real Resource only after separately approving
+the bounded source/DUT, manual OFF contingency and interactive confirmation:
+
+```powershell
+.\scripts\live-cli-check.ps1 -Target itech-it8812c -Resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" -Modes trace -PlanOnly
+# For a separately authorized interactive physical run, remove -PlanOnly.
+```
+
+`-Modes trace` selects only TRACE. Omitting `-Modes` selects the default validation modes, including TRACE.
+TRACE-only runs use `preflight-cli.ps1 -TraceOnly` for focused, no-hardware
+preflight. `-PlanOnly` produces cases marked NOT RUN, not physical PASS.
+The existing redacted `shareable/report.json` records TRACE case settings,
+sample counts, CSV completeness and unconfirmed safety flags. `summary.md`
+provides concise per-case statuses and totals;
+raw samples and the CSV are held only in the run's ignored `.tmp_tests/`
+folder outside `shareable/`. The script requires the original interactive
+operator gate and explicit Input OFF readback. If communications become
+untrusted or a process deadline expires, the report marks safe shutdown
+unconfirmed and requires an independent manual safety procedure.
+
+### Controlled Timer validation
+
+Use the existing script's `-InputTimerOnly` shortcut (without `-Modes`), or
+select `-Modes input-timer`. Input Timer is included in the default all-mode
+run. Preview with a fictional USB resource for offline checks; supply an
+approved resource only for a separately authorized physical run:
+
+```powershell
+.\scripts\preflight-cli.ps1 -InputTimerOnly
+.\scripts\live-cli-check.ps1 -Target itech-it8812c -Resource "$env:ELECTRONICLOAD_TOOL_RESOURCE" -InputTimerOnly -Current 0.1 -TimerSeconds 5 -PlanOnly
+```
+
+PlanOnly accepts 3–10 seconds. The physical trial uses 5 seconds and positive
+CC up to 2 A (default 0.1 A), valid for both CC ranges. The script defaults to an
+operator-managed 5 V / 0.8 A source (overrides: >0 to 18 V / >0 to 2 A).
+The operator must configure and verify the source before physical testing.
+It retains the common approved setup/manual OFF contingency, interactive
+confirmation, runtime checks, process deadlines, redaction and explicit OFF
+cleanup requirements described below. Use an independently armed hardware
+cutoff that limits actual loading to at most 10 seconds. Its clock must start
+no later than the SCPI Input ON write, not the initial Enter. Prepare the
+cutoff and confirm the approved current-limited source at the initial
+confirmation; no additional Timer readiness prompt is needed. Cancel if
+the cutoff cannot be ready at the actual write. The 10-second cutoff
+applies to this 5-second trial under its approved conditions.
+
+The planned physical trial confirms Input OFF, explicitly disables Timer,
+sets low-range Fixed CC, configures/enables Timer, reads status while OFF,
+then confirms Input ON through `--hardware-validation input-timer` with complete
+expected `current`, `range` and integer `seconds`. Before and after remote
+transition Core rechecks physical OFF, CC settings, Short/Transient OFF and Timer
+readback. Core signals the SCPI ON write start before waiting for the instrument,
+so the same six-second deadline covers the ON subprocess and observation.
+Immediately after ON confirmation, a single read-only CLI process opens and
+identifies one VISA session and collects Timer/Input snapshots until the first OFF
+or the observation deadline. It does not reopen VISA or restart Python for each sample. The script requires a timed ON observation followed
+by the first OFF within six seconds of the write start. The conservative
+bracket from the ON query start to the OFF query completion must be at most
+one second and must not end before the five-second boundary. A definite
+early OFF, absent ON evidence or a wider bracket fails; later OFF queries
+cannot replace the first OFF. This is bounded functional acceptance, not
+exact timing calibration. Each poll respects the remaining
+observation window. When the window closes without a valid observation, the
+script fails and begins OFF cleanup. If the CLI process is still running at
+the deadline, the script prompts you to use the independent hardware cutoff
+immediately, before it waits for the process to exit. VISA cleanup requires that
+the process has exited and the existing communication rules permit it. A
+communication failure in a run that includes Trigger requires independent
+operator action. The CLI records the write, ON confirmation and Input query
+times. `-DebugArtifacts`
+saves these observations privately. The script sends and verifies explicit
+OFF, disables Timer separately and reads the final state. Acceptance is automatic
+from the timed ON/OFF evidence and verified cleanup. The operator must ensure
+the independent cutoff cannot intervene in the observation window and must not
+intervene except for safety; sampled evidence does not independently prove causation.
+A possible ON attempt gets one bounded OFF cleanup
+attempt under the existing communication rules. Timer-disable cleanup follows
+confirmed OFF.
+
+The validation-only Core/CLI scope uses `INP:TIM:DEL <seconds>`, `INP:TIM 0|1`,
+`INP:TIM:DEL?` and `INP:TIM?` from the
+[IT8800 Programming Guide V2.1, printed pp.45–46](https://assets.testequity.com/te1/Documents/pdf/itech/ITECH_IT8800-Programming-Guide-EN.pdf),
+which lists IT8812C. The DELay syntax line omits `:DELay`; its example and query
+include it. Readback must match. The trial reports the observed Enabled value
+after expiry without assuming retention, and does not establish timing accuracy,
+VON interaction, CV/CR/CW physical compatibility or Worker LIVE behavior.
+PlanOnly leaves every physical case NOT RUN and cannot promote Product LIVE.
+
+### Contributor Transient validation
+
+The CLI-only `--hardware-validation transient-cc|transient-cv|transient-cr|transient-cw`
+route follows the [controlled validation procedure](#controlled-instrument-validation).
+It requires separate physical authorization, exact identity/USB/System VISA,
+Input OFF checks, complete expected settings/readback and deliberate ON
+confirmation. It grants no normal Product or Worker LIVE permission.
+
+The existing `preflight-cli.ps1 -TransientOnly` covers all four functions offline.
+`live-cli-check.ps1` defaults to FULL;
+`-Modes` retains subset selection. `-PlanOnly` validates each request without
+VISA and reports physical cases as NOT RUN. New Transient trial defaults are
+`-VoltageLevelA 3`, `-VoltageLevelB 4` (V), `-ResistanceLevelA 10`,
+`-ResistanceLevelB 1000` (Ω), `-PowerLevelA 1`, `-PowerLevelB 2` (W).
+The existing width parameters are shared; CC keeps its separate levels/slew.
+CV uses Continuous Auto / Pulse Low / Toggle High; CR uses Continuous Auto /
+Pulse High / Toggle High; CW has all three without Range or slew.
+Auto expected ranges come from Core. Real execution retains explicit Resource,
+interactive confirmation, default 0.8 A / 5 V declared source limits,
+manual OFF contingency and private/redacted reporting. Cleanup uses the
+active Transient scope and verifies OFF before Disable. The unchanged 30-second
+command and 900-second total budgets apply; the default 192 invocations allow
+about 4.7 seconds each on average. Slow hardware may require selected subsets;
+no larger deadline is assumed.
+
+The [IT8800 Programming Guide V2.1](https://assets.testequity.com/te1/Documents/pdf/itech/ITECH_IT8800-Programming-Guide-EN.pdf)
+includes IT8812C. Printed pages 19–20, 48 and 50–58 define Transient controls:
+`FUNC:MODE FIX`, the selected `FUNC CURR|VOLT|RES|POW`, function-specific
+`:TRAN:MODE`, `:TRAN:ALEV`, `:TRAN:BLEV`, `:TRAN:AWID/BWID`, separate `TRAN ON/OFF`,
+`TRIG:SOUR HOLD` and `TRIG:IMM`. Pulse uses AWID; Toggle writes neither width.
+CV disables hardware automatic range and selects 18/120 V; CR selects
+10/7500 Ω. Unrecognized readback fails closed. CW writes no range or slew.
+Manual syntax and offline/fake tests do not certify physical acceptance.
+
+### Contributor Software Sequence validation
+
+For separately authorized physical runs, select `-Modes sequence` or include
+Sequence in a combined run with a dedicated 5 V / 0.8 A source. The script uses
+`sequence --file <file> --hardware-validation sequence --resource <USB-INSTR> --backend system --confirm --json`
+with the registered IT8812C over System VISA. For ASRL, use the explicit
+[contributor transport option](#asrl-contributor-validation). Each trial uses one session.
+Fixed setup and Input switching verify the applicable interlocks and settings.
+Use an exclusive instrument and an independent manual OFF method. Ordinary CLI
+and Worker LIVE are closed for Sequence.
+
+The contributor scope accepts only the four fixed documents, for 0.1 A CC,
+3 V CV, 1000 Ω CR and 0.10 W CW. Each has one ON, a 0.25 s Wait, measurement,
+and verified OFF. The initial Enter authorizes the four-trial Sequence batch
+without another operator prompt, retaining per-request CLI confirmation, a 30 s command deadline
+and a 900 s total deadline. The Core handles
+trusted cleanup on the existing session. The CLI directs the operator to
+switch off the load independently if a Remote transition during setup or Input ON
+ends without a fresh OFF readback, or if a run fails with Input observed ON
+after the initial OFF check succeeded. Once the instrument is identified,
+loss of trusted communication stops further commands. The CLI reports Input
+`UNKNOWN`, records `session_untrusted` as the cleanup reason, preserves the
+original error, and gives the same independent OFF instructions. The script
+also gives independent OFF instructions if the process times out or Input OFF
+is unconfirmed. Cleanup stays within the original session.
 
 ### Contributor Protection validation
 
@@ -1839,3 +1987,29 @@ Follow [Testing Guidelines](../testing-guidelines.md),
 [AGENTS.md](../../AGENTS.md) and the
 [ITECH IT8800 Programming Guide V2.1](https://assets.testequity.com/te1/Documents/pdf/itech/ITECH_IT8800-Programming-Guide-EN.pdf)
 before an independently authorized physical run.
+
+## Safety Defaults
+
+- [Exact LIVE support](../core/supported-models.md#product-live-support) is owned
+  by Core; simulation and dry-run never authorize physical operations.
+- No implicit Input ON. Use deliberate confirmation and the existing mode,
+  range, Input OFF, protection and cleanup checks for control operations.
+- Basic USB diagnostics never configure the load; Error Queue reads consume
+  entries only on explicit request. Worker and ASRL permissions remain separate.
+- A communication failure or VISA Close does not prove Input OFF. Use the
+  independent cutoff and recovery requirements in
+  [Controlled instrument validation](#controlled-instrument-validation).
+
+## Troubleshooting
+
+| Symptom | Check |
+| --- | --- |
+| Resource missing or stale | Use `list-resources`; explicit `--live-only` probes USB responders. Do not auto-select a resource. |
+| `identity_mismatch` or unsupported model | Verify the actual instrument and expected model; do not force a driver. |
+| VISA open or query failure | Check the selected System VISA runtime, resource, cable and framing. For ASRL use the approved contributor connection options. |
+| `unsupported_live_scope` | Consult the exact model/transport/execution-scope matrix; use simulate or dry-run for unsupported features. |
+| Instrument reports a nonzero error code | Use `error` explicitly when consuming the entry is intended. A valid nonzero code is query data, not a CLI transport failure. |
+| Input OFF is unconfirmed | Follow the independent manual cutoff procedure; do not blindly reconnect or treat session close as proof of OFF. |
+
+Share only redacted diagnostics; real resource strings, serials and private
+settings must not be published.
