@@ -3104,6 +3104,9 @@ try {
     if ($report.results.error_code -contains 'list_save_unconfirmed') {
         throw 'LIST validation is incomplete because Save was not confirmed.'
     }
+    if ($averageChangeAttempted) {
+        throw 'Average finalization was not confirmed.'
+    }
     $report.status = if ($readbackSelected -and ($report.results.readback_comparison -contains 'OBSERVED ONLY')) {
         'OBSERVED ONLY'
     } else { 'PASS' }
@@ -3130,7 +3133,7 @@ try {
     if (-not $timerPowered) { Write-Host "Validation did not complete: $($_.Exception.Message)" }
 } finally {
     # PowerShell pipeline interruption can bypass catch and the exit after finally.
-    $validationInterrupted = ($triggerSelected -or $protectionSelected -or $sequenceSelected -or $asrlSelected) -and
+    $validationInterrupted = ($triggerSelected -or $protectionSelected -or $sequenceSelected -or $asrlSelected -or $averageChangeAttempted) -and
         $phase -in @('identify','cases') -and $report.status -eq 'NOT RUN'
     if ($validationInterrupted) { $report.status = 'FAIL' }
     if ($inputOnAttempted) {

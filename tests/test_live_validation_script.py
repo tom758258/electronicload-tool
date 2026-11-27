@@ -1874,7 +1874,7 @@ Restore-Protection 'protection-default-hardware-power' $original @('hardware_pow
     assert output["confirmed"] is True
 
 
-@pytest.mark.parametrize('scenario', ['success', 'baseline_mismatch', 'restore_mismatch'])
+@pytest.mark.parametrize('scenario', ['success', 'mixed', 'baseline_mismatch', 'trial_failure', 'restore_mismatch'])
 def test_selected_execution_loop_has_no_repeated_operator_prompts(run_script, scenario):
     # Execute the real selected-mode loop with controlled CLI responses.
     # Timer, both Workflow loads and Sequence must proceed after the initial
@@ -1916,6 +1916,11 @@ $planned = @(
 $averageOriginal = $null
 $averageChangeAttempted = $false
 $script:averageWrites = @()
+if ($Scenario -ceq 'mixed') {
+    $planned[-1] = @{name='measurement-extensions-average';command='set-average';
+        args=@('--hardware-validation','measurement-extensions','--count','8','--confirm');
+        execution='live';expected=@{average_count=8};average_end=$true}
+}
 $script:report = @{
     results=@(foreach ($step in $planned[1..($planned.Count - 1)]) {
         [ordered]@{name=$step.name;status='NOT RUN'}
@@ -1980,13 +1985,16 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName, [string[]]$Extr
             $payload.state_source = 'instrument_readback'
             $payload.average_count = 14
         }
-        { $_ -cin @('validation-average-baseline','validation-average-restore') } {
+        { $_ -cin @('validation-average-baseline','validation-average-restore','measurement-extensions-average') } {
             $count = [int]$ExtraArgs[[Array]::IndexOf($ExtraArgs, '--count') + 1]
             $script:averageWrites += $count
             $payload.validation_only = $true
             $payload.validation_scope = 'measurement-extensions'
             $payload.average_count = if ($Scenario -ceq 'baseline_mismatch' -and $count -eq 2) { 14 }
                 elseif ($Scenario -ceq 'restore_mismatch' -and $count -eq 14) { 2 } else { $count }
+        }
+        'workflow-cc-timed-load' {
+            if ($Scenario -ceq 'trial_failure') { throw 'Simulated failed Workflow trial' }
         }
         'timer-status-off' {
             $payload.seconds = 5
@@ -2031,15 +2039,24 @@ try { Invoke-Expression $loop.Extent.Text } catch { $failure = $_.Exception.Mess
     assert result.returncode == 0, result.stdout + result.stderr
     evidence = json.loads(result.stdout.splitlines()[-1])
     assert evidence['answers'] == []
-    assert evidence['average_writes'] == ([2] if scenario == 'baseline_mismatch' else [2, 14])
-    assert evidence['average_pending'] is (scenario != 'success')
-    assert (evidence['failure'] is None) is (scenario == 'success')
-    if scenario == 'baseline_mismatch':
-        assert 'command:timer-on' not in evidence['calls']
+    success = scenario in ('success', 'mixed')
+    interrupted = scenario in ('baseline_mismatch', 'trial_failure')
+    assert evidence['average_writes'] == ([2] if interrupted else [2, 8 if scenario == 'mixed' else 14])
+    assert evidence['average_pending'] is not success
+    assert (evidence['failure'] is None) is success
+    if interrupted:
         assert 'command:validation-average-restore' not in evidence['calls']
+        assert 'command:measurement-extensions-average' not in evidence['calls']
+        if scenario == 'baseline_mismatch':
+            assert 'command:timer-on' not in evidence['calls']
+        else:
+            assert 'command:workflow-cc-timed-load' in evidence['calls']
+            assert 'command:workflow-cc-discharge' not in evidence['calls']
         return
-    assert evidence['calls'].index('command:validation-average-baseline') < evidence['calls'].index('command:timer-on')
-    assert evidence['calls'].index('command:sequence') < evidence['calls'].index('command:validation-average-restore')
+    calls = evidence['calls']
+    assert calls.index('command:validation-average-baseline') < calls.index('command:timer-on')
+    final = 'measurement-extensions-average' if scenario == 'mixed' else 'validation-average-restore'
+    assert calls.index('command:sequence') < calls.index(f'command:{final}')
     assert evidence['timer_powered'] is False
     assert evidence['timer_enabled'] is False
     assert evidence['input_on_attempted'] is False
