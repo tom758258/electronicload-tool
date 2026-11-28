@@ -578,10 +578,13 @@ def test_contributor_trigger_observation_plan_and_refusal_before_visa(monkeypatc
     assert not plan["hardware_access"] and plan["planned_writes"] == ["SYST:REM", "TRIG:IMM"]
     assert "MEAS:CURR?" in plan["queries"] and not fake.calls
     assert cli.main([*args, "--confirm"]) == 2 and not fake.calls
-    expected["configuration"]["pulse_width"] = "0.001"
-    args[args.index("--validation-settings-json") + 1] = json.dumps(expected)
-    assert cli.main([*args, "--confirm", "--dry-run"]) == 2 and not fake.calls
     capsys.readouterr()
+    # Faster USB pacing must not relax the existing conservative observation budget.
+    for width in ("0.001", "1"):
+        expected["configuration"]["pulse_width"] = width
+        args[args.index("--validation-settings-json") + 1] = json.dumps(expected)
+        assert cli.main([*args, "--confirm", "--dry-run"]) == 2 and not fake.calls
+        assert "too short" in json.loads(capsys.readouterr().out)["error"]["message"]
     args[args.index("--observation-seconds") + 1] = "40"
     expected = {"function": "LIST", "trigger": {"source": "BUS"}, "configuration": {
         "range": "low", "repeat_count": 1, "steps": [

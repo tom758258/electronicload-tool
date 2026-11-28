@@ -9,7 +9,7 @@ from .errors import LoadError
 from .hardware_validation import _stopping, _trigger_snapshot, list_program_writes
 from .trigger import SOURCE_TOKENS
 from .identity import MODEL_ID, parse_identity
-from .visa import QUERY_DELAY_S, open_request_session, validate_request_connection
+from .visa import VALIDATION_QUERY_BUDGET_S, open_request_session, validate_request_connection
 
 
 COMMAND = "contributor-settings"
@@ -777,7 +777,7 @@ class _ListBudget:
                             "Only the verified empty LIST may be initialized.", 3)
         self.count = 2 if self.initially_blank else count
         self.snapshot_queries = 3 + 3 * self.count
-        self.query_ns = int(max(QUERY_DELAY_S, getattr(session, "query_delay", 0) or 0) * 1e9)
+        self.query_ns = int(max(VALIDATION_QUERY_BUDGET_S, getattr(session, "query_delay", 0) or 0) * 1e9)
         # Every initialization write requires OFF guards, then full readback.
         # This reserve is consumed before the normal LIST preparation starts.
         self.blank_prepare_queries = (3 * 9 + self.snapshot_queries + 3

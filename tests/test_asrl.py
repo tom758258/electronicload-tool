@@ -214,7 +214,7 @@ def test_asrl_native_cleanup_retains_failures_and_usb_can_open(asrl_library, fak
     assert fake_visa.calls == [
         ("backend", "@ivi"), "manager", ("open", USB, 5000), "open_resource",
         ("timeout", 5000), ("read_termination", "\n"), ("write_termination", "\n"),
-        ("query_delay", 0.15), "runtime_metadata", "*IDN?", "session_close", "manager_close",
+        ("query_delay", 0.020), "runtime_metadata", "*IDN?", "session_close", "manager_close",
     ]
 
 
