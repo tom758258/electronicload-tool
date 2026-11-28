@@ -1551,7 +1551,10 @@ function Confirm-OperatorStart([string[]]$Modes, $Isolated, [bool]$ConnectedTria
     if ('trace' -in $Modes -or 'trigger' -in $Modes -or
         @($Modes | Where-Object { $_ -like 'transient-*' }).Count -gt 0) {
         Write-Host '- Authorize temporary Trigger Source settings with Input OFF and restoration of the original Source and Timer Interval when safe. Keep external trigger signals inactive outside the EXTERNAL trial.'
-        if ('trigger' -in $Modes) { Write-Host '- Authorize a temporary zero Fixed CC baseline and exact restoration of its saved setpoint and selector when safe.' }
+        if ('trigger' -in $Modes) {
+            Write-Host '- Authorize a temporary zero Fixed CC baseline and exact restoration of its saved setpoint and selector when safe.'
+            Write-Host '- Trigger preparation may disable CR-LED and switch to Fixed CC with Input OFF. The original CR-LED state, operating mode and dynamic configurations are not restored.'
+        }
     }
     if ('trigger' -in $Modes) {
         Write-Host '- Confirm external On/Off and analog programming are disabled and external trigger wiring was reviewed while de-energized.'

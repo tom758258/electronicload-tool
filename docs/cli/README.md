@@ -1942,7 +1942,11 @@ functional evidence, not independent pulse-width or amplitude calibration.
 HOLD uses a verified zero Fixed CC baseline, then a pulse at A for the
 configured width followed by B. Before the first Trigger trial, the runner
 selects Fixed CC with Input OFF if necessary, saves its exact setpoint and
-numeric selector privately, and establishes and verifies zero. An original
+numeric selector privately, and establishes and verifies zero. When starting
+from Fixed CR with LED ON, it first disables CR-LED and verifies LED OFF
+before selecting Fixed CC. PlanOnly lists this conditional write and the LED
+status query; the operator authorizes this possible change before the initial
+confirmation. An original
 setpoint outside the 2 A validation ceiling or one that cannot be restored
 exactly is refused before setpoint/selector mutation. The runner verifies
 the zero baseline again before enabling the transient and before Input ON
@@ -1958,7 +1962,8 @@ precede the adjacent RUN assertion, with subsequent confirmed A samples and
 a bounded common start/end reporting offset consistent with the finite LIST
 duration. Missing, late, early-clear or stuck RUN evidence still fails.
 The test replaces the active CC Transient and LIST configurations; the
-original operating mode and dynamic configurations are not restored.
+original CR-LED state, operating mode and dynamic configurations are not
+restored.
 MANUAL remains implemented for offline Trigger Setup and as an original Source
 to read or restore after validation, but it has no powered contributor trial;
 no Local or front-panel Trigger action is required. For EXTERNAL, use the rear

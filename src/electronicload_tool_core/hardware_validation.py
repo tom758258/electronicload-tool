@@ -636,11 +636,14 @@ def execute_trigger_fixed_cc(*, mode, resource, current, range_name, expected, s
         return {**marker, "command": "set-cc", "hardware_access": False,
                 "range": range_name, "planned_writes": ["SYST:REM", *writes],
                 "conditional_writes": [
+                    {"condition": "prepare from Fixed CR with LED ON; verify LED OFF before mode selection",
+                     "writes": ["RES:LED:STAT 0"]},
                     {"condition": "prepare from a different supported selection",
                      "writes": ["FUNC:MODE FIX", "FUNC CURR"]},
                 ] if operation == "prepare" else [],
                 "queries": ["*IDN?", "INP:STAT?", "TRAN?", "INP:SHOR:STAT?",
-                            "CURR:SLEW:STAT?", "FUNC:MODE?", "FUNC?", "CURR:RANG?", "CURR?"]}
+                            "CURR:SLEW:STAT?", "FUNC:MODE?", "FUNC?", "RES:LED:STAT?",
+                            "CURR:RANG?", "CURR?"]}
     with open_request_session(resource, asrl, c.open_session) as (session, runtime):
         require_trusted_session(session)
         parse_identity(c._query(session, "*IDN?"))

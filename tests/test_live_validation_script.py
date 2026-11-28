@@ -151,6 +151,8 @@ def assert_validation_trigger_plan(cases, modes):
         prepare, restore = cases['trigger-fixed-prepare'], cases['trigger-fixed-restore']
         assert prepare['command'] == restore['command'] == 'set-cc'
         assert prepare['planned_writes'] == ['SYST:REM', 'CURR 0', 'CURR:RANG 0']
+        assert 'RES:LED:STAT?' in prepare['queries']
+        assert any(item['writes'] == ['RES:LED:STAT 0'] for item in prepare['conditional_writes'])
         assert restore['planned_writes'] == ['SYST:REM', 'CURR 0', 'CURR:RANG <original>']
         assert '<original>' in restore['arguments']
         assert names.index('trigger-fixed-prepare') < names.index('trigger-hold-configure')
@@ -1617,6 +1619,10 @@ ConvertTo-Json -InputObject $results -Depth 8 -Compress
         assert ('10 s hardware cutoff' in notices) == bool(modes & {'input-timer', 'workflow'})
         assert ('Sequence:' in notices) == ('sequence' in modes)
         assert ('EXTERNAL Trigger equipment' in notices) == ('trigger' in modes)
+        assert ('Trigger preparation may disable CR-LED' in notices) == ('trigger' in modes)
+        assert ('The original CR-LED state, operating mode and dynamic configurations are not restored.' in notices) == (
+            'trigger' in modes
+        )
         assert ('Protection:' in notices) == ('protection' in modes)
         assert ('Average count 2 measurement baseline' in notices) is connected
         assert ('Average count may be set to 8' in notices) == ('measurement-extensions' in modes)

@@ -616,6 +616,9 @@ def test_hold_observation_dispatches_one_trigger_after_zero_fixed_baseline(
     (0, 0, "restore"), (0.1, 0.2, "restore"), (0.2, 0.4, "restore"),
     (0.2, 60, "restore"), (0.1, 0.2, "cancel"), (3, 6, "unsafe"),
     (0.1, 0.2, "input_on"), (0.1, 0.2, "short"),
+    (0.1, 0.2, "cr_led_on"), (0.1, 0.2, "cr_led_off"),
+    (0.1, 0.2, "cr_led_ignored"), (0.1, 0.2, "fixed_cw"),
+    (0.1, 0.2, "selected_list"),
 ])
 def test_trigger_fixed_cc_baseline_is_saved_before_mutation_and_restored(
     monkeypatch, initial, selector, scenario,
@@ -624,6 +627,15 @@ def test_trigger_fixed_cc_baseline_is_saved_before_mutation_and_restored(
     fake.current, fake.range = initial, selector
     fake.input = scenario == "input_on"
     fake.short = scenario == "short"
+    if scenario.startswith("cr_led_"):
+        fake.function = "RES"
+        fake.values["RES:LED:STAT"] = "0" if scenario == "cr_led_off" else "1"
+        if scenario == "cr_led_ignored":
+            fake.ignore = "RES:LED:STAT 0"
+    elif scenario == "fixed_cw":
+        fake.function = "POW"
+    elif scenario == "selected_list":
+        fake.mode = "LIST"
     session(fake, monkeypatch)
     stop = Event()
     snapshots = []
@@ -637,13 +649,31 @@ def test_trigger_fixed_cc_baseline_is_saved_before_mutation_and_restored(
     options = dict(current="0", range_name="low", stop=stop,
                    validation_settings={"fixed_cc_baseline": "prepare"},
                    on_trigger_fixed_baseline=handoff)
-    if scenario != "restore":
-        with pytest.raises(LoadError):
+    plan = physical("set-cc", mode="dry-run", current="0", range_name="low",
+                    validation_settings={"fixed_cc_baseline": "prepare"})
+    assert plan["hardware_access"] is False and not fake.calls
+    assert "RES:LED:STAT?" in plan["queries"]
+    assert any(item["writes"] == ["RES:LED:STAT 0"] for item in plan["conditional_writes"])
+    if scenario in {"cancel", "unsafe", "input_on", "short", "cr_led_ignored"}:
+        with pytest.raises(LoadError) as error:
             physical("set-cc", **options)
         assert not any(call.startswith(("CURR ", "CURR:RANG ", "INP ON")) for call in fake.calls)
+        if scenario == "cr_led_ignored":
+            assert error.value.code == "readback_mismatch"
+            assert fake.values["RES:LED:STAT"] == "1" and not snapshots
+            assert fake.calls.count("RES:LED:STAT 0") == 1
+            assert "FUNC:MODE FIX" not in fake.calls and "FUNC CURR" not in fake.calls
         return
     prepared = physical("set-cc", **options)
     assert prepared["input_state"] == "OFF" and fake.current == fake.range == 0
+    assert (fake.mode, fake.function) == ("FIX", "CURR")
+    if scenario == "cr_led_on":
+        led_write = fake.calls.index("RES:LED:STAT 0")
+        led_readback = fake.calls.index("RES:LED:STAT?", led_write + 1)
+        assert led_write < led_readback < fake.calls.index("FUNC:MODE FIX")
+        assert fake.values["RES:LED:STAT"] == "0"
+    else:
+        assert "RES:LED:STAT 0" not in fake.calls
     assert len(snapshots) == 1 and prepared["original_fixed_cc"] == snapshots[0]
     original = snapshots[0]
     assert Decimal(original["current_a"]) == Decimal(str(initial))
@@ -654,7 +684,37 @@ def test_trigger_fixed_cc_baseline_is_saved_before_mutation_and_restored(
                                              "selector_a": original["selector_a"]})
     assert restored["input_state"] == "OFF"
     assert (fake.current, fake.range) == (initial, selector)
+    assert (fake.mode, fake.function) == ("FIX", "CURR")
+    assert fake.values["RES:LED:STAT"] == "0"
     assert "INP ON" not in fake.calls
+
+
+@pytest.mark.parametrize("operation,blocked_write", [
+    ("transient-enable", "TRAN ON"), ("input-on", "INP ON"),
+])
+@pytest.mark.parametrize("after_remote", [False, True])
+def test_hold_zero_baseline_drift_refuses_enable_or_input_on(monkeypatch, operation, blocked_write, after_remote):
+    fake = TriggerFake()
+    fake.current = 0
+    session(fake, monkeypatch)
+    settings = transient("pulse", "low")
+    physical("trigger-configure", trigger_source="HOLD")
+    physical("set-transient-cc", transient=settings)
+    expected = {"function": "CC", "configuration": settings, "trigger": {"source": "HOLD"},
+                "fixed_cc_baseline_a": 0}
+    if operation == "input-on":
+        physical("transient-enable", validation_settings=expected)
+    fake.calls.clear()
+    if after_remote:
+        fake.after_remote = lambda device: setattr(device, "current", 0.1)
+    else:
+        fake.current = 0.1
+    with pytest.raises(LoadError) as error:
+        physical(operation, validation_settings=expected,
+                 **({"confirmed": True} if operation == "input-on" else {}))
+    assert error.value.code == "readback_mismatch"
+    assert blocked_write not in fake.calls and not fake.input
+    assert "SYST:REM" in fake.calls if after_remote else "SYST:REM" not in fake.calls
 
 
 @pytest.mark.parametrize("query_ms,command_seconds,complete", [
