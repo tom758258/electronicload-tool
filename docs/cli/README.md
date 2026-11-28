@@ -154,7 +154,7 @@ rules and read-only command implementations.
 
 | Transport | VISA open timeout | Identity query timeout | Other I/O timeout | Framing |
 | --- | --- | --- | --- | --- |
-| USB INSTR | 5000 ms | 5000 ms | 5000 ms | LF read/write, 150 ms query delay |
+| USB INSTR | 5000 ms | 5000 ms | 5000 ms | LF read/write, 20 ms query delay |
 | ASRL INSTR | 1000 ms | 1000 ms | 5000 ms | VISA/PyVISA settings with selective overrides |
 
 The USB open timeout is passed to the VISA driver, which controls its

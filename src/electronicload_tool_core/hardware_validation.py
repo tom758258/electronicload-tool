@@ -17,7 +17,7 @@ from .identity import MODEL_ID, parse_identity
 from .protection import FAULT_MASK, _condition
 from .readback import TRANSIENT_LEVEL_QUERIES, fixed_slew_status, transient_mode, transient_values
 from .simulator import ControlSimulator
-from .visa import QUERY_DELAY_S, open_request_session, require_trusted_session, validate_request_connection
+from .visa import VALIDATION_QUERY_BUDGET_S, open_request_session, require_trusted_session, validate_request_connection
 from .trigger import (SOURCE_TOKENS, TRIGGER_COMMANDS, TRIGGER_INTERVAL_QUERY,
                       TRIGGER_SOURCE_QUERY, read_source, sampled_waveform_evidence,
                       software_trigger, validate_interval, validate_setup)
@@ -53,7 +53,7 @@ def _observe_input_timer(session, expected, stop):
     observations = []
     # Do not start an entire snapshot when even its configured delays cannot
     # fit. The existing runner deadline also bounds a blocked VISA exchange.
-    minimum_ns = int(3 * getattr(session, "query_delay", QUERY_DELAY_S) * 10**9)
+    minimum_ns = int(3 * getattr(session, "query_delay", VALIDATION_QUERY_BUDGET_S) * 10**9)
     while deadline_ns - monotonic_ns() > minimum_ns:
         _stopping(stop)
         status = _input_timer_snapshot(session, timing=True)
@@ -706,10 +706,11 @@ def execute_trigger_observation(*, mode, resource, backend, model_id, expected, 
     ):
         raise LoadError("unsupported_live_scope", "Observation requires Low range and levels within 2 A.")
     widths = [levels["width_a"]] + ([levels["width_b"]] if is_list else [])
-    # Even consecutive queries consume two configured query delays plus
-    # the existing 50 ms sampling wait. Reject impossible plans before VISA.
-    minimum_gap = (3 * QUERY_DELAY_S if is_list else
-                   max(2 * QUERY_DELAY_S + 0.05, 3 * QUERY_DELAY_S if source == "HOLD" else 0))
+    # Keep the existing conservative query budget and 50 ms sampling wait
+    # for admission, independent of the USB session's configured delay.
+    minimum_gap = (3 * VALIDATION_QUERY_BUDGET_S if is_list else
+                   max(2 * VALIDATION_QUERY_BUDGET_S + 0.05,
+                       3 * VALIDATION_QUERY_BUDGET_S if source == "HOLD" else 0))
     if min(0.5, float(min(widths)) / 4) <= minimum_gap:
         raise LoadError("argument_error", "Trigger dwell or pulse is too short for automatic current sampling.")
     if levels["level_a"] == levels["level_b"] or needed > seconds:
@@ -722,7 +723,7 @@ def execute_trigger_observation(*, mode, resource, backend, model_id, expected, 
     fixed_queries = (4 + guard_queries * (2 if software else 1) + int(software)
                      + (2 if is_list else 0) + 4 * int(source == "HOLD"))
     event_seconds = needed - trigger["interval_s"] if source == "TIMER" else needed
-    minimum_seconds = float(event_seconds) + fixed_queries * QUERY_DELAY_S + 0.3
+    minimum_seconds = float(event_seconds) + fixed_queries * VALIDATION_QUERY_BUDGET_S + 0.3
     if minimum_seconds >= min(seconds, 30) - 0.5:
         raise LoadError("argument_error", "Trigger event and required queries cannot fit the capture deadline.")
     if not confirmed:
@@ -840,7 +841,7 @@ def execute_trigger_observation(*, mode, resource, backend, model_id, expected, 
                 # Actual process startup and readback latency can consume more
                 # than the preview's minimum. Do not dispatch an event that can
                 # no longer finish within the already authorized capture window.
-                event_reserve_ns = int((float(event_seconds) + (3 if is_list else 2) * QUERY_DELAY_S + 0.3) * 1e9)
+                event_reserve_ns = int((float(event_seconds) + (3 if is_list else 2) * VALIDATION_QUERY_BUDGET_S + 0.3) * 1e9)
                 if deadline_ns - monotonic_ns() <= event_reserve_ns:
                     raise LoadError("trigger_observation_unconfirmed", "No time remains for the complete software Trigger observation.", 3)
                 write_attempted = True
@@ -851,7 +852,7 @@ def execute_trigger_observation(*, mode, resource, backend, model_id, expected, 
             # Leave time for the final state query and process return. An overrun or
             # lost exchange is still handled by the existing script deadline.
             phase = "waveform"
-            reserve_ns = 300_000_000 + (int(QUERY_DELAY_S * 10**9) if is_list else 0)
+            reserve_ns = 300_000_000 + (int(VALIDATION_QUERY_BUDGET_S * 10**9) if is_list else 0)
             saw_list_running = False
             while monotonic_ns() + reserve_ns < deadline_ns and len(samples) < 10000:
                 sample()

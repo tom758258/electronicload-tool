@@ -12,7 +12,9 @@ from .errors import LoadError, communication_error
 
 TIMEOUT_MS = 5000
 TERMINATION = "\n"
-QUERY_DELAY_S = 0.150
+QUERY_DELAY_S = 0.020
+# Keep the existing conservative validation estimates independent of USB pacing.
+VALIDATION_QUERY_BUDGET_S = 0.150
 ASRL_OPEN_TIMEOUT_MS = 1000
 ASRL_IDN_TIMEOUT_MS = 1000
 _NS_PER_MS = 1_000_000
