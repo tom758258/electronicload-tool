@@ -157,7 +157,10 @@ def assert_validation_trigger_plan(cases, modes):
         assert names.index('trigger-external-release') < names.index('trigger-fixed-restore') < names.index('trigger-restore')
         for suffix in ('enable', 'on', 'dispatch'):
             args = cases[f'trigger-hold-{suffix}']['arguments']
-            assert json.loads(args[args.index('--validation-settings-json') + 1])['fixed_cc_baseline_a'] == 0
+            settings = args[args.index('--validation-settings-json') + 1]
+            if isinstance(settings, str):
+                settings = json.loads(settings)
+            assert settings['fixed_cc_baseline_a'] == 0
     if not managed:
         return
     assert cases['trigger-snapshot']['command'] == 'trigger-status'
