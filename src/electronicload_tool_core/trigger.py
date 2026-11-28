@@ -140,7 +140,7 @@ def sampled_waveform_evidence(samples, *, source, level_a, level_b, width_a,
 
     plateau_brackets = []
 
-    def plateau(index, duration, *, terminal_s=None):
+    def plateau(index, duration, *, terminal_s=None, run_lag=0):
         values = runs[index][1]
         if len(values) < 2:
             return False
@@ -168,6 +168,12 @@ def sampled_waveform_evidence(samples, *, source, level_a, level_b, width_a,
             entry_lower = max(before["started_s"],
                               first["completed_s"] - gap - transition_spans.get(index, 0))
             exit_upper = min(after_completed, end_lower + gap + transition_spans.get(index + 1, 0))
+            if terminal_s is not None and run_lag:
+                # RUN and current are separate exchanges. In the narrowly
+                # bounded delayed-RUN case below, a final current sample can
+                # precede the observed RUN clear but follow physical completion.
+                # Require two confirmed B samples before the inferred end.
+                end_lower = max(end_lower - run_lag, values[1]["completed_s"])
             lower = end_lower - first["completed_s"]
             upper = exit_upper - entry_lower
             plateau_brackets.append((entry_lower, first["completed_s"], end_lower, exit_upper))
@@ -178,12 +184,37 @@ def sampled_waveform_evidence(samples, *, source, level_a, level_b, width_a,
         pattern = ["Z", *(["A", "B"] * repeats)]
         if labels != pattern:
             return None
-        # Every A/B plateau sample must have a subsequent running-state
-        # readback. The zero baseline and excluded terminal current do not.
-        if any(item.get("list_running") is not True for _, values in runs[1:] for item in values):
-            return None
+        # Retain the normal RUN contract. At fast query cadence the first
+        # A current may be visible one exchange before RUN is reported. Admit
+        # only that single adjacent edge, with two subsequent RUN-confirmed A
+        # samples and a bounded, common offset for the RUN start/end timeline.
+        # A late RUN during B or a long unconfirmed A dwell still fails.
+        unconfirmed = [item for _, values in runs[1:] for item in values
+                       if item.get("list_running") is not True]
+        run_lag = 0
+        if unconfirmed:
+            first_a = runs[1][1]
+            if (len(unconfirmed) != 1 or len(first_a) < 3 or unconfirmed[0] is not first_a[0]
+                    or samples[first_running] is not first_a[1]
+                    or samples[first_running - 1] is not first_a[0]):
+                return None
+            prior, following = first_a[:2]
+            run_start_lower = prior.get("list_status_started_s")
+            prior_end = prior.get("list_status_completed_s")
+            next_start = following.get("list_status_started_s")
+            run_start_upper = following.get("list_status_completed_s")
+            if (None in (run_start_lower, prior_end, next_start, run_start_upper)
+                    or not prior["completed_s"] <= run_start_lower <= prior_end
+                    <= following["started_s"] <= following["completed_s"]
+                    <= next_start <= run_start_upper
+                    or run_start_upper - run_start_lower > gap_limit):
+                return None
+            run_lag = min(gap, run_start_upper - run_start_lower)
+            if run_lag <= 0:
+                return None
         if not all(plateau(index, widths[(index - 1) % 2],
-                           terminal_s=terminal if index == len(pattern) - 1 else None)
+                           terminal_s=terminal if index == len(pattern) - 1 else None,
+                           run_lag=run_lag if index == len(pattern) - 1 else 0)
                    for index in range(1, len(pattern))):
             return None
         # All dwell boundaries must agree on one finite LIST timeline. A
@@ -198,6 +229,17 @@ def sampled_waveform_evidence(samples, *, source, level_a, level_b, width_a,
             latest = min(latest, exit_upper - elapsed)
         if earliest > latest:
             return None
+        if run_lag:
+            # The same nonnegative reporting offset must explain BOTH RUN
+            # edges relative to the single current timeline. Do not spend a
+            # separate extra margin on each dwell or accept a late RUN with
+            # the wrong duration. The offset is bounded by the measured
+            # adjacent exchanges, never the 0.5 s gap ceiling.
+            run_earliest = max(run_start_lower, last_running - elapsed)
+            run_latest = min(run_start_upper, terminal - elapsed)
+            if (run_earliest > run_latest
+                    or max(0, run_earliest - latest) > min(run_lag, run_latest - earliest)):
+                return None
         events = repeats
     else:
         pattern = (["B", "A", "B", "A", "B"] if source == "TIMER" else
@@ -231,4 +273,8 @@ def sampled_waveform_evidence(samples, *, source, level_a, level_b, width_a,
                 "list_run_bracket": {"last_running_started_s": last_running,
                                      "first_stopped_completed_s": terminal,
                                      "uncertainty_s": terminal - last_running}}
-               if is_list else {})}
+               if is_list else {}),
+            **({"list_run_start_bracket": {"last_idle_started_s": run_start_lower,
+                                          "first_running_completed_s": run_start_upper,
+                                          "max_reporting_offset_s": run_lag}}
+               if is_list and run_lag else {})}

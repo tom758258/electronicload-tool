@@ -156,6 +156,8 @@ $readbackScope = @('--hardware-validation', 'readback')
 # The Trigger pulse needs an observable preset; the legacy Transient default is unchanged.
 $script:triggerPulseWidth = $(if ($PSBoundParameters.ContainsKey('PulseWidth')) { $PulseWidth } else { '2' })
 $script:originalTriggerSnapshot = $null
+$script:triggerFixedOriginal = $null
+$script:triggerFixedMayHaveChanged = $false
 $script:triggerSourceMayHaveChanged = $false
 $triggerTrials = @()
 $triggerPlans = @()
@@ -283,11 +285,11 @@ function Save-Report {
                                      'trigger-configure','trigger-status')) {
                 $case.input_state = $entry.response.result.input_state
             }
-            if ($entry.command -in @('set-cc', 'set-cv', 'set-cr', 'set-cr-led', 'cr-led-status')) {
+            if ($entry.name -cne 'trigger-fixed-restore' -and $entry.command -in @('set-cc', 'set-cv', 'set-cr', 'set-cr-led', 'cr-led-status')) {
                 $case.range = $entry.response.result.range
             }
             if ($entry.command -eq 'set-cc') {
-                $case.current_a = $entry.response.result.current_a
+                if ($entry.name -cne 'trigger-fixed-restore') { $case.current_a = $entry.response.result.current_a }
                 $case.input_state = $entry.response.result.input_state
                 $case.function = $entry.response.result.function
             }
@@ -612,6 +614,8 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
     $timerOn = $CaseName -ceq 'timer-on'
     $workflowLoad = $Command -cin @('cc-timed-load', 'cc-discharge')
     $isolatedSettings = $Command -ceq 'contributor-settings'
+    $triggerFixedPrepare = $CaseName -ceq 'trigger-fixed-prepare'
+    $baselineHandoff = $isolatedSettings -or $triggerFixedPrepare
     $externalCapture = $Command -ceq 'trigger-observe' -and $CaseName -ceq 'trigger-external-observed'
     $captureReady = $false
     if ($workflowLoad -and $remaining -lt 10000) { throw 'Insufficient time remains for a bounded Workflow load trial.' }
@@ -621,7 +625,7 @@ function Invoke-LiveCommand([string]$Command, [string]$CaseName,
         $launcher = 'import sys; from electronicload_tool_cli.cli import main; raise SystemExit(main(timer_on_write_started=lambda ns: print("Timer INP ON write started:", ns, file=sys.stderr, flush=True)))'
     } elseif ($workflowLoad) {
         $launcher = 'import os, sys, threading; from electronicload_tool_cli.cli import main; stop=threading.Event(); threading.Thread(target=lambda: (os.read(sys.stdin.fileno(), 1), stop.set()), daemon=True).start(); raise SystemExit(main(contributor_stop=stop, workflow_on_write_started=lambda ns: print("Workflow INP ON write started:", ns, file=sys.stderr, flush=True)))'
-    } elseif ($isolatedSettings) {
+    } elseif ($baselineHandoff) {
         $launcher = @'
 import os, sys, threading
 from electronicload_tool_cli.cli import main, _show_settings_baseline
@@ -678,7 +682,7 @@ raise SystemExit(main(contributor_stop=stop, settings_on_baseline=handoff))
         $entry.status = 'FAIL'
         $stdout = $process.StandardOutput.ReadToEndAsync()
         $stderr = $null
-        if ($observeOn -or $isolatedSettings -or $externalCapture) {
+        if ($observeOn -or $baselineHandoff -or $externalCapture) {
             # Read live notifications before waiting for the child to exit.
             $notificationStartNs = if ($observeOn) { $dispatchNs } else { Get-TimerMonotonicNs }
             $commandDeadlineNs = if ($listSettingsDeadlineNs) { $listSettingsDeadlineNs }
@@ -690,11 +694,23 @@ raise SystemExit(main(contributor_stop=stop, settings_on_baseline=handoff))
                 $line = $read.GetAwaiter().GetResult()
                 if ($null -eq $line) { break }
                 [void]$earlyDiagnostic.AppendLine($line)
-                if ($isolatedSettings -and $line -cmatch '\ASettings recovery baseline \(private\): \{.+\}\z') {
+                if ($baselineHandoff -and $line -cmatch '\ASettings recovery baseline \(private\): \{.+\}\z') {
                     # Display the recovery data before allowing any instrument writes. Keep it out of shareable reports.
                     Write-Host $line
                     $baselineShown = $true
                     if ((Get-TimerMonotonicNs) -ge $commandDeadlineNs) { break }
+                    if ($triggerFixedPrepare) {
+                        $original = $line.Substring('Settings recovery baseline (private): '.Length) | ConvertFrom-Json -ErrorAction Stop
+                        if ($original.range -cnotin @('low','high') -or
+                            $original.current_a -isnot [string] -or $original.selector_a -isnot [string] -or
+                            [decimal]$original.current_a -lt 0 -or [decimal]$original.current_a -gt 2 -or
+                            [decimal]$original.selector_a -lt [decimal]$original.current_a) {
+                            Fail-Case $CaseName 'invalid_response' 'Invalid private Fixed CC recovery snapshot.'
+                        }
+                        $script:triggerFixedOriginal = $original
+                        # Mark possible mutation before releasing the child.
+                        $script:triggerFixedMayHaveChanged = $true
+                    }
                     $process.StandardInput.BaseStream.WriteByte(65)
                     $process.StandardInput.BaseStream.Flush()
                     $stderr = $process.StandardError.ReadToEndAsync()
@@ -825,7 +841,7 @@ raise SystemExit(main(contributor_stop=stop, settings_on_baseline=handoff))
             }
             if ($Command -ceq 'trigger-observe' -and $details.trigger_source -cin @('HOLD','BUS','TIMER','EXTERNAL')) {
                 foreach ($field in @('trigger_source','observation_phase','software_trigger_write_attempted',
-                                     'software_trigger_write_confirmed','sample_count','samples')) {
+                                     'software_trigger_write_confirmed','sample_count','samples','fixed_baseline_class')) {
                     if ($null -ne $details.$field) { $evidence[$field] = $details.$field }
                 }
             }
@@ -963,7 +979,7 @@ raise SystemExit(main(contributor_stop=stop, settings_on_baseline=handoff))
             $result.result.timer_timing.on_write_started_ns -ne $timerWriteStartedNs)) {
             Fail-Case $CaseName 'timer_timing_unconfirmed' 'The CLI result did not confirm the signaled SCPI Input ON write time.'
         }
-        if ($isolatedSettings -and -not $baselineShown) {
+        if ($baselineHandoff -and -not $baselineShown) {
             Fail-Case $CaseName 'settings_baseline_unconfirmed' 'The original settings were not displayed before the trial.'
         }
         if ($workflowLoad) {
@@ -1033,7 +1049,7 @@ raise SystemExit(main(contributor_stop=stop, settings_on_baseline=handoff))
             if ($script:triggerManaged) { $script:triggerTrusted = $false }
             if ($traceCase) { $script:traceCommunicationUntrusted = $true }
         }
-        if (($workflowLoad -or $isolatedSettings) -and $started -and -not $terminationAttempted -and -not $process.HasExited) {
+        if (($workflowLoad -or $baselineHandoff) -and $started -and -not $terminationAttempted -and -not $process.HasExited) {
             $entry['manual_action_required'] = $true
             if ($workflowLoad) {
                 Write-Host "STOP ${CaseName}: use the independent hardware cutoff now if Input OFF is not confirmed."
@@ -1045,7 +1061,7 @@ raise SystemExit(main(contributor_stop=stop, settings_on_baseline=handoff))
             try { $process.StandardInput.Close() } catch { }
             $stopWait = if ($TimerObservationDeadlineNs) { Get-TimerRemainingMs $TimerObservationDeadlineNs }
                 elseif ($listSettingsDeadlineNs) { Get-TimerRemainingMs $listSettingsDeadlineNs }
-                elseif ($isolatedSettings) { $DeadlineMs } else { 10000 }
+                elseif ($baselineHandoff) { $DeadlineMs } else { 10000 }
             [void]$process.WaitForExit($stopWait)
         }
         if ($started -and -not $terminationAttempted -and -not $process.HasExited) {
@@ -1328,6 +1344,9 @@ function New-TriggerPlan {
     $listJson = '{"range":"low","repeat_count":' + $TriggerListRepeat + ',"steps":[' +
         '{"current_a":' + $LevelA + ',"slew_a_per_us":' + $RiseSlew + ',"width_s":' + $TriggerListWidthA + '},' +
         '{"current_a":' + $LevelB + ',"slew_a_per_us":' + $FallSlew + ',"width_s":' + $TriggerListWidthB + '}]}'
+    $script:triggerPlans += @{name='trigger-fixed-prepare';command='set-cc';execution='live';
+        args=($triggerScope + @('--current','0','--range','low','--validation-settings-json','{"fixed_cc_baseline":"prepare"}'));
+        condition='Input OFF; save private original Fixed CC and establish zero baseline'}
     foreach ($source in @('HOLD','TIMER','BUS','EXTERNAL')) {
         $prefix = 'trigger-' + $source.ToLowerInvariant()
         $isList = $source -in @('BUS','EXTERNAL')
@@ -1339,8 +1358,9 @@ function New-TriggerPlan {
             $sourceArgs += @('--interval-s',$TriggerIntervalSeconds)
             $triggerJson += ',"interval_s":' + $TriggerIntervalSeconds
         }
+        $baselineJson = if ($source -ceq 'HOLD') { ',"fixed_cc_baseline_a":0' } else { '' }
         $expected = @('--validation-settings-json', ('{"function":"' + $function +
-            '","configuration":' + $configJson + ',"trigger":' + $triggerJson + '}}'))
+            '","configuration":' + $configJson + ',"trigger":' + $triggerJson + '}' + $baselineJson + '}'))
         $script:triggerTrials += @{prefix=$prefix;source=$source;isList=$isList;interval=$TriggerIntervalSeconds}
         $script:triggerPlans += @{name="$prefix-configure";command='trigger-configure';args=($triggerScope + $sourceArgs)}
         $script:triggerPlans += @{name="$prefix-source-status";command='trigger-status';args=$triggerScope}
@@ -1373,16 +1393,19 @@ function New-TriggerPlan {
         $release = if ($isList) { 'list-exit' } else { 'transient-disable' }
         $script:triggerPlans += @{name="$prefix-release";command=$release;args=$triggerScope}
     }
+    $script:triggerPlans += @{name='trigger-fixed-restore';command='set-cc';execution='live';
+        args=($triggerScope + @('--current','0','--range','low','--validation-settings-json','{"fixed_cc_baseline":"restore","selector_a":"0"}'));
+        condition='Trusted communication, confirmed OFF, restore private original Fixed CC'}
     $script:triggerPlans += $restorePlan
 }
 
 function Invoke-TriggerStep([string]$Name, [int]$DeadlineMs = 30000, [int]$TerminationMs = 5000,
-                            [long]$ObservationDeadlineNs = 0, [switch]$Cleanup) {
+                            [long]$ObservationDeadlineNs = 0, [switch]$Cleanup, [string[]]$ArgsOverride) {
     $step = $script:triggerPlans | Where-Object { $_.name -ceq $Name }
     $entry = $script:report.results | Where-Object { $_.name -ceq $Name }
     $exchangeConfirmed = $false
     try {
-        $extra = $step.args
+        $extra = if ($PSBoundParameters.ContainsKey('ArgsOverride')) { $ArgsOverride } else { $step.args }
         if ($step.command -ceq 'trigger-observe') {
             $extra += @('--deadline-ns',[string]$ObservationDeadlineNs)
         }
@@ -1528,6 +1551,7 @@ function Confirm-OperatorStart([string[]]$Modes, $Isolated, [bool]$ConnectedTria
     if ('trace' -in $Modes -or 'trigger' -in $Modes -or
         @($Modes | Where-Object { $_ -like 'transient-*' }).Count -gt 0) {
         Write-Host '- Authorize temporary Trigger Source settings with Input OFF and restoration of the original Source and Timer Interval when safe. Keep external trigger signals inactive outside the EXTERNAL trial.'
+        if ('trigger' -in $Modes) { Write-Host '- Authorize a temporary zero Fixed CC baseline and exact restoration of its saved setpoint and selector when safe.' }
     }
     if ('trigger' -in $Modes) {
         Write-Host '- Confirm external On/Off and analog programming are disabled and external trigger wiring was reviewed while de-energized.'
@@ -1927,6 +1951,8 @@ function Invoke-TriggerTrial($Trial) {
         Write-Host "Trigger $($Trial.source), CLI readback confirmed. The script will sample the instrument current automatically."
         if ($Trial.isList) {
             Write-Host "Expect LIST CC levels $LevelA A then $LevelB A for $TriggerListWidthA s / $TriggerListWidthB s, repeated $TriggerListRepeat time(s)."
+        } elseif ($Trial.source -ceq 'HOLD') {
+            Write-Host "Expect Fixed CC baseline 0 A, a pulse at A ($LevelA A) for $($script:triggerPulseWidth) s, then B ($LevelB A)."
         } else {
             Write-Host "Expect baseline B ($LevelB A), a pulse at A ($LevelA A) for $($script:triggerPulseWidth) s, then a return to B."
         }
@@ -1953,7 +1979,16 @@ function Invoke-TriggerTrial($Trial) {
         $offReserveMs = [Math]::Min($perCommandDeadlineMs, [Math]::Floor($marginMs / 2))
         $terminationMs = [Math]::Min(5000, [Math]::Floor($offReserveMs / 2))
         $startOffBy = $hardStop - $offReserveMs - $terminationMs
-        $onDeadline = $startOffBy - $script:watch.ElapsedMilliseconds - $TriggerObservationSeconds * 1000
+        $observationWindowMs = $TriggerObservationSeconds * 1000
+        $onDeadline = $startOffBy - $script:watch.ElapsedMilliseconds - $observationWindowMs
+        if ($Trial.source -ceq 'TIMER' -and $onDeadline -gt 0) {
+            # Allocate guard/startup time from the existing trial budget, never
+            # from the reserved OFF or process termination time.
+            $guardAllowance = [Math]::Max(0,[Math]::Min(5000,[Math]::Min(
+                [Math]::Floor($onDeadline / 2),$perCommandDeadlineMs - $observationWindowMs)))
+            $observationWindowMs += [int]$guardAllowance
+            $onDeadline -= [int]$guardAllowance
+        }
         if ($onDeadline -le 0) { throw 'Insufficient time for Trigger Input ON and observation.' }
         $script:triggerOffConfirmed = $false
         $script:triggerPowered = $true
@@ -1962,7 +1997,7 @@ function Invoke-TriggerTrial($Trial) {
             if ($on.result.input_state -cne 'ON') {
                 Fail-Case "$prefix-on" 'input_on_not_confirmed' 'Trigger Input ON was not confirmed.'
             }
-            $observeUntil = $script:watch.ElapsedMilliseconds + $TriggerObservationSeconds * 1000
+            $observeUntil = $script:watch.ElapsedMilliseconds + $observationWindowMs
             if ($observeUntil -gt $startOffBy) { throw 'Insufficient time remains to observe before Input OFF.' }
             Write-Host "Observation started for $($Trial.source)."
             $captureName = if ($Trial.source -in @('HOLD','BUS')) { "$prefix-dispatch" } else { "$prefix-observed" }
@@ -1976,7 +2011,7 @@ function Invoke-TriggerTrial($Trial) {
                 $dispatch['trigger_dispatch_exchange'] = 'CONFIRMED'
             }
             $remaining = $observeUntil - $script:watch.ElapsedMilliseconds
-            if ($remaining -gt 0) { Start-Sleep -Milliseconds $remaining }
+            if ($remaining -gt 0 -and $Trial.source -cne 'TIMER') { Start-Sleep -Milliseconds $remaining }
         } finally {
             try {
                 if (-not $script:triggerTrusted -or $script:triggerProcessStillRunning) {
@@ -2010,6 +2045,7 @@ function Invoke-TriggerTrial($Trial) {
             $capture.result.trigger_source -cne $Trial.source -or $capture.result.waveform_completion_known -ne $true -or
             $evidence.source -cne 'instrument_current_samples' -or $evidence.sample_count -lt 3 -or
             $evidence.events_confirmed -lt $requiredEvents -or
+            ($Trial.source -ceq 'HOLD' -and $evidence.fixed_baseline_class -cne 'zero') -or
             ($Trial.isList -and $evidence.list_run_completed -ne $true) -or -not $script:triggerOffConfirmed) {
             Fail-Case "$prefix-observed" 'trigger_observation_unconfirmed' 'Automatic Trigger waveform or OFF evidence was insufficient.'
         }
@@ -2081,6 +2117,31 @@ function Test-TriggerRestoreSafe {
         -not $script:report.sequence_input_off_unconfirmed -and -not $script:report.protection_input_off_unconfirmed)
 }
 
+function Restore-TriggerFixedCc {
+    if (-not $script:triggerFixedMayHaveChanged) { return }
+    $entry = $script:report.results | Where-Object { $_.name -ceq 'trigger-fixed-restore' }
+    if (-not (Test-TriggerRestoreSafe) -or -not $script:triggerOffConfirmed -or $null -eq $script:triggerFixedOriginal) {
+        $entry['manual_action_required'] = $true
+        Write-Host 'Fixed CC restoration blocked. Confirm physical OFF and restore the private snapshot manually when communication is reliable.'
+        return
+    }
+    try {
+        $original = $script:triggerFixedOriginal
+        $restoreJson = @{fixed_cc_baseline='restore';selector_a=[string]$original.selector_a} | ConvertTo-Json -Compress
+        $restoreArguments = $triggerScope + @('--current',[string]$original.current_a,'--range',[string]$original.range,
+            '--validation-settings-json',$restoreJson)
+        $restored = Invoke-TriggerStep 'trigger-fixed-restore' -Cleanup -ArgsOverride $restoreArguments
+        Assert-TriggerOff $restored 'trigger-fixed-restore'
+        Assert-ReadbackFields $restored.result @{validation_only=$true;validation_scope='trigger';
+            range=[string]$original.range;current_a=[decimal]$original.current_a;
+            range_readback_a=[decimal]$original.selector_a} 'trigger-fixed-restore'
+        $script:triggerFixedMayHaveChanged = $false
+    } catch {
+        $entry['manual_action_required'] = $true
+        throw
+    }
+}
+
 function Invoke-TriggerValidation([switch]$RestoreOnly) {
     $snapshot = $script:originalTriggerSnapshot
     Assert-TriggerSnapshot $snapshot
@@ -2091,40 +2152,55 @@ function Invoke-TriggerValidation([switch]$RestoreOnly) {
             if (-not (Test-TriggerRestoreSafe) -or -not $script:triggerOffConfirmed) {
                 throw 'Trigger validation blocked by uncertain safety state.'
             }
+            if ($script:triggerSelected) {
+                $baseline = Invoke-TriggerStep 'trigger-fixed-prepare'
+                Assert-TriggerOff $baseline 'trigger-fixed-prepare'
+                Assert-ReadbackFields $baseline.result @{range='low';current_a=[decimal]0;
+                    range_readback_a=[decimal]0;validation_only=$true;validation_scope='trigger'} 'trigger-fixed-prepare'
+                if (-not $script:triggerFixedMayHaveChanged -or $null -eq $script:triggerFixedOriginal) {
+                    Fail-Case 'trigger-fixed-prepare' 'settings_baseline_unconfirmed' 'Private Fixed CC snapshot was not retained.'
+                }
+                $original = $script:triggerFixedOriginal
+                Assert-ReadbackFields $baseline.result.original_fixed_cc @{range=[string]$original.range;
+                    current_a=[decimal]$original.current_a;selector_a=[decimal]$original.selector_a} 'trigger-fixed-prepare'
+            }
             foreach ($trial in $script:triggerTrials) { Invoke-TriggerTrial $trial }
         }
     } finally {
-        $script:report.trigger_restore_status = 'FAIL'
-        $entry = $script:report.results | Where-Object { $_.name -ceq 'trigger-restore' }
-        $entry['trigger_source_restore'] = 'UNCONFIRMED'
-        $entry['trigger_interval_restore'] = 'UNCONFIRMED'
-        if ((Test-TriggerRestoreSafe) -and $script:triggerOffConfirmed) {
-            $restore = $script:triggerPlans | Where-Object { $_.name -ceq 'trigger-restore' }
-            $restore.args = $triggerScope + @('--source',$source,'--interval-s',$interval)
-            $entry.arguments = $restore.args
-            try {
-                $restored = Invoke-TriggerStep 'trigger-restore' -Cleanup
-                $entry['trigger_source_restore'] = if ($restored.result.source -ceq $source) { 'CONFIRMED' } else { 'MISMATCH' }
-                $entry['trigger_interval_restore'] = if ($null -eq $restored.result.interval_s) { 'UNCONFIRMED' }
-                    elseif ([decimal]$restored.result.interval_s -eq [decimal]$interval) { 'CONFIRMED' } else { 'MISMATCH' }
-                Assert-TriggerOff $restored 'trigger-restore'
-                if ($entry.trigger_source_restore -cne 'CONFIRMED' -or $entry.trigger_interval_restore -cne 'CONFIRMED') {
-                    Fail-Case 'trigger-restore' 'readback_mismatch' 'Original Trigger Setup was not confirmed.'
+        try { Restore-TriggerFixedCc } finally {
+            $script:report.trigger_restore_status = 'FAIL'
+            $entry = $script:report.results | Where-Object { $_.name -ceq 'trigger-restore' }
+            $entry['trigger_source_restore'] = 'UNCONFIRMED'
+            $entry['trigger_interval_restore'] = 'UNCONFIRMED'
+            if ((Test-TriggerRestoreSafe) -and $script:triggerOffConfirmed) {
+                $restore = $script:triggerPlans | Where-Object { $_.name -ceq 'trigger-restore' }
+                $restore.args = $triggerScope + @('--source',$source,'--interval-s',$interval)
+                $entry.arguments = $restore.args
+                try {
+                    $restored = Invoke-TriggerStep 'trigger-restore' -Cleanup
+                    $entry['trigger_source_restore'] = if ($restored.result.source -ceq $source) { 'CONFIRMED' } else { 'MISMATCH' }
+                    $entry['trigger_interval_restore'] = if ($null -eq $restored.result.interval_s) { 'UNCONFIRMED' }
+                        elseif ([decimal]$restored.result.interval_s -eq [decimal]$interval) { 'CONFIRMED' } else { 'MISMATCH' }
+                    Assert-TriggerOff $restored 'trigger-restore'
+                    if ($entry.trigger_source_restore -cne 'CONFIRMED' -or $entry.trigger_interval_restore -cne 'CONFIRMED') {
+                        Fail-Case 'trigger-restore' 'readback_mismatch' 'Original Trigger Setup was not confirmed.'
+                    }
+                    $script:report.trigger_restore_status = 'PASS'
+                } finally {
+                    if ($script:report.trigger_restore_status -ne 'PASS') {
+                        Write-Host "Trigger restoration status: Source $($entry.trigger_source_restore), Timer Interval $($entry.trigger_interval_restore). Operator action is required."
+                    }
                 }
-                $script:report.trigger_restore_status = 'PASS'
-            } finally {
-                if ($script:report.trigger_restore_status -ne 'PASS') {
-                    Write-Host "Trigger restoration status: Source $($entry.trigger_source_restore), Timer Interval $($entry.trigger_interval_restore). Operator action is required."
-                }
+            } else {
+                $entry['manual_action_required'] = $true
+                Write-Host 'Original Trigger Source and Timer Interval were not restored. Confirm physical OFF and restore them manually once communication is reliable.'
             }
-        } else {
-            $entry['manual_action_required'] = $true
-            Write-Host 'Original Trigger Source and Timer Interval were not restored. Confirm physical OFF and restore them manually once communication is reliable.'
         }
     }
     if ($script:report.trigger_restore_status -ne 'PASS') {
         throw 'Original Trigger Source and Timer Interval were not confirmed.'
     }
+    if ($script:triggerFixedMayHaveChanged) { throw 'Original Fixed CC was not confirmed.' }
     if ($script:watch.ElapsedMilliseconds -ge $totalDeadlineMs) {
         throw 'The total CLI validation deadline expired during Trigger cleanup.'
     }
@@ -2794,6 +2870,12 @@ try {
                 if ($step.ContainsKey('reuse_from')) { $entry[$field] = @() }
                 elseif ($null -ne $plan.result.$field) { $entry[$field] = @($plan.result.$field) }
             }
+        }
+        if ($step.name -ceq 'trigger-fixed-restore') {
+            $entry.arguments = $triggerScope + @('--current','<original>','--range','<original>',
+                '--validation-settings-json','{"fixed_cc_baseline":"restore","selector_a":"<original>"}')
+            $entry.planned_writes = @('SYST:REM','CURR 0','CURR:RANG <original>')
+            $entry.conditional_writes = @(@{condition='original Fixed CC is nonzero';writes=@('CURR <original>')})
         }
         if ($step.name -ceq 'validation-average-restore') {
             # The report describes the conditional original-value restore,

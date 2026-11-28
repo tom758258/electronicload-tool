@@ -445,6 +445,47 @@ def test_sampled_list_trigger_with_query_latency(source, scenario):
         assert evidence["list_run_completed"] is True
 
 
+@pytest.mark.parametrize("source,scenario", [
+    ("BUS", "adjacent"), ("EXTERNAL", "adjacent"), ("BUS", "late"),
+    ("EXTERNAL", "late"), ("BUS", "early_clear"), ("BUS", "wrong_width"),
+    ("EXTERNAL", "status_gap"), ("BUS", "stuck"),
+])
+def test_sampled_list_trigger_fast_query_run_edge(source, scenario):
+    # Synthetic independent current and RUN exchanges at approximately 20 ms.
+    # The first A sample is followed by one idle RUN reply, not a missing LIST.
+    samples = []
+    for index in range(96):
+        t = 0.021 + index * 0.043
+        sample = {"started_s": t, "completed_s": t + 0.021,
+                  "current_a": 0 if index == 0 else 0.1 if index < 48 else 0.2,
+                  "list_running": 2 <= index < 95,
+                  "list_status_started_s": t + 0.021, "list_status_completed_s": t + 0.042}
+        if index == 0:
+            sample.update(list_status_started_s=0, list_status_completed_s=0.021)
+        samples.append(sample)
+    if scenario == "late":
+        samples[2]["list_running"] = False
+    elif scenario == "early_clear":
+        del samples[-8:]
+        samples[-1]["list_running"] = False
+    elif scenario == "wrong_width":
+        for sample in samples[40:48]:
+            sample["current_a"] = 0.2
+    elif scenario == "status_gap":
+        samples[2]["list_status_completed_s"] += 0.5
+    elif scenario == "stuck":
+        samples[-1]["list_running"] = True
+    evidence = sampled_waveform_evidence(
+        samples, source=source, level_a=Decimal("0.1"), level_b=Decimal("0.2"),
+        width_a=2, width_b=2, repeats=1,
+    )
+    assert (evidence is not None) is (scenario == "adjacent")
+    if evidence:
+        assert evidence["list_run_completed"] is True
+        assert evidence["events_confirmed"] == 1
+        assert evidence["list_run_start_bracket"]["max_reporting_offset_s"] < 0.1
+
+
 @pytest.mark.parametrize("scenario", ["observed", "wrong_order", "bad_transition",
                                       "long_transition", "missing_b", "short_a"])
 def test_hold_first_trigger_uses_fixed_cc_baseline_and_bounded_transition(scenario):
@@ -505,12 +546,13 @@ def test_sampled_transient_trigger_with_query_latency(source, scenario):
         assert evidence["events_confirmed"] == (2 if source == "TIMER" else 1)
 
 
+@pytest.mark.parametrize("baseline", [0, 0.1, 0.2])
 def test_hold_observation_dispatches_one_trigger_after_zero_fixed_baseline(
-    monkeypatch,
+    monkeypatch, baseline,
 ):
     fake = TriggerFake()
     fake.range = 0.2
-    fake.current = 0
+    fake.current = baseline
     fake.input = True
     fake.transient = True
     fake.values.update({
@@ -551,15 +593,120 @@ def test_hold_observation_dispatches_one_trigger_after_zero_fixed_baseline(
     monkeypatch.setattr(hardware_validation, "monotonic_ns", lambda: now)
     monkeypatch.setattr(hardware_validation, "sleep", live_sleep)
     session(fake, monkeypatch)
-    expected = {"function": "CC", "trigger": {"source": "HOLD"},
+    expected = {"function": "CC", "trigger": {"source": "HOLD"}, "fixed_cc_baseline_a": 0,
                 "configuration": {**transient("pulse", "low"), "pulse_width": "2"}}
-    result = hardware_validation.execute_trigger_observation(
-        mode="live", resource=RESOURCE, backend="system", model_id=control.MODEL_ID,
-        expected=expected, seconds=15, confirmed=True, deadline_ns=now + 15 * 10**9,
-    )
+    options = dict(mode="live", resource=RESOURCE, backend="system", model_id=control.MODEL_ID,
+                   expected=expected, seconds=15, confirmed=True, deadline_ns=now + 15 * 10**9)
+    if baseline:
+        with pytest.raises(LoadError) as error:
+            hardware_validation.execute_trigger_observation(**options)
+        assert error.value.code == "trigger_observation_unconfirmed"
+        assert error.value.details["fixed_baseline_class"] == ("level_a" if baseline == 0.1 else "level_b")
+        assert "TRIG:IMM" not in fake.calls and "INP ON" not in fake.calls
+        return
+    result = hardware_validation.execute_trigger_observation(**options)
     assert result["observation"]["events_confirmed"] == 1
+    assert result["observation"]["fixed_baseline_class"] == "zero"
     assert result["trigger_source"] == "HOLD"
     assert fake.calls.count("TRIG:IMM") == 1
+    assert "INP ON" not in fake.calls and "INP OFF" not in fake.calls
+
+
+@pytest.mark.parametrize("initial,selector,scenario", [
+    (0, 0, "restore"), (0.1, 0.2, "restore"), (0.2, 0.4, "restore"),
+    (0.2, 60, "restore"), (0.1, 0.2, "cancel"), (3, 6, "unsafe"),
+    (0.1, 0.2, "input_on"), (0.1, 0.2, "short"),
+])
+def test_trigger_fixed_cc_baseline_is_saved_before_mutation_and_restored(
+    monkeypatch, initial, selector, scenario,
+):
+    fake = TriggerFake()
+    fake.current, fake.range = initial, selector
+    fake.input = scenario == "input_on"
+    fake.short = scenario == "short"
+    session(fake, monkeypatch)
+    stop = Event()
+    snapshots = []
+
+    def handoff(original):
+        assert "CURR 0" not in fake.calls
+        snapshots.append(original)
+        if scenario == "cancel":
+            stop.set()
+
+    options = dict(current="0", range_name="low", stop=stop,
+                   validation_settings={"fixed_cc_baseline": "prepare"},
+                   on_trigger_fixed_baseline=handoff)
+    if scenario != "restore":
+        with pytest.raises(LoadError):
+            physical("set-cc", **options)
+        assert not any(call.startswith(("CURR ", "CURR:RANG ", "INP ON")) for call in fake.calls)
+        return
+    prepared = physical("set-cc", **options)
+    assert prepared["input_state"] == "OFF" and fake.current == fake.range == 0
+    assert len(snapshots) == 1 and prepared["original_fixed_cc"] == snapshots[0]
+    original = snapshots[0]
+    assert Decimal(original["current_a"]) == Decimal(str(initial))
+    assert Decimal(original["selector_a"]) == Decimal(str(selector))
+    fake.range = 6  # Later Transient/LIST setup changes the active selector.
+    restored = physical("set-cc", current=original["current_a"], range_name=original["range"],
+                        validation_settings={"fixed_cc_baseline": "restore",
+                                             "selector_a": original["selector_a"]})
+    assert restored["input_state"] == "OFF"
+    assert (fake.current, fake.range) == (initial, selector)
+    assert "INP ON" not in fake.calls
+
+
+@pytest.mark.parametrize("query_ms,command_seconds,complete", [
+    (20, 20, True), (150, 20, True), (150, 15, False),
+])
+def test_timer_observation_reserves_capture_after_guards(monkeypatch, query_ms, command_seconds, complete):
+    fake = TriggerFake()
+    fake.range = 0.2
+    fake.input = True
+    fake.transient = True
+    fake.values.update({"TRIG:SOUR": "TIM", "TRIG:TIM": "5",
+                        "CURR:TRAN:MODE": "PULS", "CURR:TRAN:AWID": "2",
+                        "INP:TIM": "0", "MEAS:CURR": "0"})
+    now = 1_000_000_000
+    first_sample = None
+    query = fake.query
+
+    def live_query(command):
+        nonlocal now, first_sample
+        if command == "MEAS:CURR?":
+            if first_sample is None:
+                first_sample = now
+            elapsed = (now - first_sample) / 1e9
+            # Capture begins inside A. Only the following two complete
+            # A pulses can count, including their final return to B.
+            fake.values["MEAS:CURR"] = "0.1" if elapsed % 5 < 2 else "0.2"
+        reply = query(command)
+        now += query_ms * 1_000_000
+        return reply
+
+    def live_sleep(duration):
+        nonlocal now
+        now += int(duration * 1e9)
+
+    monkeypatch.setattr(fake, "query", live_query)
+    monkeypatch.setattr(hardware_validation, "monotonic_ns", lambda: now)
+    monkeypatch.setattr(hardware_validation, "sleep", live_sleep)
+    session(fake, monkeypatch)
+    expected = {"function": "CC", "trigger": {"source": "TIMER", "interval_s": "5"},
+                "configuration": {**transient("pulse", "low"), "pulse_width": "2"}}
+    options = dict(mode="live", resource=RESOURCE, backend="system", model_id=control.MODEL_ID,
+                   expected=expected, seconds=15, confirmed=True,
+                   deadline_ns=now + command_seconds * 10**9 - 500_000_000)
+    if complete:
+        result = hardware_validation.execute_trigger_observation(**options)
+        assert result["observation"]["events_confirmed"] >= 2
+        assert result["samples"][-1]["completed_s"] <= 15
+    else:
+        with pytest.raises(LoadError) as error:
+            hardware_validation.execute_trigger_observation(**options)
+        assert error.value.code == "trigger_observation_unconfirmed"
+    assert "TRIG:IMM" not in fake.calls and "*TRG" not in fake.calls
     assert "INP ON" not in fake.calls and "INP OFF" not in fake.calls
 
 

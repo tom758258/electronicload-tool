@@ -87,7 +87,7 @@ def run_script(tmp_path):
                 "'Confirm-ProtectionOperator','Invoke-PoweredProtectionTrial','Restore-Protection',"
                 "'Get-ProtectionSetArgs','Invoke-TriggerTrial','Assert-TriggerOff',"
                 "'Invoke-TriggerStep','Assert-TriggerSnapshot','Test-TriggerRestoreSafe',"
-                "'Invoke-TriggerValidation','Restore-TriggerAfterFailure','Assert-TraceResult')) {\n"
+                "'Invoke-TriggerValidation','Restore-TriggerFixedCc','Restore-TriggerAfterFailure','Assert-TraceResult')) {\n"
                 "        Invoke-Expression $node.Extent.Text\n"
                 "    }\n}\n" + harness, encoding='utf-8')
             args = [str(harness_path)]
@@ -145,6 +145,19 @@ def assert_validation_trigger_plan(cases, modes):
     assert ('trigger-snapshot' in cases) is managed
     assert ('trigger-restore' in cases) is managed
     assert ('trace-trigger-hold' in cases) is ('trace' in modes)
+    assert ('trigger-fixed-prepare' in cases) is ('trigger' in modes)
+    assert ('trigger-fixed-restore' in cases) is ('trigger' in modes)
+    if 'trigger' in modes:
+        prepare, restore = cases['trigger-fixed-prepare'], cases['trigger-fixed-restore']
+        assert prepare['command'] == restore['command'] == 'set-cc'
+        assert prepare['planned_writes'] == ['SYST:REM', 'CURR 0', 'CURR:RANG 0']
+        assert restore['planned_writes'] == ['SYST:REM', 'CURR 0', 'CURR:RANG <original>']
+        assert '<original>' in restore['arguments']
+        assert names.index('trigger-fixed-prepare') < names.index('trigger-hold-configure')
+        assert names.index('trigger-external-release') < names.index('trigger-fixed-restore') < names.index('trigger-restore')
+        for suffix in ('enable', 'on', 'dispatch'):
+            args = cases[f'trigger-hold-{suffix}']['arguments']
+            assert json.loads(args[args.index('--validation-settings-json') + 1])['fixed_cc_baseline_a'] == 0
     if not managed:
         return
     assert cases['trigger-snapshot']['command'] == 'trigger-status'
@@ -2332,6 +2345,93 @@ try { Invoke-Expression $loop.Extent.Text } catch {
         assert 'validation-average-restore' not in calls
         if not blocked and scenario != 'restore_mismatch':
             assert calls.index('cleanup-trigger-input-state') < calls.index('trigger-restore')
+
+
+@pytest.mark.parametrize('scenario', ['success', 'trusted-failure', 'untrusted', 'restore-mismatch'])
+def test_trigger_fixed_baseline_restores_only_with_confirmed_off(run_script, scenario):
+    # Real batch orchestration and cleanup; no physical VISA or operator input.
+    result = run_script([scenario], harness="""
+$script:watch = @{ElapsedMilliseconds=0}
+$script:totalDeadlineMs = 900000
+$script:triggerTrusted = $true
+$script:triggerOffConfirmed = $true
+$script:triggerSelected = $true
+$script:triggerFixedMayHaveChanged = $false
+$script:triggerFixedOriginal = $null
+$script:originalTriggerSnapshot = @{result=@{state_source='instrument_readback';validation_only=$true;
+    validation_scope='trigger';input_state='OFF';source='EXTERNAL';interval_s='0.375'}}
+$triggerScope = @('--hardware-validation','trigger')
+$script:triggerPlans = @(@{name='trigger-restore';args=@()})
+$script:triggerTrials = @(@{source='HOLD'},@{source='TIMER'},@{source='BUS'},@{source='EXTERNAL'})
+$script:report = @{trigger_restore_status='NOT RUN';results=@(foreach ($name in
+    @('trigger-snapshot','trigger-fixed-prepare','trigger-fixed-restore','trigger-restore')) {
+    [ordered]@{name=$name;status='NOT RUN'}
+})}
+$script:calls = @()
+function Read-Host { throw 'Unexpected operator confirmation.' }
+function Save-Report {}
+function Invoke-TriggerTrial($Trial) {
+    $script:calls += $Trial.source
+    if ($Trial.source -ceq 'TIMER' -and $Scenario -cne 'success' -and $Scenario -cne 'restore-mismatch') {
+        if ($Scenario -ceq 'untrusted') { $script:triggerTrusted = $false; $script:triggerOffConfirmed = $false }
+        throw 'Synthetic failed observation.'
+    }
+}
+function Invoke-TriggerStep([string]$Name,[switch]$Cleanup,[string[]]$ArgsOverride) {
+    $script:calls += $Name
+    $entry = $script:report.results | Where-Object { $_.name -ceq $Name }
+    $entry.status = 'PASS'
+    $payload = @{input_state='OFF';validation_only=$true;validation_scope='trigger'}
+    switch ($Name) {
+        'trigger-fixed-prepare' {
+            $script:triggerFixedOriginal = @{range='low';current_a='0.123';selector_a='0.2'}
+            $script:triggerFixedMayHaveChanged = $true
+            $payload.range='low'; $payload.current_a='0'; $payload.range_readback_a='0'
+            $payload.original_fixed_cc=$script:triggerFixedOriginal
+        }
+        'trigger-fixed-restore' {
+            if (-not $Cleanup -or -not $script:triggerTrusted -or -not $script:triggerOffConfirmed) {
+                throw 'Unsafe restoration.'
+            }
+            $currentIndex = [Array]::IndexOf($ArgsOverride,'--current')
+            $jsonIndex = [Array]::IndexOf($ArgsOverride,'--validation-settings-json')
+            $restore = $ArgsOverride[$jsonIndex + 1] | ConvertFrom-Json
+            if ($ArgsOverride[$currentIndex + 1] -cne '0.123' -or $restore.selector_a -cne '0.2') {
+                throw 'Original restoration values were lost.'
+            }
+            $payload.range='low'; $payload.current_a='0.123'
+            $payload.range_readback_a=if ($Scenario -ceq 'restore-mismatch') { '0.1' } else { '0.2' }
+        }
+        'trigger-restore' {
+            if (-not $Cleanup) { throw 'Trigger restoration must use cleanup reserve.' }
+            $payload.source='EXTERNAL'; $payload.interval_s='0.375'
+        }
+    }
+    return @{result=$payload}
+}
+$failure = $null
+try { Invoke-TriggerValidation } catch { $failure = $_.Exception.Message }
+@{calls=$script:calls;failure=$failure;changed=$script:triggerFixedMayHaveChanged;
+    cases=$script:report.results;source_restore=$script:report.trigger_restore_status} | ConvertTo-Json -Depth 10 -Compress
+""")
+    assert result.returncode == 0, result.stdout + result.stderr
+    evidence = json.loads(result.stdout.splitlines()[-1])
+    cases = {case['name']: case for case in evidence['cases']}
+    assert evidence['calls'][:3] == ['trigger-fixed-prepare', 'HOLD', 'TIMER']
+    if scenario == 'untrusted':
+        assert evidence['calls'] == ['trigger-fixed-prepare', 'HOLD', 'TIMER']
+        assert evidence['changed'] and evidence['failure']
+        assert cases['trigger-fixed-restore']['manual_action_required']
+        assert evidence['source_restore'] == 'FAIL'
+    else:
+        if scenario in ('success', 'restore-mismatch'):
+            assert evidence['calls'][3:5] == ['BUS', 'EXTERNAL']
+        assert evidence['calls'][-2:] == ['trigger-fixed-restore', 'trigger-restore']
+        assert evidence['source_restore'] == 'PASS'
+        assert bool(evidence['failure']) is (scenario != 'success')
+        assert evidence['changed'] is (scenario == 'restore-mismatch')
+        if scenario == 'restore-mismatch':
+            assert cases['trigger-fixed-restore']['status'] == 'FAIL'
 
 
 def test_trigger_validation_script_plan_and_noninteractive_refusal(run_script):

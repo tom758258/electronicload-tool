@@ -1923,7 +1923,7 @@ the run stays FAIL.
 
 | Parameters | Purpose |
 | --- | --- |
-| `-TriggerObservationSeconds`, `-TriggerMaxOnSeconds` | Whole seconds of observation and the larger per-trial deadline from before Input ON through OFF confirmation, within the 900 s total deadline. Capture is additionally limited to a single 30 s command minus the existing 500 ms return reserve. Plans must fit the required event and minimum query costs within the smaller window. Actual VISA latency may still limit evidence. The script reserves part of the difference for OFF and any process termination. |
+| `-TriggerObservationSeconds`, `-TriggerMaxOnSeconds` | Whole seconds of observation and the larger per-trial deadline from before Input ON through OFF confirmation, within the 900 s total deadline. Capture is additionally limited to a single 30 s command minus the existing 500 ms return reserve. Plans must fit the required event and minimum query costs within the smaller window. For TIMER only, up to 5 s of guard/startup allowance is allocated within the existing command and trial limits without reducing the OFF/termination reserves; actual sampling is capped at the requested observation window. Actual VISA latency may still limit evidence. The script reserves part of the difference for OFF and any process termination. |
 | `-LevelA`, `-LevelB`, `-RiseSlew`, `-FallSlew`, `-PulseWidth` | Distinct bounded Low-range CC levels, slew rates in A/μs and the Transient pulse width in seconds. Both current levels must fit the declared source limit. |
 | `-TriggerIntervalSeconds` | TIMER interval in seconds. The observation must accommodate two periods plus the pulse width. |
 | `-TriggerListWidthA`, `-TriggerListWidthB`, `-TriggerListRepeat` | LIST CC dwell times in seconds and a finite repeat count. The LIST must fit the observation window. |
@@ -1939,10 +1939,26 @@ printed pp.15,29), with the final dwell bracket ending at the first stopped
 condition. A stuck final level without RUN completion fails, even if it
 lasts the expected dwell. No assumption is made about terminal current. This is sampled
 functional evidence, not independent pulse-width or amplitude calibration.
-HOLD and TIMER use Transient CC Pulse (baseline B, pulse at A for the
-configured width, then back to B). BUS and EXTERNAL use a two-step LIST CC,
-with a zero fixed-current baseline before LIST selection. The test replaces
-the active CC Transient and LIST configurations.
+HOLD uses a verified zero Fixed CC baseline, then a pulse at A for the
+configured width followed by B. Before the first Trigger trial, the runner
+selects Fixed CC with Input OFF if necessary, saves its exact setpoint and
+numeric selector privately, and establishes and verifies zero. An original
+setpoint outside the 2 A validation ceiling or one that cannot be restored
+exactly is refused before setpoint/selector mutation. The runner verifies
+the zero baseline again before enabling the transient and before Input ON
+and dispatch. After the four trials or a trusted failure with confirmed OFF
+and completed cleanup, it restores and independently verifies the saved
+setpoint and selector. If restoration is unsafe, it retains the failed
+result and requests manual recovery using the private snapshot.
+TIMER uses periodic Transient CC pulses from B to A and back to B; an
+incomplete initial pulse does not count toward the two complete pulses.
+BUS and EXTERNAL use a two-step LIST CC with a zero fixed-current baseline.
+Current and RUN are separate observations: only one first-A sample may
+precede the adjacent RUN assertion, with subsequent confirmed A samples and
+a bounded common start/end reporting offset consistent with the finite LIST
+duration. Missing, late, early-clear or stuck RUN evidence still fails.
+The test replaces the active CC Transient and LIST configurations; the
+original operating mode and dynamic configurations are not restored.
 MANUAL remains implemented for offline Trigger Setup and as an original Source
 to read or restore after validation, but it has no powered contributor trial;
 no Local or front-panel Trigger action is required. For EXTERNAL, use the rear

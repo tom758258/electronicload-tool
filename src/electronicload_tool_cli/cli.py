@@ -486,6 +486,9 @@ def main(argv: list[str] | None = None, *, timer_on_write_started: Callable[[int
                 trigger_source=getattr(args, "source", None),
                 trigger_interval=getattr(args, "interval_s", None),
                 timer_on_write_started=timer_on_write_started,
+                stop=contributor_stop if scope == "trigger" and args.command == "set-cc" else None,
+                on_trigger_fixed_baseline=(settings_on_baseline
+                                           if scope == "trigger" and args.command == "set-cc" else None),
                 asrl=asrl,
             )
         else:
