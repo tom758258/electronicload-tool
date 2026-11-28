@@ -313,7 +313,8 @@ def _sequence(scope, settings, *, set_hold=True):
     return sequence
 
 
-def _perform(session, command, scope, expected, sequence, stop, *, trigger=None, trigger_scope=False):
+def _perform(session, command, scope, expected, sequence, stop, *, trigger=None, trigger_scope=False,
+             fixed_baseline=None):
     parse_identity(c._query(session, "*IDN?"))
     if command == "input-off":
         # Reuse the established explicit OFF and bounded confirmation path.
@@ -358,6 +359,8 @@ def _perform(session, command, scope, expected, sequence, stop, *, trigger=None,
         _match(result, expected)
         if trigger is not None:
             _check_trigger(session, trigger)
+            if fixed_baseline is not None and _number(session, "CURR?") != fixed_baseline:
+                raise LoadError("readback_mismatch", "HOLD Fixed CC baseline differs from the authorized zero.", 3)
             if c._flag(session, "INP:TIM?") != "OFF":
                 raise LoadError("input_timer_enabled", "Disable Input Timer before Trigger validation.")
         wanted_input = "ON" if command == "transient-trigger" else "OFF"
@@ -587,6 +590,111 @@ def _finite_list(configuration):
     return settings
 
 
+def _trigger_fixed_values(current, selector, range_name):
+    value = c.validate_current(current, range_name)
+    raw = c._decimal(selector)
+    if value > Decimal(2) or raw < value or c._range_name(raw) != range_name:
+        raise LoadError("unsafe_mode", "Fixed CC baseline cannot safely be restored within Trigger limits.")
+    return value, raw
+
+
+def _trigger_fixed_selection(session):
+    mode, function = c._load_mode(session)
+    if mode not in {"FIX", "FIXED"} or function not in FUNCTIONS["transient-cc"]:
+        raise LoadError("unsafe_mode", "Fixed CC is required for Trigger baseline operations.")
+    return function
+
+
+def _trigger_fixed_snapshot(session):
+    _trigger_fixed_selection(session)
+    selector = _number(session, "CURR:RANG?")
+    current = _number(session, "CURR?")
+    range_name = c._range_name(selector)
+    value, raw = _trigger_fixed_values(current, selector, range_name)
+    return {"range": range_name, "current_a": str(value), "selector_a": str(raw)}
+
+
+def execute_trigger_fixed_cc(*, mode, resource, current, range_name, expected, stop,
+                             asrl=None, on_baseline=None):
+    """Temporary zero Fixed CC for the bounded Contributor Trigger trial."""
+    if mode not in {"live", "dry-run"} or not isinstance(expected, dict):
+        raise LoadError("argument_error", "Supply the Trigger Fixed CC baseline operation.")
+    operation = expected.get("fixed_cc_baseline")
+    if operation == "prepare" and set(expected) == {"fixed_cc_baseline"}:
+        value, selector = _trigger_fixed_values(current, 0, range_name)
+        if value != 0 or range_name != "low":
+            raise LoadError("argument_error", "Trigger preparation requires zero Low-range Fixed CC.")
+    elif operation == "restore" and set(expected) == {"fixed_cc_baseline", "selector_a"}:
+        value, selector = _trigger_fixed_values(current, expected["selector_a"], range_name)
+    else:
+        raise LoadError("argument_error", "Invalid Trigger Fixed CC baseline operation.")
+    writes = ["CURR 0", f"CURR:RANG {selector:f}"]
+    if operation == "restore" and value != 0:
+        writes.append(f"CURR {value:f}")
+    marker = {"validation_only": True, "validation_scope": "trigger"}
+    if mode == "dry-run":
+        return {**marker, "command": "set-cc", "hardware_access": False,
+                "range": range_name, "planned_writes": ["SYST:REM", *writes],
+                "conditional_writes": [
+                    {"condition": "prepare from Fixed CR with LED ON; verify LED OFF before mode selection",
+                     "writes": ["RES:LED:STAT 0"]},
+                    {"condition": "prepare from a different supported selection",
+                     "writes": ["FUNC:MODE FIX", "FUNC CURR"]},
+                ] if operation == "prepare" else [],
+                "queries": ["*IDN?", "INP:STAT?", "TRAN?", "INP:SHOR:STAT?",
+                            "CURR:SLEW:STAT?", "FUNC:MODE?", "FUNC?", "RES:LED:STAT?",
+                            "CURR:RANG?", "CURR?"]}
+    with open_request_session(resource, asrl, c.open_session) as (session, runtime):
+        require_trusted_session(session)
+        parse_identity(c._query(session, "*IDN?"))
+        _setup_guard(session, stop)
+        c._check_mode_change(session)
+        if operation == "restore":
+            _trigger_fixed_selection(session)
+        c._mutation_off(session, stop)
+        c._write(session, "SYST:REM")
+        _setup_guard(session, stop)
+        led_off = c._check_mode_change(session)
+        original = None
+        if operation == "prepare":
+            c._leave_cr_led(session, led_off, stop)
+            active_mode, function = c._load_mode(session)
+            if active_mode not in {"FIX", "FIXED"} or function not in FUNCTIONS["transient-cc"]:
+                for write in ("FUNC:MODE FIX", "FUNC CURR"):
+                    _setup_guard(session, stop)
+                    c._mutation_off(session, stop)
+                    c._write(session, write)
+            original = _trigger_fixed_snapshot(session)
+            # The runner acknowledges the private recovery snapshot BEFORE
+            # any Fixed CC setpoint or selector mutation. Cancellation stops
+            # the trial without changing those values.
+            if on_baseline is not None:
+                on_baseline(original)
+        for write in writes:
+            _setup_guard(session, stop)
+            _trigger_fixed_selection(session)
+            c._mutation_off(session, stop)
+            c._write(session, write)
+        actual = _trigger_fixed_snapshot(session)
+        if (actual["range"] != range_name or Decimal(actual["current_a"]) != value
+                or Decimal(actual["selector_a"]) != selector):
+            raise LoadError("readback_mismatch", "Trigger Fixed CC baseline did not match readback.", 3)
+        c._input_off(session)
+        return {**marker, "visa": runtime, "input_state": "OFF", "function": "CURR",
+                "range": range_name, "current_a": actual["current_a"],
+                "range_readback_a": actual["selector_a"],
+                **({"original_fixed_cc": original} if original is not None else {})}
+
+
+def _trigger_expected_baseline(expected, trigger, function):
+    if "fixed_cc_baseline_a" not in expected:
+        return None
+    if (function != "CC" or trigger["source"] != "HOLD"
+            or c._decimal(expected["fixed_cc_baseline_a"]) != 0):
+        raise LoadError("argument_error", "An explicit zero Fixed CC baseline applies only to HOLD CC.")
+    return Decimal(0)
+
+
 def execute_trigger(command, *, mode, resource, source, interval, transient, list_configuration,
                     expected, confirmed, stop, asrl=None):
     """Use native SCPI only in the explicitly selected standalone CLI scope."""
@@ -604,7 +712,7 @@ def execute_trigger(command, *, mode, resource, source, interval, transient, lis
         raise LoadError("argument_error", "Unexpected Trigger validation arguments.")
     if command == "input-on" and not confirmed:
         raise LoadError("confirmation_required", "Input ON requires explicit confirmation.")
-    configuration = trigger = scope = None
+    configuration = trigger = scope = fixed_baseline = None
     writes = []
     if command == "trigger-configure":
         # The contributor script supplies both fields when restoring a full snapshot.
@@ -620,12 +728,15 @@ def execute_trigger(command, *, mode, resource, source, interval, transient, lis
         configuration = _finite_list(list_configuration)
         writes = _list_writes(configuration)
     elif needs_expected:
-        if (not isinstance(expected, dict) or set(expected) != {"function", "configuration", "trigger"}
+        if (not isinstance(expected, dict) or set(expected) not in (
+                {"function", "configuration", "trigger"},
+                {"function", "configuration", "trigger", "fixed_cc_baseline_a"})
                 or not isinstance(expected["trigger"], dict)
                 or set(expected["trigger"]) not in ({"source"}, {"source", "interval_s"})):
             raise LoadError("argument_error", "Supply function, complete configuration and expected Trigger Setup.")
         trigger = validate_setup(**expected["trigger"])
         function = expected["function"]
+        fixed_baseline = _trigger_expected_baseline(expected, trigger, function)
         if function == "LIST" and command in {"input-on", "list-trigger"}:
             configuration = _finite_list(expected["configuration"])
         elif function in ("CC", "CV", "CR", "CW") and command != "list-trigger":
@@ -651,7 +762,7 @@ def execute_trigger(command, *, mode, resource, source, interval, transient, lis
         if scope is not None or command in {"input-off", "transient-disable"}:
             setup_writes = writes if transient_setup else []
             result = _perform(session, command, scope or "transient-cc", configuration, setup_writes,
-                              stop, trigger=trigger, trigger_scope=True)
+                              stop, trigger=trigger, trigger_scope=True, fixed_baseline=fixed_baseline)
         else:
             parse_identity(c._query(session, "*IDN?"))
             if command == "trigger-status":
@@ -666,6 +777,9 @@ def execute_trigger(command, *, mode, resource, source, interval, transient, lis
 
 
 TRIGGER_OBSERVATION_COMMAND = "trigger-observe"
+# Separate TIMER guard/process allowance within the existing 30 s command and
+# 60 s default trial limits. The actual sample window still uses seconds.
+TIMER_GUARD_ALLOWANCE_S = 5
 
 
 def execute_trigger_observation(*, mode, resource, backend, model_id, expected, seconds,
@@ -673,12 +787,14 @@ def execute_trigger_observation(*, mode, resource, backend, model_id, expected, 
     """Contributor-only sampling of an already authorized, powered Trigger trial."""
     if (model_id != MODEL_ID or mode not in {"live", "dry-run"} or type(seconds) is not int
             or not 1 <= seconds <= 900 or not isinstance(expected, dict)
-            or set(expected) != {"function", "configuration", "trigger"}
+            or set(expected) not in ({"function", "configuration", "trigger"},
+                                     {"function", "configuration", "trigger", "fixed_cc_baseline_a"})
             or not isinstance(expected["trigger"], dict)
             or set(expected["trigger"]) not in ({"source"}, {"source", "interval_s"})):
         raise LoadError("argument_error", "Supply the bounded Contributor Trigger observation settings.")
     trigger = validate_setup(**expected["trigger"])
     source = trigger["source"]
+    required_baseline = _trigger_expected_baseline(expected, trigger, expected["function"])
     is_list = source in {"BUS", "EXTERNAL"}
     if source == "MANUAL" or expected["function"] != ("LIST" if is_list else "CC"):
         raise LoadError("unsupported_live_scope", "Observation is limited to the four Contributor Trigger trials.")
@@ -744,8 +860,9 @@ def execute_trigger_observation(*, mode, resource, backend, model_id, expected, 
                                "CURR:SLEW:POS?", "CURR:SLEW:NEG?", "CURR:TRAN:AWID?"])],
                 "observation_seconds": seconds}
     now = monotonic_ns()
+    command_seconds = min(seconds + (TIMER_GUARD_ALLOWANCE_S if source == "TIMER" else 0), 30)
     if (type(deadline_ns) is not int or deadline_ns <= now
-            or deadline_ns - now > min(seconds, 30) * 10**9):
+            or deadline_ns - now > command_seconds * 10**9):
         raise LoadError("argument_error", "A current, bounded observation deadline is required.")
     # The script owns the existing powered trial and OFF reserve. This command
     # never switches Input ON/OFF or starts a second VISA session.
@@ -753,6 +870,7 @@ def execute_trigger_observation(*, mode, resource, backend, model_id, expected, 
     phase = "preflight"
     write_attempted = False
     write_confirmed = False
+    baseline_class = None
     try:
         with open_request_session(resource, asrl, c.open_session) as (session, runtime):
             require_trusted_session(session)
@@ -780,6 +898,10 @@ def execute_trigger_observation(*, mode, resource, backend, model_id, expected, 
                 c._write(session, "SYST:REM")
                 guard()
             started = monotonic_ns()
+            if source == "TIMER":
+                # Guard/startup time is not evidence of a complete pulse.
+                # Keep the caller hard deadline and cap the actual sample window.
+                deadline_ns = min(deadline_ns, started + seconds * 10**9)
 
             def list_condition():
                 # IT8800 Programming Guide V2.1 p.15, RUN bit 7 of the
@@ -819,6 +941,13 @@ def execute_trigger_observation(*, mode, resource, backend, model_id, expected, 
                 fixed_baseline = c._decimal_readback(session, "CURR?")
                 if not Decimal(0) <= fixed_baseline <= Decimal(2):
                     raise LoadError("unsafe_mode", "HOLD fixed CC baseline exceeds the observation ceiling.")
+                baseline_class = ("zero" if fixed_baseline == 0 else
+                                  "level_a" if fixed_baseline == levels["level_a"] else
+                                  "level_b" if fixed_baseline == levels["level_b"] else "other")
+                if (fixed_baseline in (levels["level_a"], levels["level_b"])
+                        or (required_baseline is not None and fixed_baseline != required_baseline)):
+                    raise LoadError("trigger_observation_unconfirmed",
+                                    "HOLD Fixed CC baseline is not distinguishable or authorized.", 3)
                 loaded_voltage = _number(session, "MEAS:VOLT?")
                 von_threshold = _number(session, "VOLT:ON?")
                 condition = _condition(session)
@@ -865,6 +994,8 @@ def execute_trigger_observation(*, mode, resource, backend, model_id, expected, 
                 evidence = sampled_waveform_evidence(samples, source=source,
                                                      baseline_current=fixed_baseline, **levels)
                 if evidence is not None:
+                    if baseline_class is not None:
+                        evidence["fixed_baseline_class"] = baseline_class
                     _require_trigger_input_on(session, None, "Trigger observation")
                     if monotonic_ns() >= deadline_ns:
                         break
@@ -883,6 +1014,8 @@ def execute_trigger_observation(*, mode, resource, backend, model_id, expected, 
                            software_trigger_write_attempted=write_attempted,
                            software_trigger_write_confirmed=write_confirmed,
                            sample_count=len(samples), samples=samples)
+        if baseline_class is not None:
+            exc.details["fixed_baseline_class"] = baseline_class
         raise
 
 

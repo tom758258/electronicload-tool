@@ -1214,7 +1214,7 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
             count: int | None = None, vdrop: object | None = None,
             trigger_source: str | None = None, trigger_interval: object | None = None,
             timer_on_write_started: Callable[[int], None] | None = None,
-            asrl=None) -> dict:
+            on_trigger_fixed_baseline=None, asrl=None) -> dict:
     if command not in CONTROL_COMMANDS or mode not in {"live", "simulate", "dry-run"}:
         raise LoadError("argument_error", "Unknown control command or mode.")
     if model_id != MODEL_ID:
@@ -1235,6 +1235,18 @@ def execute(command: str, *, mode: str = "live", resource: str | None = None,
             raise LoadError("argument_error", "Readback validation accepts only status commands without arguments.")
         return execute_readback(command, mode=mode, resource=resource,
                                 hardware_validation=hardware_validation, asrl=asrl)
+    if command == "set-cc" and hardware_validation == "trigger":
+        if confirmed or any(value is not None for value in (voltage, resistance, power,
+                transient, list_configuration, slot, rise_slew, fall_slew, latch, seconds,
+                count, vdrop, trigger_source, trigger_interval)):
+            raise LoadError("argument_error", "Unexpected Trigger Fixed CC arguments.")
+        from .hardware_validation import execute_trigger_fixed_cc
+
+        return execute_trigger_fixed_cc(
+            mode=mode, resource=resource, current=current, range_name=range_name,
+            expected=validation_settings, stop=stop, asrl=asrl,
+            on_baseline=on_trigger_fixed_baseline,
+        )
     if command in TRIGGER_COMMANDS or hardware_validation == "trigger":
         if any(value is not None for value in (current, voltage, resistance, power,
                 range_name, slot, rise_slew, fall_slew, latch, seconds, count, vdrop)):
